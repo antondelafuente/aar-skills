@@ -67,6 +67,8 @@ def pod_env():
     e = {"PUBLIC_KEY": PUBLIC_KEY}
     if env("RCLONE_CONF_B64"):
         e["RCLONE_CONF_B64"] = env("RCLONE_CONF_B64")
+    if env("RCLONE_REMOTE") and env("RCLONE_REMOTE") != "skip":
+        e["RCLONE_REMOTE"] = env("RCLONE_REMOTE")
     for var in (env("PASS_ENV", "") or "").split(","):
         var = var.strip()
         if var and env(var):

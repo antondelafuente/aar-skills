@@ -6,8 +6,10 @@ description: Adversarially fact-check load-bearing claims against primary record
 # verify-claims — don't check your own claims
 
 An agent cannot reliably catch its own wrong claims: whoever wrote a claim believes it, and
-whoever received it was told it's true. This skill routes claims to an adversarial reader from
-a DIFFERENT model family that sees ONLY the primary records.
+whoever received it was told it's true. This skill routes claims to a FRESH adversarial verifier that sees ONLY the primary records —
+a different model family when your main agent isn't Codex (the default verifier). If your main
+agent IS Codex, set VERIFIER_CMD to a different-family CLI for family independence; a fresh
+zero-context instance still gives you context independence either way.
 
 ## When to invoke
 

@@ -27,8 +27,11 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
    — survives SSH close, verifies the job actually started (a "launched" echo proves the
    wrapper ran, not the job). Write the job script to be idempotent and to print progress.
 4. **Arm the watchdog the moment the job is launched:** `scripts/watchdog.sh <pod-id> <ip>
-   <port> [grace]` — if you stop paying attention, the pod still gets deleted. A job that
-   needs more time writes a UTC timestamp to `/workspace/.keepalive_until_utc`.
+   <port> [grace]` — if you stop paying attention, the pod still gets deleted. NOTE its
+   semantics: it is a **TTL / dead-man timer, not idle detection** — it fires after the grace
+   period unless `/workspace/.keepalive_until_utc` holds a future UTC timestamp. A long job
+   must REFRESH that file periodically (e.g. each epoch), or set grace ≥ expected runtime +
+   margin; otherwise a healthy job gets killed on schedule.
 5. **Persist + VERIFY:** the job's last act is `rclone copy <outputs> <remote>/<job>/`;
    before teardown, verify EVERY unique artifact is in the store (`rclone lsf` the
    directory and check the final artifact's bytes — never trust a zero-byte done-marker).
