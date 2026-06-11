@@ -4,8 +4,10 @@
 Config: ~/.config/gpu-job/env (KEY=VAL lines, written by gpu_job_init.sh); process env
 overrides. Required: RUNPOD_API_KEY, SSH_PUBLIC_KEY. Knobs (env): GPU_TYPE (default
 "NVIDIA H200"), GPU_COUNT (1), DISK_GB (220), POD_NAME ("gpu-job"), IMAGE, TEMPLATE_ID,
-DATA_CENTERS (comma list; overrides tiered retry), VOLUME_ID (network volume; requires
-DATA_CENTERS), PASS_ENV (comma list of extra var names to inject into the pod's env).
+DATA_CENTERS (comma list, or "all" = every known DC; overrides tiered retry), VOLUME_ID
+(network volume; requires DATA_CENTERS), RETRY_MINUTES (keep retrying ~3-min cycles until
+stock appears or the deadline passes — scarce multi-GPU stock can take an hour; default 0 =
+single pass), PASS_ENV (comma list of extra var names to inject into the pod's env).
 If RCLONE_CONF_B64 is set (by init, from your rclone.conf remote), it is injected so the
 pod can read/write your artifact store.
 
@@ -91,22 +93,34 @@ def deploy():
     if env("VOLUME_ID"):
         base["networkVolumeId"] = env("VOLUME_ID")
         del base["volumeInGb"]
-    if env("DATA_CENTERS"):
+    if env("DATA_CENTERS") == "all":
+        tiers = [[dc for tier in TIERS for dc in tier]]
+    elif env("DATA_CENTERS"):
         tiers = [env("DATA_CENTERS").split(",")]
     elif env("VOLUME_ID"):
         raise SystemExit("VOLUME_ID set but no DATA_CENTERS — a network volume is region-locked; pass its region")
     else:
         tiers = TIERS
-    for tier in tiers:
-        st, resp = post_rest("/pods", dict(base, dataCenterIds=tier))
-        print(f"[deploy] tier {tier[:2]}... -> HTTP {st}", flush=True)
-        if st in (200, 201):
-            pid = resp.get("id") or resp.get("podId")
-            print(f"[deploy] OK pod={pid} dc={resp.get('machine',{}).get('dataCenterId','?')} "
-                  f"costPerHr={resp.get('costPerHr','?')}", flush=True)
-            return pid
-        print(f"  no go: {str(resp)[:160]}", flush=True)
-    raise SystemExit("[deploy] no stock in any tier")
+    deadline = time.time() + 60 * int(env("RETRY_MINUTES", "0"))
+    attempt = 0
+    while True:
+        attempt += 1
+        for tier in tiers:
+            st, resp = post_rest("/pods", dict(base, dataCenterIds=tier))
+            print(f"[deploy] attempt {attempt} tier {tier[:2]}... -> HTTP {st}", flush=True)
+            if st in (200, 201):
+                pid = resp.get("id") or resp.get("podId")
+                print(f"[deploy] OK pod={pid} dc={resp.get('machine',{}).get('dataCenterId','?')} "
+                      f"costPerHr={resp.get('costPerHr','?')}", flush=True)
+                return pid
+            print(f"  no go: {str(resp)[:160]}", flush=True)
+        if time.time() >= deadline:
+            raise SystemExit("[deploy] no stock in any tier"
+                             + (f" after {attempt} attempts" if attempt > 1 else "")
+                             + " (set RETRY_MINUTES=N to keep trying)")
+        print(f"[deploy] no stock; retrying in 3 min "
+              f"({int((deadline - time.time()) / 60)} min left)", flush=True)
+        time.sleep(180)
 
 
 def wait_ssh(pid):

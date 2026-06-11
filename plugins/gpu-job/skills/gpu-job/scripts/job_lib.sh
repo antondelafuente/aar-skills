@@ -112,3 +112,16 @@ wait_r2(){ # wait_r2 <r2-dir> <name> [interval=60] — block until the object li
   local dir=$1 name=$2 iv=${3:-60}
   while ! rclone lsf "$dir/" 2>/dev/null | grep -qx "$name"; do sleep "$iv"; done
 }
+
+# --- disk janitor -----------------------------------------------------------------------
+# Incident (2026-06-11): verl at save_steps=1 dumps ~16GB full-FSDP .pt per checkpoint beside
+# a 253MB adapter — disk hit 100% and torch.save died mid-write. Generic pattern: training
+# frameworks that emit huge intermediates need a bounded-disk sweeper DURING the run.
+
+ckpt_janitor(){ # ckpt_janitor <dir> <glob> [age-min=2] [interval=30] — detached loop deleting
+                # matching files older than age-min (the age guard avoids mid-write deletion).
+                # Returns the janitor PID; kill_tree it when training ends.
+  local dir=$1 glob=$2 age=${3:-2} iv=${4:-30}
+  ( while true; do find "$dir" -name "$glob" -mmin +"$age" -delete 2>/dev/null; sleep "$iv"; done ) &
+  echo $!
+}

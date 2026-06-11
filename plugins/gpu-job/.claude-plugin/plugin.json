@@ -1,6 +1,6 @@
 {
   "name": "gpu-job",
   "description": "Disposable cloud GPU pods for coding agents: deploy, run detached, persist artifacts, verified teardown",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "author": { "name": "Anton de la Fuente" }
 }
