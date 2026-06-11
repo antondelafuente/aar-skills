@@ -2,7 +2,8 @@
 
 This repo is the PRODUCT: modular agent skills, developed here in their public shape even
 while the repo is private. The lab's orchestrator repo is the INSTANCE — it consumes this
-repo via symlinks/plugin installs and never the reverse.
+repo via symlinks/plugin installs and never the reverse. The instance-side transition map
+(what migrates next, gates, current state) lives at the lab's orchestrator/PRODUCT_TRANSITION.md.
 
 ## Rules
 
