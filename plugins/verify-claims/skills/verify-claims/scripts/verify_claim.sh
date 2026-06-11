@@ -49,9 +49,11 @@ SUMMARY: confirm=<n> dispute=<n> unknown=<n>
 THE CLAIMS:
 $(cat "$CLAIMS")"
 
-VERIFIER_CMD=${VERIFIER_CMD:-"codex exec --sandbox read-only --cd \"$EVIDENCE\" -o \"$OUT\""}
+VERIFIER_CMD=${VERIFIER_CMD:-"codex exec --sandbox read-only --skip-git-repo-check --cd \"$EVIDENCE\" -o \"$OUT\""}
 echo "[verify_claim] evidence=$EVIDENCE claims=$CLAIMS" >&2
-eval "$VERIFIER_CMD" <<< "$PROMPT" >/dev/null 2>&1 || { echo "BLOCKED: verifier run failed" >&2; exit 1; }
+eval "$VERIFIER_CMD" <<< "$PROMPT" >"$OUT.run.log" 2>&1 || {
+  echo "BLOCKED: verifier run failed — last lines of $OUT.run.log:" >&2
+  tail -5 "$OUT.run.log" >&2; exit 1; }
 [ -s "$OUT" ] || { echo "BLOCKED: verifier produced no verdict" >&2; exit 1; }
 echo "[verify_claim] verdict -> $OUT" >&2
 grep -E "^CLAIM|^SUMMARY" "$OUT" || true
