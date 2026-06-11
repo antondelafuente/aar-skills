@@ -1,0 +1,19 @@
+{
+  "name": "aar-skills",
+  "owner": { "name": "Anton de la Fuente" },
+  "metadata": {
+    "description": "Modular research-agent skills: remote GPU jobs, adversarial claim verification. Extracted from a working autonomous-research lab."
+  },
+  "plugins": [
+    {
+      "name": "gpu-job",
+      "source": "./plugins/gpu-job",
+      "description": "Give your coding agent GPU powers: disposable cloud GPU pods with your environment restored, detached job execution, artifact persistence, verified teardown (never bill an idle GPU). Backend: RunPod."
+    },
+    {
+      "name": "verify-claims",
+      "source": "./plugins/verify-claims",
+      "description": "Adversarial fact-checking of load-bearing claims against primary records by an independent model (read-only sandboxed). Catches the confidently-wrong-number class before money or conclusions move."
+    }
+  ]
+}
