@@ -40,3 +40,31 @@ zero-context instance still gives you context independence either way.
   dir, writes its final answer to the out-file).
 - Calibration provenance: see `references/CALIBRATION.md` — replayed three real research-ops
   incidents as planted errors; 3/3 caught with correct citations, 0 false disputes on 7 controls.
+
+
+## Audit mode — the output-side gate (`audit_experiment.sh`)
+
+The sibling script audits a *finished experiment* rather than checking a given claim list. Where
+`verify_claim.sh` is the INPUT gate (pre-launch: are the brief's load-bearing claims supported?),
+`audit_experiment.sh` is the OUTPUT gate (at close: does the finished work meet the AAR's own
+standards?). Same principle — a foreign model family reads the records you're too invested to judge.
+
+```
+scripts/audit_experiment.sh ~/orchestrator/<exp>          # -> <exp>/AUDIT.md
+```
+
+It hands the auditor the experiment dir + the AAR constitution (`~/AGENTS.md`) and a six-dimension
+rubric — reproducibility (did committed code make the headline numbers?), claim-vs-evidence
+(overreach?), confounds/validity (matched comparisons, missing controls?), conclusions-vs-postdictions,
+records self-sufficiency (reproducible *from this dir alone*?), honest bounds. Output: severity-rated
+FINDINGs with record citations, plus the dimensions where it found nothing material. "No material
+finding" is allowed and common — it does not cry wolf (same calibration discipline as the claim
+checker; validated 2026-06-12 catching a repro gap + in-sample steering + overclaim from a cold read,
+zero false findings).
+
+**Cross-family selection.** Default verifier = Codex (read-only). On a Codex AAR, set
+`AUDIT_VERIFIER_CMD='claude -p …'` so the auditor is always the OTHER family from whoever ran the work.
+
+**This is wired into the run-experiment close** — run it before clearing the self-wake and respond
+to every finding (fix, or a one-line `RESPONSE:` accepting/deferring with a reason). HIGH findings
+get fixed or explicitly justified.
