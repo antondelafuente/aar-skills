@@ -7,7 +7,8 @@
 set -u
 PID=${1:?} IP=${2:?} PORT=${3:?} GRACE=${4:-1200}
 KEY_FILE=$(grep -E "^SSH_KEY_FILE=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2- || echo ~/.ssh/id_ed25519)
-API_KEY=$(grep -E "^RUNPOD_API_KEY=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2-)
+KEY_NAME=$(grep -E "^API_KEY_ENV=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2-); KEY_NAME="${API_KEY_ENV:-${KEY_NAME:-RUNPOD_API_KEY}}"
+API_KEY=$(grep -E "^$KEY_NAME=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2-)
 cat > /tmp/gpu_job_watchdog_$PID.sh <<EOS
 sleep $GRACE
 u=\$(ssh -i $KEY_FILE -p $PORT -o StrictHostKeyChecking=no -o ConnectTimeout=15 root@$IP 'cat /workspace/.keepalive_until_utc 2>/dev/null')

@@ -7,7 +7,8 @@
 # never blanket-delete (parallel runs own their own pods).
 set -euo pipefail
 PID=${1:?pod id}
-KEY=$(grep -E "^RUNPOD_API_KEY=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2- || echo "${RUNPOD_API_KEY:?}")
+KEY_NAME=$(grep -E "^API_KEY_ENV=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2-); KEY_NAME="${API_KEY_ENV:-${KEY_NAME:-RUNPOD_API_KEY}}"
+KEY=$(grep -E "^$KEY_NAME=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2- || eval echo "\${$KEY_NAME:?}")
 curl -s -X DELETE -H "Authorization: Bearer $KEY" -H "User-Agent: gpu-job" \
   "https://rest.runpod.io/v1/pods/$PID" >/dev/null && echo "deleted $PID"
 echo "still RUNNING (verify these are yours and intended):"

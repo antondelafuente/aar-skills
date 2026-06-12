@@ -2,7 +2,7 @@
 """gpu-job: deploy a disposable GPU pod (RunPod backend) and wait for direct SSH.
 
 Config: ~/.config/gpu-job/env (KEY=VAL lines, written by gpu_job_init.sh); process env
-overrides. Required: RUNPOD_API_KEY, SSH_PUBLIC_KEY. Knobs (env): GPU_TYPE (default
+overrides. Required: RUNPOD_API_KEY (or API_KEY_ENV=<var name> to read another), SSH_PUBLIC_KEY. Knobs (env): GPU_TYPE (default
 "NVIDIA H200"), GPU_COUNT (1), DISK_GB (220), POD_NAME ("gpu-job"), IMAGE, TEMPLATE_ID,
 DATA_CENTERS (comma list, or "all" = every known DC; overrides tiered retry), VOLUME_ID
 (network volume; requires DATA_CENTERS), RETRY_MINUTES (keep retrying ~3-min cycles until
@@ -37,7 +37,12 @@ def env(key, default=None, required=False):
     return default
 
 
-KEY = env("RUNPOD_API_KEY", required=True)
+# API_KEY_ENV names the variable holding the key (default RUNPOD_API_KEY). The indirection
+# exists for multi-account instances: a sourced .env exporting RUNPOD_API_KEY would otherwise
+# silently override the config and deploy to the wrong account (real incident: a research pod
+# billed to a personal account, and teardown-by-the-other-key 404'd, masquerading as deleted).
+KEY_NAME = env("API_KEY_ENV", default="RUNPOD_API_KEY")
+KEY = env(KEY_NAME, required=True)
 PUBLIC_KEY = env("SSH_PUBLIC_KEY", required=True)
 TIERS = [["US-CA-2", "US-WA-1"],
          ["US-TX-1", "US-TX-3", "US-TX-4", "US-KS-2", "US-KS-3", "US-IL-1"],
