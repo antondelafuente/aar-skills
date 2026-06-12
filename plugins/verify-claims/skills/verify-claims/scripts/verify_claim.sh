@@ -49,11 +49,14 @@ SUMMARY: confirm=<n> dispute=<n> unknown=<n>
 THE CLAIMS:
 $(cat "$CLAIMS")"
 
-VERIFIER_CMD=${VERIFIER_CMD:-"codex exec --sandbox read-only --skip-git-repo-check --cd \"$EVIDENCE\" -o \"$OUT\""}
+# stale-output guard: write to a temp file, atomic-mv only on success — never reuse a prior $OUT.
+OUT_TMP="$(mktemp "${TMPDIR:-/tmp}/verify.XXXXXX.md")"
+VERIFIER_CMD=${VERIFIER_CMD:-"codex exec --sandbox read-only --skip-git-repo-check --cd \"$EVIDENCE\" -o \"$OUT_TMP\""}
 echo "[verify_claim] evidence=$EVIDENCE claims=$CLAIMS" >&2
-eval "$VERIFIER_CMD" <<< "$PROMPT" >"$OUT.run.log" 2>&1 || {
+if ! eval "$VERIFIER_CMD" <<< "$PROMPT" >"$OUT.run.log" 2>&1; then
   echo "BLOCKED: verifier run failed — last lines of $OUT.run.log:" >&2
-  tail -5 "$OUT.run.log" >&2; exit 1; }
-[ -s "$OUT" ] || { echo "BLOCKED: verifier produced no verdict" >&2; exit 1; }
+  tail -5 "$OUT.run.log" >&2; rm -f "$OUT_TMP"; exit 1; fi
+[ -s "$OUT_TMP" ] || { echo "BLOCKED: verifier produced no verdict (stale $OUT NOT reused)" >&2; rm -f "$OUT_TMP"; exit 1; }
+mv "$OUT_TMP" "$OUT"
 echo "[verify_claim] verdict -> $OUT" >&2
 grep -E "^CLAIM|^SUMMARY" "$OUT" || true
