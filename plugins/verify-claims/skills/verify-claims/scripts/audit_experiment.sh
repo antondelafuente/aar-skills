@@ -17,15 +17,30 @@
 # claim overreach) PLUS two more, with zero false findings. Hardened 2026-06-12 (audit-the-auditor):
 # stale-output guard, cross-family enforcement, DATA SANITY dimension, durable-vs-committed wording.
 #
-# Usage: audit_experiment.sh <experiment-dir> [out-file]
+# Usage: audit_experiment.sh <experiment-dir> [out-file]              # close-side (post-hoc) audit
+#        audit_experiment.sh --design <experiment-dir> [design-file] [out-file]   # PRE-LAUNCH design audit
 #   experiment-dir: the ~/orchestrator/<exp>/ dir to audit (read-only; the auditor sees its files)
-#   out-file:       findings destination (default: <experiment-dir>/AUDIT.md)
+#   out-file:       findings destination (default: <experiment-dir>/AUDIT.md, or DESIGN_AUDIT.md in --design mode)
+#   design-file:    (--design mode) the proposal to audit; default = newest DESIGN*.md in the dir
+# --design audits the PROPOSAL before any money/GPU moves (third gate alongside verify_claim
+# pre-launch and the close audit): confounds & missing controls, comparability traps,
+# pre-registration completeness, claim-scope, power, cheaper-decisive alternatives. Motivated by
+# midtrain-interp v2, whose two real flaws (in-sample steering eval; no random-direction control)
+# were DESIGN flaws only caught at close.
 # Env: AAR_SUBSTRATE=claude|codex (family that ran the exp; default claude — set in instance config)
 #      AUDIT_VERIFIER_CMD=...      (override the auditor; must be a DIFFERENT family than AAR_SUBSTRATE)
 #      AUDIT_CONSTITUTION=path     (the standards file; default ~/AGENTS.md)
 set -euo pipefail
-EXP=${1:?usage: audit_experiment.sh <experiment-dir> [out-file]}
-OUT=${2:-${EXP%/}/AUDIT.md}
+MODE=close
+if [ "${1:-}" = "--design" ]; then MODE=design; shift; fi
+EXP=${1:?usage: audit_experiment.sh [--design] <experiment-dir> [args...]}
+if [ "$MODE" = design ]; then
+  DESIGN_FILE=${2:-$(ls -t "${EXP%/}"/DESIGN*.md 2>/dev/null | head -1)}
+  [ -n "$DESIGN_FILE" ] && [ -f "$DESIGN_FILE" ] || { echo "BLOCKED: no design file found in $EXP (pass one explicitly)" >&2; exit 1; }
+  OUT=${3:-${EXP%/}/DESIGN_AUDIT.md}
+else
+  OUT=${2:-${EXP%/}/AUDIT.md}
+fi
 [ -d "$EXP" ] || { echo "BLOCKED: experiment dir missing: $EXP" >&2; exit 1; }
 
 # --- cross-family enforcement (FINDING 2) -------------------------------------------------------
@@ -48,6 +63,52 @@ CONSTITUTION=${AUDIT_CONSTITUTION:-$HOME/AGENTS.md}
 CONSTI_TEXT=""
 [ -f "$CONSTITUTION" ] && CONSTI_TEXT=$(cat "$CONSTITUTION")
 
+if [ "$MODE" = design ]; then
+PROMPT="You are an INDEPENDENT ADVERSARIAL REVIEWER from a different model family than the agent that
+wrote this experiment PROPOSAL. Nothing has been run yet; your job is to find the flaws BEFORE money
+and GPU time move. The proposal under review is: $(basename "$DESIGN_FILE") (in the current directory).
+Read it in full; read other files in the dir tree for context (prior RESULTS*.md, AUDIT.md, code)
+— prior experiments' flaws often reveal what the new design must control for.
+
+Review against the program's constitution (below). The most load-bearing standards: validity and
+comparability are the main failure mode ('are these two numbers even on the same scale?'); success
+criteria and falsifiers must be pre-registered BEFORE the run; conclusions must be distinguishable
+from postdictions by design; the silent failure mode is a clean pipeline producing a
+confidently-wrong number.
+
+Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say
+'no material finding' for it — do NOT invent issues. False findings destroy this tool's value.
+1. CONFOUNDS / MISSING CONTROLS — are the planned comparisons matched; are the baselines and
+   negative controls (random/orthogonal/shuffled class, placebo arms) IN THE PLAN, not deferred?
+2. VALIDITY / COMPARABILITY — will any two numbers being compared be on the same scale, same metric,
+   same data distribution? Any train/eval leakage, probe contamination, or selection effect built
+   into the construction?
+3. PRE-REGISTRATION COMPLETENESS — are success criteria AND falsifiers stated with thresholds? Is
+   every plausible outcome interpretable (no 'heads I win, tails ambiguous' designs)? Are
+   hyperparameter/selection steps confined to fit data?
+4. CLAIM-SCOPE — will the planned evidence actually license the claim the design says it is after
+   (causal strength, generality, storage-vs-routing, in-sample-vs-held-out)? Quote the claim and the
+   evidence that falls short.
+5. POWER / SENSITIVITY — n, seeds, effect sizes: can the design distinguish its hypotheses at the
+   planned sample sizes, or will results land inside the noise band?
+6. EXECUTION UNDER-SPECIFICATION — steps a zero-context executor would have to guess (datasets,
+   composition of checkpoints, prompt formats, thresholds), where a wrong guess silently changes
+   the result.
+7. CHEAPER / MORE DECISIVE ALTERNATIVE — is there a materially cheaper design answering the same
+   question, or a small addition that turns a suggestive result into a decisive one?
+
+Output format (exactly), most severe first:
+FINDING <n>: <HIGH|MED|LOW> [<dimension>]
+  issue: <one sentence>
+  evidence: <file>: \"<short quote or precise reference>\"
+  recommendation: <one sentence>
+...
+NO-FINDING DIMENSIONS: <list any dimension where you found nothing material>
+SUMMARY: high=<n> med=<n> low=<n>
+
+=== THE PROGRAM CONSTITUTION (audit against this) ===
+$CONSTI_TEXT"
+else
 PROMPT="You are an INDEPENDENT ADVERSARIAL AUDITOR from a different model family than the agent that
 ran this experiment. You are auditing a COMPLETED autonomous-research experiment before it is treated
 as 'done'. Read any file in the current directory tree (grep/head as needed; some logs are large).
@@ -89,11 +150,12 @@ SUMMARY: high=<n> med=<n> low=<n>
 
 === THE PROGRAM CONSTITUTION (audit against this) ===
 $CONSTI_TEXT"
+fi
 
 # --- run, with stale-output guard (FINDING 1): write to a temp file, atomic-mv only on success ----
 OUT_TMP="$(mktemp "${TMPDIR:-/tmp}/audit.XXXXXX.md")"
 VERIFIER_CMD=${AUDIT_VERIFIER_CMD:-"codex exec --sandbox read-only --skip-git-repo-check --cd \"$EXP\" -o \"$OUT_TMP\""}
-echo "[audit_experiment] exp=$EXP auditor=$AUDITOR_FAMILY runner=$RUNNER_FAMILY" >&2
+echo "[audit_experiment] mode=$MODE exp=$EXP auditor=$AUDITOR_FAMILY runner=$RUNNER_FAMILY" >&2
 if ! eval "$VERIFIER_CMD" <<< "$PROMPT" >"$OUT.run.log" 2>&1; then
   echo "BLOCKED: auditor run failed — last lines of $OUT.run.log:" >&2; tail -5 "$OUT.run.log" >&2
   rm -f "$OUT_TMP"; exit 1; fi
