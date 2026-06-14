@@ -157,7 +157,7 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    sweeps) stated?
 
 PRIOR-ROUND DEBATE (when this is a RE-RUN on a revised dir): if the dir contains the author's RESPONSES
-to earlier findings (`RESPONSE:` lines, an audit-response section, a later AUDIT*.md), this is a PEER
+to earlier findings ('RESPONSE:' lines, an audit-response section, a later AUDIT2.md), this is a PEER
 DEBATE, not a fresh scan — converge on the BIG, OBVIOUS validity flaws (a confidently-wrong number, an
 overclaim, an unreproducible headline), NOT a maximal finding count. CONCEDE findings the responses
 adequately resolve (don't re-raise); ESCALATE only when a response is wrong/insufficient (quote it, say
