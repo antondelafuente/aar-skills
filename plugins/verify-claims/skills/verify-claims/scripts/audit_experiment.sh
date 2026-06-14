@@ -68,7 +68,9 @@ PROMPT="You are an INDEPENDENT ADVERSARIAL REVIEWER from a different model famil
 wrote this experiment PROPOSAL. Nothing has been run yet; your job is to find the flaws BEFORE money
 and GPU time move. The proposal under review is: $(basename "$DESIGN_FILE") (in the current directory).
 Read it in full; read other files in the dir tree for context (prior RESULTS*.md, AUDIT.md, code)
-— prior experiments' flaws often reveal what the new design must control for.
+— prior experiments' flaws often reveal what the new design must control for. IGNORE operational/state
+files (LOOK_AGAIN.md, *.log, driver logs, CLAIMED_BY, .done markers): they describe the RUN's status, not
+the design — never raise a finding from them (e.g. 'the run already launched' is not a design flaw).
 
 Review against the program's constitution (below). The most load-bearing standards: validity and
 comparability are the main failure mode ('are these two numbers even on the same scale?'); success
@@ -96,6 +98,21 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    the result.
 7. CHEAPER / MORE DECISIVE ALTERNATIVE — is there a materially cheaper design answering the same
    question, or a small addition that turns a suggestive result into a decisive one?
+
+PRIOR-ROUND DEBATE (when this is a RE-RUN on a revised proposal): if the proposal contains the author's
+RESPONSES to earlier findings (e.g. a 'Design-audit responses' / pass-N section), this is a PEER DEBATE,
+not a fresh scan. You and the author are two minds converging on the BIG, OBVIOUS design flaws —
+confounds, missing controls, comparability traps that change what the result MEANS — NOT maximizing a
+finding count. For each prior finding: CONCEDE the ones the response adequately resolves (do NOT
+re-raise them); ESCALATE only when the response is wrong or insufficient (quote it, say why it still
+fails); otherwise raise only GENUINELY NEW flaws. On a re-run, polish / wording / threshold-calibration
+are NOT findings unless they change a conclusion. Reporting 'no new material finding' is a GOOD,
+expected outcome once the big flaws are addressed — that is how the debate converges.
+
+VERIFY DATA-BACKED ASSUMPTIONS: where the design leans on a property of the ACTUAL data (number of
+classes/biases/strata, available n, label balance) and that data is accessible (a file in the dir, or
+the cited HF/source you can inspect), CHECK it rather than trusting the prose — a design that assumes
+many strata when the data has few is a power flaw the document alone won't reveal.
 
 Output format (exactly), most severe first:
 FINDING <n>: <HIGH|MED|LOW> [<dimension>]
@@ -138,6 +155,14 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    (are the decisive artifacts/probes/logs present, not only referenced on remote storage)?
 7. HONEST BOUNDS — are the real limitations (n, single model/organism, in-sample fits, selected
    sweeps) stated?
+
+PRIOR-ROUND DEBATE (when this is a RE-RUN on a revised dir): if the dir contains the author's RESPONSES
+to earlier findings (`RESPONSE:` lines, an audit-response section, a later AUDIT*.md), this is a PEER
+DEBATE, not a fresh scan — converge on the BIG, OBVIOUS validity flaws (a confidently-wrong number, an
+overclaim, an unreproducible headline), NOT a maximal finding count. CONCEDE findings the responses
+adequately resolve (don't re-raise); ESCALATE only when a response is wrong/insufficient (quote it, say
+why); otherwise raise only GENUINELY NEW flaws. Polish/wording are not findings on a re-run unless they
+change a conclusion. 'No new material finding' is a GOOD, expected convergence outcome.
 
 Output format (exactly), most severe first:
 FINDING <n>: <HIGH|MED|LOW> [<dimension>]
