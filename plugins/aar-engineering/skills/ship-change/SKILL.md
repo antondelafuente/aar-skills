@@ -49,7 +49,7 @@ Outcomes:
   1. **HIGH** → fix it. Edit the change on the branch (use a git worktree so the shared `main` checkout
      isn't disturbed: `git worktree add /tmp/wt <branch>`, edit, commit, push, remove the worktree).
   2. **MED/LOW** → fix, or respond on the PR (`gh pr comment`) with an accept/defer + reason.
-  3. Then **re-review the UPDATED diff before merging**: `scripts/ship_change.sh remerge <repo> <branch> <pr>`
+  3. Then **re-review the UPDATED diff before merging**: `scripts/ship_change.sh remerge <repo> <author> <branch> <pr>`
      — it re-runs the checks, re-runs `--code` on the new diff, and merges iff no HIGH remains.
   Do NOT merge around the engine; the re-review-after-fix is the point.
 

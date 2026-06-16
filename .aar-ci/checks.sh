@@ -37,7 +37,8 @@ for plugdir in $(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#(plu
   nonmanifest=$(printf '%s\n' "${PATHS[@]}" | grep "^$plugdir/" | grep -v '\.claude-plugin/plugin.json' || true)
   [ -n "$nonmanifest" ] || continue
   pj="$plugdir/.claude-plugin/plugin.json"
-  if git diff HEAD -- "$pj" 2>/dev/null | grep -q '"version"'; then ok "version bumped: $pj"
+  # zero-context diff: only an ACTUALLY added/changed "version" line counts (a context line must not satisfy it)
+  if git diff -U0 HEAD -- "$pj" 2>/dev/null | grep -qE '^\+[^+].*"version"'; then ok "version bumped: $pj"
   else err "$plugdir changed but $pj version not bumped (consumers would miss the change)"; fi
 done
 

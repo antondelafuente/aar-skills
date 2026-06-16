@@ -9,7 +9,7 @@
 #
 # Usage:
 #   SHIP_MSG="<commit msg>" SHIP_TITLE="<pr title>" ship_change.sh <repo> <author:claude|codex> <path>...
-#   ship_change.sh remerge <repo> <branch> <pr-number>     # re-check + re-review (after fixing findings) + merge
+#   ship_change.sh remerge <repo> <author> <branch> <pr-number>   # re-check + re-review (after fixing findings) + merge
 #
 # Env: AUDIT_EXPERIMENT=<path to verify-claims audit_experiment.sh> (else auto-located from installed plugin)
 #      GH_TOKEN must be set (source ~/.env on this instance). gh must be on PATH.
@@ -90,15 +90,18 @@ post_merge(){   # post_merge <repo> <path>...
 
 # =================================================================================================
 if [ "${1:-}" = "remerge" ]; then
-  REPO=${2:?repo}; BR=${3:?branch}; PR=${4:?pr-number}
-  run_checks "$REPO"   # re-run deterministic checks
-  REV=$(code_review "$REPO" "${SHIP_AUTHOR:-claude}" "$BR")
+  REPO=${2:?repo}; AUTHOR=${3:?'remerge needs the author family: claude|codex'}; BR=${4:?branch}; PR=${5:?pr-number}
+  case "$AUTHOR" in claude|codex) ;; *) die "remerge author must be 'claude' or 'codex' (got '$AUTHOR')";; esac
+  mapfile -t RPATHS < <(git -C "$REPO" diff --name-only "main...$BR")
+  [ ${#RPATHS[@]} -gt 0 ] || die "remerge: branch $BR has no changed paths vs main"
+  run_checks "$REPO" "${RPATHS[@]}"   # re-run deterministic checks on the branch's ACTUAL changed paths
+  REV=$(code_review "$REPO" "$AUTHOR" "$BR")
   H=$(count_high "$REV"); T=$(count_all "$REV")
   note "re-review: $T finding(s), $H HIGH -> $REV"
   [ "$H" = 0 ] || die "re-review still has $H HIGH finding(s) — not merging. See $REV"
   if [ "$T" != 0 ]; then note "NOTE: $T non-HIGH finding(s) remain — merging assumes you responded on the PR (no unresolved HIGH)."; fi
-  ( cd "$REPO" && source ~/.env 2>/dev/null; gh pr merge "$PR" --squash --delete-branch ) || die "merge failed"
-  post_merge "$REPO"; note "MERGED PR #$PR"; exit 0
+  ( cd "$REPO"; gh pr merge "$PR" --squash --delete-branch ) || die "merge failed"
+  post_merge "$REPO" "${RPATHS[@]}"; note "MERGED PR #$PR"; exit 0
 fi
 
 REPO=${1:?usage: SHIP_MSG=.. SHIP_TITLE=.. ship_change.sh <repo> <author> <path>...}
@@ -109,6 +112,11 @@ case "$AUTHOR" in claude|codex) ;; *) die "author must be 'claude' or 'codex' (g
 [ -n "${SHIP_TITLE:-}" ] || die "set SHIP_TITLE to the PR title"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo: $REPO"
 command -v gh >/dev/null || die "gh not on PATH"
+[ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 || die "no GitHub auth — set GH_TOKEN (on this instance: source ~/.env) or 'gh auth login' BEFORE invoking; this script does not source any env file"
+# Preflight the OPPOSITE-family reviewer BEFORE any side effects (no orphan branch/PR on a same-family block):
+if [ "$AUTHOR" = codex ] && [ -z "${AUDIT_VERIFIER_CMD:-}" ]; then
+  die "author=codex needs a Claude reviewer (AUDIT_VERIFIER_CMD), but the Codex->Claude reverse path is a tracked follow-up, not yet wired. Ship Claude-authored changes for now, or set AUDIT_VERIFIER_CMD to a working Claude reviewer."
+fi
 DIRTY_POLICY=strict; [ -f "$REPO/.aar-ci/config" ] && source "$REPO/.aar-ci/config"
 
 guard_clean "$REPO" "$DIRTY_POLICY" "${PATHS[@]}"
@@ -122,8 +130,8 @@ git -C "$REPO" commit -q -m "$SHIP_MSG
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 git -C "$REPO" checkout -q main      # restore the shared checkout to main; change lives on the branch
-( cd "$REPO" && source ~/.env 2>/dev/null; git push -u origin "$BR" -q ) || die "push failed"
-PRURL=$( cd "$REPO" && source ~/.env 2>/dev/null; gh pr create --base main --head "$BR" --title "$SHIP_TITLE" --body "$SHIP_MSG
+( cd "$REPO"; git push -u origin "$BR" -q ) || die "push failed"
+PRURL=$( cd "$REPO"; gh pr create --base main --head "$BR" --title "$SHIP_TITLE" --body "$SHIP_MSG
 
 🤖 ship-change pipeline" ) || die "gh pr create failed"
 PR=$(basename "$PRURL"); note "PR #$PR: $PRURL"
@@ -133,12 +141,12 @@ H=$(count_high "$REV"); T=$(count_all "$REV")
 note "review: $T finding(s), $H HIGH -> $REV"
 if [ "$T" = 0 ]; then
   note "REVIEW CLEAN + checks passed -> auto-merging PR #$PR"
-  ( cd "$REPO" && source ~/.env 2>/dev/null; gh pr merge "$PR" --squash --delete-branch ) || die "auto-merge failed"
+  ( cd "$REPO"; gh pr merge "$PR" --squash --delete-branch ) || die "auto-merge failed"
   post_merge "$REPO" "${PATHS[@]}"
   echo "SHIPPED: PR #$PR auto-merged (clean review)."
 else
   echo "STOP: PR #$PR has $T finding(s) ($H HIGH) — NOT auto-merged. Review: $REV" >&2
   echo "  Agent: triage each (fix in branch $BR via a worktree, or respond on the PR for non-HIGH)," >&2
-  echo "  then: ship_change.sh remerge $REPO $BR $PR  (re-checks + re-reviews the updated diff + merges if no HIGH)." >&2
+  echo "  then: ship_change.sh remerge $REPO $AUTHOR $BR $PR  (re-checks + re-reviews the updated diff + merges if no HIGH)." >&2
   exit 3
 fi
