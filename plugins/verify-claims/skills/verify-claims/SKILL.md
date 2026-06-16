@@ -1,6 +1,6 @@
 ---
 name: verify-claims
-description: Adversarially fact-check load-bearing claims against primary records using an independent model (read-only). Use BEFORE acting on claims that would redefine success/failure if wrong — "X is the baseline", "the original numbers are in file Y", "no checkpoint survives", a methods section's lineage claims — or when the user says "verify these claims", "fact-check this against the records", "is this brief right". Catches the confidently-wrong-number failure mode before money or conclusions move.
+description: Independent cross-family adversarial checks across the experiment lifecycle (the facts→logic→data→evidence ladder), each read by a model family you're too invested to judge. verify_claim — the brief's FACTS ("X is the baseline", "no checkpoint survives", a lineage claim); audit_experiment --design — the design's LOGIC (confounds, missing controls, comparability, power) pre-launch; audit_experiment --data — the actual DATA's sanity vs intent (truncation, leakage, confounds, mislabeling) mid-run; audit_experiment (close) — the result's EVIDENCE (reproducibility, overclaim, postdictions) at close. Use when verifying claims, auditing a design before launch, sanity-checking generated/training/eval data, or auditing a finished experiment — anything where a confidently-wrong number would move money or conclusions.
 ---
 
 # verify-claims — don't check your own claims
@@ -42,29 +42,37 @@ zero-context instance still gives you context independence either way.
   incidents as planted errors; 3/3 caught with correct citations, 0 false disputes on 7 controls.
 
 
-## Audit mode — the output-side gate (`audit_experiment.sh`)
+## Audit modes — the cross-family ladder (`audit_experiment.sh`)
 
-The sibling script audits a *finished experiment* rather than checking a given claim list. Where
-`verify_claim.sh` is the INPUT gate (pre-launch: are the brief's load-bearing claims supported?),
-`audit_experiment.sh` is the OUTPUT gate (at close: does the finished work meet the AAR's own
-standards?). Same principle — a foreign model family reads the records you're too invested to judge.
+`verify_claim.sh` checks a claim list (the FACTS, pre-launch). Its sibling `audit_experiment.sh`
+audits the experiment ITSELF at three points. Together they form the **facts → logic → data →
+evidence** ladder — each rung read by a foreign model family you're too invested to judge:
 
-```
-scripts/audit_experiment.sh ~/orchestrator/<exp>          # -> <exp>/AUDIT.md
-```
+- **`verify_claim.sh` — the brief's FACTS** (pre-launch; above).
+- **`audit_experiment.sh --design <exp> [design-file]`** → `DESIGN_AUDIT.md` — the design's **LOGIC**,
+  PRE-LAUNCH: confounds, missing controls, comparability traps, pre-registration completeness,
+  claim-scope, power, cheaper-decisive alternatives. (Audit once → triage as a peer → surface
+  survivors to the human; on a re-run it's a peer debate, not a fresh scan.)
+- **`audit_experiment.sh --data <exp> <manifest>`** → `DATA_AUDIT.md` — the actual **DATA's sanity**
+  vs the design intent, MID-RUN before train/eval. The SEMANTIC layer: a foreign model reads a
+  STRATIFIED high-risk sample and asks "would this data make the experiment invalid or misleading?"
+  Pairs with the deterministic full-pool layer (`~/orchestrator/pipelines/eval/audit_data.py`:
+  truncation / schema / dupes / balance + the sample). Run on all three data surfaces — training
+  data, eval inputs, and the model-generated eval rollouts. (Motivated by a generated-replay
+  truncation bug — 1160/6457 rows truncated mid-CoT — that a 2-sample self-smoke missed.)
+- **`audit_experiment.sh <exp>`** → `AUDIT.md` — the finished result's **EVIDENCE**, AT CLOSE:
+  reproducibility, claim-vs-evidence, confounds/validity, data sanity, conclusions-vs-postdictions,
+  records self-sufficiency, honest bounds.
 
-It hands the auditor the experiment dir + the AAR constitution (`~/AGENTS.md`) and a six-dimension
-rubric — reproducibility (did committed code make the headline numbers?), claim-vs-evidence
-(overreach?), confounds/validity (matched comparisons, missing controls?), conclusions-vs-postdictions,
-records self-sufficiency (reproducible *from this dir alone*?), honest bounds. Output: severity-rated
-FINDINGs with record citations, plus the dimensions where it found nothing material. "No material
-finding" is allowed and common — it does not cry wolf (same calibration discipline as the claim
-checker; validated 2026-06-12 catching a repro gap + in-sample steering + overclaim from a cold read,
-zero false findings).
+Output (all modes): severity-rated FINDINGs with record citations + the dimensions where nothing
+material was found. "No material finding" is allowed and common — it does NOT cry wolf (same
+calibration discipline as the claim checker; the close mode validated 2026-06-12 catching a repro gap
++ in-sample steering + overclaim from a cold read, zero false findings).
 
 **Cross-family selection.** Default verifier = Codex (read-only). On a Codex AAR, set
 `AUDIT_VERIFIER_CMD='claude -p …'` so the auditor is always the OTHER family from whoever ran the work.
 
-**This is wired into the run-experiment close** — run it before clearing the self-wake and respond
-to every finding (fix, or a one-line `RESPONSE:` accepting/deferring with a reason). HIGH findings
-get fixed or explicitly justified.
+**Wired into the experiment lifecycle:** `--design` at the design stage (the `design-experiment`
+skill), `--data` + close at execution (the `run-experiment` skill) — each via the experiment
+CHECKLIST. Respond to every finding (fix, or a one-line `RESPONSE:` accepting/deferring with a
+reason); HIGH findings get fixed or explicitly justified.

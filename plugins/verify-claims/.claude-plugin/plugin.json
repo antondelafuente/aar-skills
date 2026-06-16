@@ -1,7 +1,7 @@
 {
   "name": "verify-claims",
-  "description": "Independent cross-family adversarial checks across the experiment lifecycle: verify_claim (the brief's FACTS), audit_experiment --design (the design's LOGIC), --data (the actual data's SANITY vs intent), and close (the result's EVIDENCE) — facts→logic→data→evidence, each checked by a foreign model family",
-  "version": "0.4.0",
+  "description": "Independent cross-family adversarial checks across the experiment lifecycle: verify_claim (the brief's FACTS), audit_experiment --design (the design's LOGIC), --data (the actual data's SANITY vs intent), and close (the result's EVIDENCE) \u2014 facts\u2192logic\u2192data\u2192evidence, each checked by a foreign model family",
+  "version": "0.4.1",
   "author": {
     "name": "Anton de la Fuente"
   }
