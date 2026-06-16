@@ -51,8 +51,12 @@ guard_clean(){   # guard_clean <repo> <policy> <path>...
 }
 
 # --- parse findings from a CODE_REVIEW.md --------------------------------------------------------
-count_high(){ grep -cE '^FINDING [0-9]+: HIGH' "$1" 2>/dev/null || true; }
-count_all(){ grep -cE '^FINDING [0-9]+:' "$1" 2>/dev/null || true; }
+# FAIL CLOSED: a malformed/empty review (no valid SUMMARY line) must NOT read as "clean" and auto-merge.
+require_valid_review(){ grep -qE '^SUMMARY: high=[0-9]+ med=[0-9]+ low=[0-9]+' "$1" \
+  || die "code-review output malformed/incomplete (no valid 'SUMMARY: high=.. med=.. low=..') — failing CLOSED, NOT merging. See $1"; }
+# Counts come from the AUTHORITATIVE summary line, not from counting FINDING lines.
+count_high(){ grep -E '^SUMMARY:' "$1" | tail -1 | sed -E 's/.*high=([0-9]+).*/\1/'; }
+count_all(){ local s; s=$(grep -E '^SUMMARY:' "$1" | tail -1); echo $(( $(sed -E 's/.*high=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*med=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*low=([0-9]+).*/\1/'<<<"$s") )); }
 
 # --- run the repo's deterministic checks + behavior smoke ---------------------------------------
 run_checks(){   # run_checks <repo> <path>...
@@ -94,8 +98,13 @@ if [ "${1:-}" = "remerge" ]; then
   case "$AUTHOR" in claude|codex) ;; *) die "remerge author must be 'claude' or 'codex' (got '$AUTHOR')";; esac
   mapfile -t RPATHS < <(git -C "$REPO" diff --name-only "main...$BR")
   [ ${#RPATHS[@]} -gt 0 ] || die "remerge: branch $BR has no changed paths vs main"
-  run_checks "$REPO" "${RPATHS[@]}"   # re-run deterministic checks on the branch's ACTUAL changed paths
-  REV=$(code_review "$REPO" "$AUTHOR" "$BR")
+  # checks must read the BRANCH content (the fix lives on the branch, not the main checkout) — use a worktree
+  WT=$(mktemp -d "${TMPDIR:-/tmp}/ship-remerge.XXXXXX")
+  git -C "$REPO" worktree add -q "$WT" "$BR" || die "remerge: could not check out branch $BR in a worktree"
+  trap 'git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || true' EXIT
+  run_checks "$WT" "${RPATHS[@]}"   # re-run deterministic checks/smoke on the branch's ACTUAL content
+  REV=$(code_review "$WT" "$AUTHOR" "$BR")
+  require_valid_review "$REV"
   H=$(count_high "$REV"); T=$(count_all "$REV")
   note "re-review: $T finding(s), $H HIGH -> $REV"
   [ "$H" = 0 ] || die "re-review still has $H HIGH finding(s) — not merging. See $REV"
@@ -137,6 +146,7 @@ PRURL=$( cd "$REPO"; gh pr create --base main --head "$BR" --title "$SHIP_TITLE"
 PR=$(basename "$PRURL"); note "PR #$PR: $PRURL"
 
 REV=$(code_review "$REPO" "$AUTHOR" "$BR")
+require_valid_review "$REV"
 H=$(count_high "$REV"); T=$(count_all "$REV")
 note "review: $T finding(s), $H HIGH -> $REV"
 if [ "$T" = 0 ]; then

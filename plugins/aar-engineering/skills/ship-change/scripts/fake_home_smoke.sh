@@ -29,7 +29,8 @@ if [ -n "${PDIR:-}" ]; then
   found=0
   for sk in "$PDIR"/skills/*/SKILL.md; do
     [ -f "$sk" ] || continue; found=1
-    grep -qiE "^name:|^description:" "$sk" || err "skill missing frontmatter: $sk"
+    grep -qiE '^name:' "$sk" || err "skill missing 'name:' frontmatter: $sk"
+    grep -qiE '^description:' "$sk" || err "skill missing 'description:' frontmatter: $sk"
   done
   [ "$found" = 1 ] || err "no resolvable skills (skills/*/SKILL.md) in installed $PLUG"
 fi
