@@ -19,6 +19,13 @@
 #
 # Usage: audit_experiment.sh <experiment-dir> [out-file]              # close-side (post-hoc) audit
 #        audit_experiment.sh --design <experiment-dir> [design-file] [out-file]   # PRE-LAUNCH design audit
+#        audit_experiment.sh --data <experiment-dir> [manifest] [out-file]        # MID-RUN data audit
+# --data audits the ACTUAL generated/transformed data against the design intent (the 'facts→logic→
+#   DATA→evidence' ladder): the deterministic full-pool layer is `pipelines/eval/audit_data.py`
+#   (counts/truncation/schema/dupes/balance → data_audit.json + a stratified high-risk sample); this
+#   mode is the SEMANTIC layer — a foreign model reads the SAMPLE rows + the manifest's intent and asks
+#   "would this data make the experiment invalid or misleading?" Motivated by the washout truncation bug
+#   (a generated replay froze clean while 1160/6457 rows were truncated mid-CoT; a 2-sample smoke missed it).
 #   experiment-dir: the ~/orchestrator/<exp>/ dir to audit (read-only; the auditor sees its files)
 #   out-file:       findings destination (default: <experiment-dir>/AUDIT.md, or DESIGN_AUDIT.md in --design mode)
 #   design-file:    (--design mode) the proposal to audit; default = newest DESIGN*.md in the dir
@@ -32,12 +39,18 @@
 #      AUDIT_CONSTITUTION=path     (the standards file; default ~/AGENTS.md)
 set -euo pipefail
 MODE=close
-if [ "${1:-}" = "--design" ]; then MODE=design; shift; fi
-EXP=${1:?usage: audit_experiment.sh [--design] <experiment-dir> [args...]}
+if [ "${1:-}" = "--design" ]; then MODE=design; shift;
+elif [ "${1:-}" = "--data" ]; then MODE=data; shift; fi
+EXP=${1:?usage: audit_experiment.sh [--design|--data] <experiment-dir> [args...]}
 if [ "$MODE" = design ]; then
   DESIGN_FILE=${2:-$(ls -t "${EXP%/}"/DESIGN*.md 2>/dev/null | head -1)}
   [ -n "$DESIGN_FILE" ] && [ -f "$DESIGN_FILE" ] || { echo "BLOCKED: no design file found in $EXP (pass one explicitly)" >&2; exit 1; }
   OUT=${3:-${EXP%/}/DESIGN_AUDIT.md}
+elif [ "$MODE" = data ]; then
+  MANIFEST=${2:-$(ls -t "${EXP%/}"/data_audit_manifest.md "${EXP%/}"/DESIGN*.md 2>/dev/null | head -1)}
+  [ -n "$MANIFEST" ] && [ -f "$MANIFEST" ] || { echo "BLOCKED: no manifest/design-intent found in $EXP (pass one explicitly) — the auditor needs to know what the data SHOULD be" >&2; exit 1; }
+  [ -f "${EXP%/}/data_audit.json" ] || echo "WARN: no data_audit.json in $EXP — run pipelines/eval/audit_data.py first (layer 1) so the semantic audit has the deterministic report + the stratified sample" >&2
+  OUT=${3:-${EXP%/}/DATA_AUDIT.md}
 else
   OUT=${2:-${EXP%/}/AUDIT.md}
 fi
@@ -122,6 +135,50 @@ FINDING <n>: <HIGH|MED|LOW> [<dimension>]
 ...
 NO-FINDING DIMENSIONS: <list any dimension where you found nothing material>
 SUMMARY: high=<n> med=<n> low=<n>
+
+=== THE PROGRAM CONSTITUTION (audit against this) ===
+$CONSTI_TEXT"
+elif [ "$MODE" = data ]; then
+PROMPT="You are an INDEPENDENT ADVERSARIAL DATA AUDITOR from a different model family than the agent
+that generated/transformed this data. A deterministic full-pool check already ran (counts, truncation,
+schema, duplicates, source/label balance — see data_audit.json); do NOT redo it. Your job is the
+SEMANTIC layer a script cannot do: READ THE ACTUAL SAMPLE ROWS and judge whether this data would make
+the experiment INVALID or MISLEADING.
+
+What the data is SUPPOSED to be (design intent + invariants) is in: $(basename \"$MANIFEST\"). The
+deterministic report is data_audit.json (READ IT — esp. HARD_FAILS, cot.by_source_open_think,
+source_balance, char_len). The stratified HIGH-RISK sample is data_audit_sample.jsonl — it deliberately
+includes the longest / shortest / near-cap / truncated / per-source / per-arm / spread rows (the
+washout bug hid in the long rows a random smoke missed). READ those rows, not just the aggregate JSON.
+
+Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say
+'no material finding' for it — do NOT invent issues. False findings destroy this tool's value.
+1. MATCHES INTENT — do the rows actually look like what the manifest says (right task/domain, intended
+   distribution, on-policy-ness, reasoning actually present and coherent, the right format)?
+2. CONFOUNDS / LEAKAGE — answer leaking into the prompt; the trait/label correlated with a nuisance
+   variable (descriptor/length/format confound); train↔eval overlap; a probe measuring something other
+   than the target (the 'confounded probe' class).
+3. LABEL / SOURCE / ARM SANITY — labels right and rows routed to the correct arm; source/arm balance as
+   intended; any mislabeled, misrouted, or wrong-distribution rows.
+4. FORMAT / TEMPLATE / MASKING — chat template rendered correctly, special tokens / think tags right,
+   masking boundaries sane, no degenerate (empty / repetitive / mode-collapsed) generations.
+5. GENERATOR ARTIFACTS — does generated data carry artifacts: the model narrating the instructions,
+   refusals, scaffolding leaking into the output, or truncation the deterministic layer flagged that you
+   should CONFIRM is real in context.
+6. WOULD-IT-INVALIDATE — net: would training on / evaluating with this data produce a confidently-wrong
+   or misleading result? The highest-leverage question.
+
+Output format (exactly), most severe first:
+FINDING <n>: <HIGH|MED|LOW> [<dimension>]
+  issue: <one sentence>
+  evidence: <data_audit_sample.jsonl __audit_idx__ N / data_audit.json field>: \"<short quote>\"
+  recommendation: <one sentence>
+...
+NO-FINDING DIMENSIONS: <list any dimension where you found nothing material>
+SUMMARY: high=<n> med=<n> low=<n>
+
+=== THE DESIGN INTENT / MANIFEST (what the data should be) ===
+$(cat \"$MANIFEST\" 2>/dev/null)
 
 === THE PROGRAM CONSTITUTION (audit against this) ===
 $CONSTI_TEXT"
