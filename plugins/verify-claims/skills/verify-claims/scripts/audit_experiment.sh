@@ -22,7 +22,7 @@
 #        audit_experiment.sh --data <experiment-dir> [manifest] [out-file]        # MID-RUN data audit
 # --data audits the ACTUAL generated/transformed data against the design intent (the 'facts→logic→
 #   DATA→evidence' ladder): the deterministic full-pool layer is `pipelines/eval/audit_data.py`
-#   (counts/truncation/schema/dupes/balance → data_audit.json + a stratified high-risk sample); this
+#   (counts/truncation/schema/dupes/balance → data_audit*.json + a stratified high-risk sample); this
 #   mode is the SEMANTIC layer — a foreign model reads the SAMPLE rows + the manifest's intent and asks
 #   "would this data make the experiment invalid or misleading?" Motivated by the washout truncation bug
 #   (a generated replay froze clean while 1160/6457 rows were truncated mid-CoT; a 2-sample smoke missed it).
@@ -43,13 +43,15 @@ if [ "${1:-}" = "--design" ]; then MODE=design; shift;
 elif [ "${1:-}" = "--data" ]; then MODE=data; shift; fi
 EXP=${1:?usage: audit_experiment.sh [--design|--data] <experiment-dir> [args...]}
 if [ "$MODE" = design ]; then
-  DESIGN_FILE=${2:-$(ls -t "${EXP%/}"/DESIGN*.md 2>/dev/null | head -1)}
+  DESIGN_FILE=${2:-$(find "${EXP%/}" -maxdepth 1 -type f -name 'DESIGN*.md' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)}
   [ -n "$DESIGN_FILE" ] && [ -f "$DESIGN_FILE" ] || { echo "BLOCKED: no design file found in $EXP (pass one explicitly)" >&2; exit 1; }
   OUT=${3:-${EXP%/}/DESIGN_AUDIT.md}
 elif [ "$MODE" = data ]; then
-  MANIFEST=${2:-$(ls -t "${EXP%/}"/data_audit_manifest.md "${EXP%/}"/DESIGN*.md 2>/dev/null | head -1)}
+  MANIFEST=${2:-$(find "${EXP%/}" -maxdepth 1 -type f \( -name 'data_audit_manifest*.md' -o -name 'DESIGN*.md' \) -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)}
   [ -n "$MANIFEST" ] && [ -f "$MANIFEST" ] || { echo "BLOCKED: no manifest/design-intent found in $EXP (pass one explicitly) — the auditor needs to know what the data SHOULD be" >&2; exit 1; }
-  [ -f "${EXP%/}/data_audit.json" ] || echo "WARN: no data_audit.json in $EXP — run pipelines/eval/audit_data.py first (layer 1) so the semantic audit has the deterministic report + the stratified sample" >&2
+  if ! find "${EXP%/}" -maxdepth 1 -type f -name '*data_audit*.json' | grep -q .; then
+    echo "WARN: no data_audit*.json in $EXP — run pipelines/eval/audit_data.py first (layer 1) so the semantic audit has the deterministic report + the stratified sample" >&2
+  fi
   OUT=${3:-${EXP%/}/DATA_AUDIT.md}
 else
   OUT=${2:-${EXP%/}/AUDIT.md}
@@ -75,6 +77,10 @@ fi
 CONSTITUTION=${AUDIT_CONSTITUTION:-$HOME/AGENTS.md}
 CONSTI_TEXT=""
 [ -f "$CONSTITUTION" ] && CONSTI_TEXT=$(cat "$CONSTITUTION")
+if [ "$MODE" = data ]; then
+  DATA_REPORTS=$(find "${EXP%/}" -maxdepth 1 -type f -name '*data_audit*.json' -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')
+  DATA_SAMPLES=$(find "${EXP%/}" -maxdepth 1 -type f \( -name '*data_audit*_sample.jsonl' -o -name '*data_audit*sample*.jsonl' \) -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')
+fi
 
 if [ "$MODE" = design ]; then
 PROMPT="You are an INDEPENDENT ADVERSARIAL REVIEWER from a different model family than the agent that
@@ -141,13 +147,14 @@ $CONSTI_TEXT"
 elif [ "$MODE" = data ]; then
 PROMPT="You are an INDEPENDENT ADVERSARIAL DATA AUDITOR from a different model family than the agent
 that generated/transformed this data. A deterministic full-pool check already ran (counts, truncation,
-schema, duplicates, source/label balance — see data_audit.json); do NOT redo it. Your job is the
+schema, duplicates, source/label balance — see data_audit*.json); do NOT redo it. Your job is the
 SEMANTIC layer a script cannot do: READ THE ACTUAL SAMPLE ROWS and judge whether this data would make
 the experiment INVALID or MISLEADING.
 
-What the data is SUPPOSED to be (design intent + invariants) is in: $(basename \"$MANIFEST\"). The
-deterministic report is data_audit.json (READ IT — esp. HARD_FAILS, cot.by_source_open_think,
-source_balance, char_len). The stratified HIGH-RISK sample is data_audit_sample.jsonl — it deliberately
+What the data is SUPPOSED to be (design intent + invariants) is in: $(basename "$MANIFEST"). The
+deterministic report(s) are: ${DATA_REPORTS:-<none found>} (READ THEM — esp. HARD_FAILS,
+cot.by_source_open_think, source_balance, char_len). The stratified HIGH-RISK sample file(s) are:
+${DATA_SAMPLES:-<none found>} — they deliberately
 includes the longest / shortest / near-cap / truncated / per-source / per-arm / spread rows (the
 washout bug hid in the long rows a random smoke missed). READ those rows, not just the aggregate JSON.
 
@@ -171,14 +178,14 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
 Output format (exactly), most severe first:
 FINDING <n>: <HIGH|MED|LOW> [<dimension>]
   issue: <one sentence>
-  evidence: <data_audit_sample.jsonl __audit_idx__ N / data_audit.json field>: \"<short quote>\"
+  evidence: <sample filename __audit_idx__ N / audit-report field>: \"<short quote>\"
   recommendation: <one sentence>
 ...
 NO-FINDING DIMENSIONS: <list any dimension where you found nothing material>
 SUMMARY: high=<n> med=<n> low=<n>
 
 === THE DESIGN INTENT / MANIFEST (what the data should be) ===
-$(cat \"$MANIFEST\" 2>/dev/null)
+$(cat "$MANIFEST" 2>/dev/null)
 
 === THE PROGRAM CONSTITUTION (audit against this) ===
 $CONSTI_TEXT"
