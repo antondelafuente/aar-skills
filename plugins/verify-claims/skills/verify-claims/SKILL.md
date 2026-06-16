@@ -1,6 +1,6 @@
 ---
 name: verify-claims
-description: Independent cross-family adversarial checks across the experiment lifecycle (the facts→logic→data→evidence ladder), each read by a model family you're too invested to judge. verify_claim — the brief's FACTS ("X is the baseline", "no checkpoint survives", a lineage claim); audit_experiment --design — the design's LOGIC (confounds, missing controls, comparability, power) pre-launch; audit_experiment --data — the actual DATA's sanity vs intent (truncation, leakage, confounds, mislabeling) mid-run; audit_experiment (close) — the result's EVIDENCE (reproducibility, overclaim, postdictions) at close. Use when verifying claims, auditing a design before launch, sanity-checking generated/training/eval data, or auditing a finished experiment — anything where a confidently-wrong number would move money or conclusions.
+description: Independent cross-family adversarial checks across the experiment lifecycle (the facts→logic→data→evidence ladder), each read by a model family you're too invested to judge. verify_claim — the brief's FACTS ("X is the baseline", "no checkpoint survives", a lineage claim); audit_experiment --design — the design's LOGIC (confounds, missing controls, comparability, power) pre-launch; audit_experiment --data — the actual DATA's sanity vs intent (truncation, leakage, confounds, mislabeling) mid-run; audit_experiment (close) — the result's EVIDENCE (reproducibility, overclaim, postdictions) at close; audit_experiment --scaffold — the same cross-family review pointed at a PRODUCT/SCAFFOLD change PROPOSAL (a skill edit, a new convention, a migration) against architecture dimensions, the design-review counterpart to /code-review on the diff. Use when verifying claims, auditing a design before launch, sanity-checking generated/training/eval data, auditing a finished experiment, or design-reviewing a scaffold/product change before it lands — anything where a confidently-wrong number or a wrong-shaped change would move money or conclusions.
 ---
 
 # verify-claims — don't check your own claims
@@ -69,6 +69,29 @@ Output (all modes): severity-rated FINDINGs with record citations + the dimensio
 material was found. "No material finding" is allowed and common — it does NOT cry wolf (same
 calibration discipline as the claim checker; the close mode validated 2026-06-12 catching a repro gap
 + in-sample steering + overclaim from a cold read, zero false findings).
+
+## Scaffold/product design review (`audit_experiment.sh --scaffold`)
+
+The four modes above audit EXPERIMENTS. `--scaffold` reuses the SAME cross-family harness for **product
+changes** — a skill edit, a new convention, a migration, a CLAUDE.md/AGENTS.md change. It reviews a
+**proposal doc** (the design-of-the-change, which also serves as the ADR + PR description) against
+ARCHITECTURE dimensions instead of experiment-validity ones: right seam/abstraction · DRY (does a
+canonical home already exist) · blast radius/dependents · reversibility · instance↔product leak ·
+interface/contract clarity for a zero-context consumer · simplest-thing/scope · convention-match. The
+foreign family reads the proposal AND the real tree (the context dir) to check claims like "no home
+exists" against reality.
+
+- **`audit_experiment.sh --scaffold <proposal.md> [context-dir] [out]`** → `<proposal>.SCAFFOLD_AUDIT.md` (a
+  proposal-specific sidecar; context defaults to the git root). **You MUST set `AAR_SUBSTRATE` to the proposal
+  AUTHOR's family** (it blocks otherwise, so the review is genuinely cross-family — no `claude` default that would
+  let a Codex author be reviewed by Codex). Exact invocations:
+  - Claude author (auditor defaults to Codex): `AAR_SUBSTRATE=claude audit_experiment.sh --scaffold <proposal.md>`
+  - Codex author (point the auditor at Claude): `AAR_SUBSTRATE=codex AUDIT_VERIFIER_CMD='claude -p …' audit_experiment.sh --scaffold <proposal.md>`
+- It is the **design-review** counterpart to **`/code-review`** on the resulting diff: an *architectural*
+  change gets `--scaffold` on the proposal BEFORE the build (keeps the reviewer at the seam, not anchored
+  on a finished diff), then `/code-review` on the diff at PR time. An implementation-only change skips
+  straight to the PR. Same triage→surface→arbitrate loop as `--design`: author triages as a peer, surfaces
+  survivors to the human, human arbitrates (the convergence stop).
 
 **Cross-family selection.** Default verifier = Codex (read-only). On a Codex AAR, set
 `AUDIT_VERIFIER_CMD='claude -p …'` so the auditor is always the OTHER family from whoever ran the work.

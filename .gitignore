@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+proposals/*SCAFFOLD_AUDIT*.md
+*.run.log

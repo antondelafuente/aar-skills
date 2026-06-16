@@ -10,7 +10,8 @@
 # Cross-family is the whole point: on a Claude AAR the auditor is Codex; on a Codex AAR set
 # AUDIT_VERIFIER_CMD to `claude -p …`. Always the OTHER family from whoever ran the experiment.
 # The cross-family guarantee is MECHANICAL here (not just documented): set AAR_SUBSTRATE to the
-# family that RAN the experiment; the script refuses to run if the auditor family would match it.
+# family that RAN the experiment (in --scaffold mode: the family that AUTHORED the proposal — i.e. the
+# AAR invoking --scaffold); the script refuses to run if the auditor family would match it.
 #
 # Validated 2026-06-12: from a cold read of a pre-fix experiment state, Codex independently
 # rediscovered all three findings a human had routed to ChatGPT (repro gap, in-sample steering,
@@ -20,6 +21,12 @@
 # Usage: audit_experiment.sh <experiment-dir> [out-file]              # close-side (post-hoc) audit
 #        audit_experiment.sh --design <experiment-dir> [design-file] [out-file]   # PRE-LAUNCH design audit
 #        audit_experiment.sh --data <experiment-dir> [manifest] [out-file]        # MID-RUN data audit
+#        audit_experiment.sh --scaffold <proposal.md> [context-dir] [out-file]    # SCAFFOLD/PRODUCT design review
+# --scaffold reviews a PROPOSAL doc for a scaffold/product change (skills, conventions, migrations) against
+# ARCHITECTURE dimensions (right seam, DRY/canonical-home, blast radius, reversibility, instance<->product
+# leak, contract clarity, simplest-thing, convention-match) — the design-review counterpart to /code-review
+# on the resulting diff. Same cross-family harness as --design; the foreign family reads the proposal AND the
+# real tree (context-dir) to check its claims. Default context = the proposal file's dir.
 # --data audits the ACTUAL generated/transformed data against the design intent (the 'facts→logic→
 #   DATA→evidence' ladder): the deterministic full-pool layer is `pipelines/eval/audit_data.py`
 #   (counts/truncation/schema/dupes/balance → data_audit*.json + a stratified high-risk sample); this
@@ -40,8 +47,19 @@
 set -euo pipefail
 MODE=close
 if [ "${1:-}" = "--design" ]; then MODE=design; shift;
-elif [ "${1:-}" = "--data" ]; then MODE=data; shift; fi
-EXP=${1:?usage: audit_experiment.sh [--design|--data] <experiment-dir> [args...]}
+elif [ "${1:-}" = "--data" ]; then MODE=data; shift;
+elif [ "${1:-}" = "--scaffold" ]; then MODE=scaffold; shift; fi
+if [ "$MODE" = scaffold ]; then
+  PROPOSAL=${1:?usage: audit_experiment.sh --scaffold <proposal.md> [context-dir] [out-file]}
+  [ -f "$PROPOSAL" ] || { echo "BLOCKED: proposal file missing: $PROPOSAL" >&2; exit 1; }
+  # Context = the dir the auditor reads to CHECK the proposal vs the real tree. Default to the GIT/WORKTREE
+  # ROOT (a proposal in proposals/ must not blind the auditor to the scaffold it touches), else the proposal's dir.
+  if [ -n "${2:-}" ]; then EXP=$2;
+  else EXP=$(git -C "$(dirname "$PROPOSAL")" rev-parse --show-toplevel 2>/dev/null) || EXP=$(cd "$(dirname "$PROPOSAL")" && pwd); fi
+  OUT=${3:-${PROPOSAL%.md}.SCAFFOLD_AUDIT.md}   # proposal-specific sidecar — no root collision across proposals
+  PROPOSAL_REL=$(realpath --relative-to="$EXP" "$PROPOSAL" 2>/dev/null || basename "$PROPOSAL")
+else
+EXP=${1:?usage: audit_experiment.sh [--design|--data|--scaffold] <experiment-dir|proposal> [args...]}
 if [ "$MODE" = design ]; then
   DESIGN_FILE=${2:-$(find "${EXP%/}" -maxdepth 1 -type f -name 'DESIGN*.md' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)}
   [ -n "$DESIGN_FILE" ] && [ -f "$DESIGN_FILE" ] || { echo "BLOCKED: no design file found in $EXP (pass one explicitly)" >&2; exit 1; }
@@ -56,7 +74,8 @@ elif [ "$MODE" = data ]; then
 else
   OUT=${2:-${EXP%/}/AUDIT.md}
 fi
-[ -d "$EXP" ] || { echo "BLOCKED: experiment dir missing: $EXP" >&2; exit 1; }
+fi
+[ -d "$EXP" ] || { echo "BLOCKED: context/experiment dir missing: $EXP" >&2; exit 1; }
 
 # --- cross-family enforcement (FINDING 2) -------------------------------------------------------
 # Infer the auditor's family from the verifier command (default = codex).
@@ -66,6 +85,12 @@ if [ -n "${AUDIT_VERIFIER_CMD:-}" ]; then
     *claude*) AUDITOR_FAMILY=claude ;; *codex*) AUDITOR_FAMILY=codex ;; *) AUDITOR_FAMILY=custom ;;
   esac
 fi
+if [ "$MODE" = scaffold ] && [ -z "${AAR_SUBSTRATE:-}" ]; then
+  echo "BLOCKED: --scaffold requires AAR_SUBSTRATE = the proposal AUTHOR's family (claude|codex), explicitly." >&2
+  echo "  The experiment-mode default (claude) would let a Codex author be reviewed by Codex (same family =" >&2
+  echo "  not cross-family). Set AAR_SUBSTRATE to whoever wrote the proposal so the gate is real." >&2
+  exit 1
+fi
 RUNNER_FAMILY=${AAR_SUBSTRATE:-claude}
 if [ "$AUDITOR_FAMILY" = "$RUNNER_FAMILY" ]; then
   echo "BLOCKED: cross-family audit required — auditor family ($AUDITOR_FAMILY) == experiment runner" >&2
@@ -74,9 +99,19 @@ if [ "$AUDITOR_FAMILY" = "$RUNNER_FAMILY" ]; then
   exit 1
 fi
 
-CONSTITUTION=${AUDIT_CONSTITUTION:-$HOME/AGENTS.md}
+if [ "$MODE" = scaffold ]; then
+  # Portable default: the CONTEXT repo's AGENTS.md (an outsider's scaffold conventions), not $HOME's.
+  CONSTITUTION=${AUDIT_CONSTITUTION:-${EXP%/}/AGENTS.md}
+else
+  CONSTITUTION=${AUDIT_CONSTITUTION:-$HOME/AGENTS.md}
+fi
 CONSTI_TEXT=""
 [ -f "$CONSTITUTION" ] && CONSTI_TEXT=$(cat "$CONSTITUTION")
+if [ "$MODE" = scaffold ] && [ -z "$CONSTI_TEXT" ]; then
+  echo "BLOCKED: no constitution found for --scaffold (looked at $CONSTITUTION). A scaffold review without the" >&2
+  echo "  program's conventions is toothless — set AUDIT_CONSTITUTION to your AGENTS.md (or add one to the context repo)." >&2
+  exit 1
+fi
 if [ "$MODE" = data ]; then
   DATA_REPORTS=$(find "${EXP%/}" -maxdepth 1 -type f -name '*data_audit*.json' -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')
   DATA_SAMPLES=$(find "${EXP%/}" -maxdepth 1 -type f \( -name '*data_audit*_sample.jsonl' -o -name '*data_audit*sample*.jsonl' \) -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')
@@ -186,6 +221,65 @@ SUMMARY: high=<n> med=<n> low=<n>
 
 === THE DESIGN INTENT / MANIFEST (what the data should be) ===
 $(cat "$MANIFEST" 2>/dev/null)
+
+=== THE PROGRAM CONSTITUTION (audit against this) ===
+$CONSTI_TEXT"
+elif [ "$MODE" = scaffold ]; then
+PROMPT="You are an INDEPENDENT ADVERSARIAL REVIEWER from a different model family than the agent that
+wrote this SCAFFOLD/PRODUCT change PROPOSAL. Nothing has been built yet (or it's a draft); your job is to
+find the DESIGN flaws BEFORE the change lands and every agent depends on it. The proposal under review is:
+$PROPOSAL_REL (path relative to the current directory tree root). Read it in full, THEN read the ACTUAL scaffold it
+touches (skills, scripts, plugin.json/marketplace.json, CLAUDE.md/AGENTS.md, existing helpers) to CHECK its
+claims against reality — a proposal that says 'no home exists for this' or 'this matches the convention' is
+only as good as the tree confirms. IGNORE transient/state files (logs, .done, CLAIMED_BY).
+
+This is the PRODUCT: a scaffold that turns coding agents into autonomous researchers, consumed by
+zero-context agents and (eventually) outside researchers. Review against the program's constitution (below)
+— especially: ONE canonical home per fact (no two live copies); the instance↔product boundary (generic
+content must not hardcode instance specifics, and instance specifics must not freeze into the product);
+discovered-at-point-of-need (a zero-context consumer must be able to find + use it WITHOUT a hidden
+instance fallback); scaffold length is product cost (bloat is a defect).
+
+Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say 'no
+material finding' for it — do NOT invent issues. False findings destroy this tool's value.
+1. RIGHT SEAM / ABSTRACTION — is the boundary drawn where the system actually varies (the generic/instance
+   split, the interface/contract cut at the right place — or 'gated around the wrong unit')?
+2. DRY / CANONICAL HOME — does a home for this ALREADY exist? Is it duplicating logic/config/prose, or
+   adding a new thing where EXTENDING an existing helper/skill/mode is the real fix?
+3. BLAST RADIUS / DEPENDENTS — who depends on the touched files (every AAR? a live experiment? other
+   skills/plugins)? Is it safe for in-flight work; does it need a migration / restart / back-compat shim
+   the proposal omits?
+4. REVERSIBILITY — how hard to undo if wrong? Anything one-way (deleting a canonical artifact, a convention
+   everyone adopts)? Are old paths preserved (symlink/shim)?
+5. INSTANCE <-> PRODUCT LEAK — does generic/product content hardcode instance specifics (paths, model
+   names, keys, lab recipes)? Does instance/frozen content get pushed into the product where it doesn't
+   belong? (The migration's core failure class.)
+6. INTERFACE / CONTRACT CLARITY — for a zero-context consumer (a fresh agent, an outside install): is the
+   new interface/convention discoverable and unambiguous, and does it resolve with NO hidden instance
+   fallback ('works only because the author's box has X')?
+7. SIMPLEST THING / SCOPE — is this the MINIMUM change that solves the stated problem, or over-engineered
+   (extra modes/abstraction)? Conversely, does it UNDER-solve — fix a symptom not the cause, leave the real
+   gap open?
+8. CONVENTION-MATCH — does it follow established patterns (path-scoped commits, the gate ladder, the
+   skill/plugin shape, naming, single-canonical-home), or introduce a one-off the next agent won't expect?
+
+Also judge the PROPOSAL ITSELF: does it state the problem, justify the chosen approach OVER the alternatives
+it lists, and own its blast radius + rollback — or assert a solution without the case for it?
+
+PRIOR-ROUND DEBATE (when this is a RE-REVIEW on a revised proposal): if the proposal contains the author's
+RESPONSES to earlier findings, this is a PEER DEBATE, not a fresh scan. CONCEDE findings the responses
+adequately resolve (don't re-raise); ESCALATE only when a response is wrong/insufficient (quote it, say
+why); otherwise raise only GENUINELY NEW flaws. Polish/wording/naming are NOT findings on a re-run unless
+they change the design. 'No new material finding' is the GOOD, expected convergence outcome.
+
+Output format (exactly), most severe first:
+FINDING <n>: <HIGH|MED|LOW> [<dimension>]
+  issue: <one sentence>
+  evidence: <file>: \"<short quote or precise reference>\"
+  recommendation: <one sentence>
+...
+NO-FINDING DIMENSIONS: <list any dimension where you found nothing material>
+SUMMARY: high=<n> med=<n> low=<n>
 
 === THE PROGRAM CONSTITUTION (audit against this) ===
 $CONSTI_TEXT"
