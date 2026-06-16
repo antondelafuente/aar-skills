@@ -14,6 +14,11 @@
       "name": "verify-claims",
       "source": "./plugins/verify-claims",
       "description": "Verification gates that catch the confidently-wrong-number class before money or conclusions move: deterministic full-pool data audits plus adversarial fact/design/data/evidence checks read by an independent model family (read-only sandboxed)."
+    },
+    {
+      "name": "experiment-lifecycle",
+      "source": "./plugins/experiment-lifecycle",
+      "description": "Design and dispatch GPU experiments like a researcher: pre-register a DESIGN.md, clear it with the human through cross-family validity gates, emit a thin START.md brief + CHECKLIST.md gates, then dispatch the locked brief to a fresh-context executor. Pairs with verify-claims (the gates) and run-experiment (execution)."
     }
   ]
 }
