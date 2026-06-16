@@ -62,7 +62,7 @@ if [ "$MODE" = scaffold ] || [ "$MODE" = code ]; then
   if [ -n "${2:-}" ]; then EXP=$2;
   elif [ "$MODE" = code ]; then EXP=$(git rev-parse --show-toplevel 2>/dev/null) || EXP=$(pwd);   # a diff is transient (often /tmp) → context = the CWD's repo, not the diff's dir
   else EXP=$(git -C "$(dirname "$PROPOSAL")" rev-parse --show-toplevel 2>/dev/null) || EXP=$(cd "$(dirname "$PROPOSAL")" && pwd); fi
-  if [ "$MODE" = scaffold ]; then OUT=${3:-${PROPOSAL%.md}.SCAFFOLD_AUDIT.md}; else OUT=${3:-${PROPOSAL%.*}.CODE_REVIEW.md}; fi
+  if [ "$MODE" = scaffold ]; then OUT=${3:-${PROPOSAL%.md}.SCAFFOLD_AUDIT.md}; else OUT=${3:-${PROPOSAL}.CODE_REVIEW.md}; fi   # append (don't %.*-strip — that mangles a no-ext diff under a dotted dir)
   PROPOSAL_REL=$(realpath --relative-to="$EXP" "$PROPOSAL" 2>/dev/null || realpath "$PROPOSAL" 2>/dev/null || echo "$PROPOSAL")  # never degrade to a bare basename
 else
 EXP=${1:?usage: audit_experiment.sh [--design|--data|--scaffold] <experiment-dir|proposal> [args...]}
