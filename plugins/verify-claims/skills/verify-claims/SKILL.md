@@ -56,9 +56,10 @@ evidence** ladder — each rung read by a foreign model family you're too invest
 - **`audit_experiment.sh --data <exp> <manifest>`** → `DATA_AUDIT.md` — the actual **DATA's sanity**
   vs the design intent, MID-RUN before train/eval. The SEMANTIC layer: a foreign model reads a
   STRATIFIED high-risk sample and asks "would this data make the experiment invalid or misleading?"
-  Pairs with the deterministic full-pool layer (`~/orchestrator/pipelines/eval/audit_data.py`:
-  truncation / schema / dupes / balance + the sample). Run on all three data surfaces — training
-  data, eval inputs, and the model-generated eval rollouts. (Motivated by a generated-replay
+  Pairs with the deterministic full-pool layer (`scripts/audit_data.py`: counts / truncation /
+  finish_reason / schema / dupes / balance, and it emits the stratified sample this mode reads).
+  Run BOTH layers on all three data surfaces — training data, eval inputs, and the model-generated
+  eval rollouts. (Motivated by a generated-replay
   truncation bug — 1160/6457 rows truncated mid-CoT — that a 2-sample self-smoke missed.)
 - **`audit_experiment.sh <exp>`** → `AUDIT.md` — the finished result's **EVIDENCE**, AT CLOSE:
   reproducibility, claim-vs-evidence, confounds/validity, data sanity, conclusions-vs-postdictions,
