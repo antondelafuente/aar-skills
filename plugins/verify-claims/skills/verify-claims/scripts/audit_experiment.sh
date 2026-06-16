@@ -57,7 +57,7 @@ if [ "$MODE" = scaffold ]; then
   if [ -n "${2:-}" ]; then EXP=$2;
   else EXP=$(git -C "$(dirname "$PROPOSAL")" rev-parse --show-toplevel 2>/dev/null) || EXP=$(cd "$(dirname "$PROPOSAL")" && pwd); fi
   OUT=${3:-${PROPOSAL%.md}.SCAFFOLD_AUDIT.md}   # proposal-specific sidecar — no root collision across proposals
-  PROPOSAL_REL=$(realpath --relative-to="$EXP" "$PROPOSAL" 2>/dev/null || basename "$PROPOSAL")
+  PROPOSAL_REL=$(realpath --relative-to="$EXP" "$PROPOSAL" 2>/dev/null || realpath "$PROPOSAL" 2>/dev/null || echo "$PROPOSAL")  # never degrade to a bare basename
 else
 EXP=${1:?usage: audit_experiment.sh [--design|--data|--scaffold] <experiment-dir|proposal> [args...]}
 if [ "$MODE" = design ]; then
@@ -85,11 +85,14 @@ if [ -n "${AUDIT_VERIFIER_CMD:-}" ]; then
     *claude*) AUDITOR_FAMILY=claude ;; *codex*) AUDITOR_FAMILY=codex ;; *) AUDITOR_FAMILY=custom ;;
   esac
 fi
-if [ "$MODE" = scaffold ] && [ -z "${AAR_SUBSTRATE:-}" ]; then
-  echo "BLOCKED: --scaffold requires AAR_SUBSTRATE = the proposal AUTHOR's family (claude|codex), explicitly." >&2
-  echo "  The experiment-mode default (claude) would let a Codex author be reviewed by Codex (same family =" >&2
-  echo "  not cross-family). Set AAR_SUBSTRATE to whoever wrote the proposal so the gate is real." >&2
-  exit 1
+if [ "$MODE" = scaffold ]; then
+  case "${AAR_SUBSTRATE:-}" in
+    claude|codex) ;;   # exact match only — a typo (e.g. 'codx') must NOT slip a same-family review past the gate
+    *) echo "BLOCKED: --scaffold requires AAR_SUBSTRATE = the proposal AUTHOR's family, exactly 'claude' or 'codex'" >&2
+       echo "  (got '${AAR_SUBSTRATE:-<unset>}'). No default: the experiment default (claude) or a typo would let a" >&2
+       echo "  Codex author be reviewed by Codex (same family = not cross-family). Set it to whoever wrote the proposal." >&2
+       exit 1 ;;
+  esac
 fi
 RUNNER_FAMILY=${AAR_SUBSTRATE:-claude}
 if [ "$AUDITOR_FAMILY" = "$RUNNER_FAMILY" ]; then
