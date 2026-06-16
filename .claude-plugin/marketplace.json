@@ -19,6 +19,11 @@
       "name": "experiment-lifecycle",
       "source": "./plugins/experiment-lifecycle",
       "description": "Run GPU experiments like a researcher — the full lifecycle: design-experiment (pre-register a DESIGN.md, clear it with the human through cross-family validity gates, emit a START.md brief + CHECKLIST.md, dispatch to a fresh-context executor) and run-experiment (the zero-context executor: self-wake, acquire/provision/drive/collect/close). Instance specifics live in an execution profile; pairs with gpu-job and verify-claims."
+    },
+    {
+      "name": "aar-engineering",
+      "source": "./plugins/aar-engineering",
+      "description": "The SWE pipeline for building the product (the engineering layer): ship-change runs a gated PR with a cross-family code review (verify-claims --code) and auto-merges when clean. Explicit changed-path list, tracked .aar-ci check profile + fake-HOME behavior smoke. Pairs with verify-claims."
     }
   ]
 }

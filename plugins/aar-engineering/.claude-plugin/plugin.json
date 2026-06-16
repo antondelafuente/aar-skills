@@ -1,0 +1,8 @@
+{
+  "name": "aar-engineering",
+  "description": "The SWE pipeline for building the AAR product (the engineering layer, not a shipped research plugin). ship-change: gated PR → cross-family code review (verify-claims --code) → auto-merge when clean. Takes an EXPLICIT changed-path list (never 'the working tree'), runs the repo's tracked .aar-ci check profile + fake-HOME behavior smoke, and auto-merges only on a clean review. Pairs with verify-claims (the review primitives) and a per-repo .aar-ci/ profile.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Anton de la Fuente"
+  }
+}
