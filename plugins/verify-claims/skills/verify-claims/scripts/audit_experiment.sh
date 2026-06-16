@@ -57,6 +57,7 @@ if [ "$MODE" = scaffold ] || [ "$MODE" = code ]; then
   # context repo + author family. Cross-family + context-constitution handling below is shared by both.
   PROPOSAL=${1:?usage: audit_experiment.sh --scaffold <proposal.md> | --code <diff-file> [context-dir] [out-file]}
   [ -f "$PROPOSAL" ] || { echo "BLOCKED: input file missing: $PROPOSAL" >&2; exit 1; }
+  [ "$MODE" != code ] || [ -s "$PROPOSAL" ] || { echo "BLOCKED: --code given an EMPTY diff ($PROPOSAL) — a failed or no-op diff generation would otherwise pass review without reviewing any code. Regenerate the diff." >&2; exit 1; }
   # Context = the dir the auditor reads to CHECK against the real tree. Default to the GIT/WORKTREE ROOT, else the file's dir.
   if [ -n "${2:-}" ]; then EXP=$2;
   elif [ "$MODE" = code ]; then EXP=$(git rev-parse --show-toplevel 2>/dev/null) || EXP=$(pwd);   # a diff is transient (often /tmp) → context = the CWD's repo, not the diff's dir
