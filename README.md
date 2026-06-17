@@ -28,9 +28,14 @@ Your human wants these skills available. Do this, in order:
      frozen recipes, artifact store, ledger, and teardown/cost policy — before `run-experiment`
      can drive a real run; the installed skill alone is not enough. `aar-engineering` is the
      build-the-product layer — install it only if you're developing these skills, not just using them.)
-   - *Codex CLI / other Agent-Skills harnesses* — symlink each module's skill dir:
-     `ln -s ~/aar-skills/plugins/gpu-job/skills/gpu-job ~/.codex/skills/gpu-job` (same for
-     verify-claims and experiment-lifecycle).
+   - *Codex CLI / other Agent-Skills harnesses* — symlink each skill dir (note a plugin can expose
+     more than one skill — `experiment-lifecycle` has two):
+     ```
+     ln -s ~/aar-skills/plugins/gpu-job/skills/gpu-job                    ~/.codex/skills/gpu-job
+     ln -s ~/aar-skills/plugins/verify-claims/skills/verify-claims        ~/.codex/skills/verify-claims
+     ln -s ~/aar-skills/plugins/experiment-lifecycle/skills/design-experiment ~/.codex/skills/design-experiment
+     ln -s ~/aar-skills/plugins/experiment-lifecycle/skills/run-experiment    ~/.codex/skills/run-experiment
+     ```
 3. **Configure gpu-job:** run `~/aar-skills/plugins/gpu-job/skills/gpu-job/scripts/gpu_job_init.sh`.
    It writes a local config (`~/.config/gpu-job/env`, chmod 600) and uploads nothing.
    **You will need to ask your human for, verbatim:**
