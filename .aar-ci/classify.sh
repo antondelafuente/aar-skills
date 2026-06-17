@@ -35,6 +35,13 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 #    architectural globs, never touch the floor.
 ALWAYS_ARCHITECTURAL=()
 CONF="$ROOT/.aar-ci/classifier.conf"
+# A MISSING config is the documented default (floor-only). But a config that EXISTS yet can't be read is a
+# suspicious state that would silently drop the additive rules -> fail-closed architectural, loudly.
+if [ -e "$CONF" ] && [ ! -r "$CONF" ]; then
+  echo "CLASSIFICATION: architectural"
+  echo "EVIDENCE: classifier.conf exists but is unreadable -> fail-closed architectural (additive rules can't be loaded)"
+  exit 0
+fi
 if [ -f "$CONF" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"                              # strip trailing/whole-line comments
@@ -65,19 +72,24 @@ fi
 # any ./ and ../ with realpath -m (no on-disk existence needed — diffs reference deleted paths too).
 # FAIL-CLOSED: any path that resolves OUTSIDE the repo root is malformed/suspicious -> architectural, never
 # allowed to slip to mechanical.
-norm=(); outside=()
+norm=(); unsafe=()
 for p in "${PATHS[@]}"; do
   case "$p" in /*) abs="$p";; *) abs="$ROOT/$p";; esac
-  abs=$(realpath -m -- "$abs" 2>/dev/null || printf '%s' "$abs")
-  case "$abs" in
-    "$ROOT")    norm+=(".") ;;
-    "$ROOT"/*)  norm+=("${abs#"$ROOT"/}") ;;
-    *)          outside+=("$p") ;;
-  esac
+  # canonicalization MUST succeed AND land inside the repo; any failure or escape -> fail-closed architectural
+  # (a fallback that left ../ unresolved could let a protected/outside path be downgraded — F1).
+  if cabs=$(realpath -m -- "$abs" 2>/dev/null); then
+    case "$cabs" in
+      "$ROOT")    norm+=(".") ;;
+      "$ROOT"/*)  norm+=("${cabs#"$ROOT"/}") ;;
+      *)          unsafe+=("$p (resolves outside the repo root)") ;;
+    esac
+  else
+    unsafe+=("$p (could not be canonicalized)")
+  fi
 done
-if [ ${#outside[@]} -gt 0 ]; then
+if [ ${#unsafe[@]} -gt 0 ]; then
   echo "CLASSIFICATION: architectural"
-  printf 'EVIDENCE: path resolves outside the repo root -> fail-closed architectural — %s\n' "${outside[@]}"
+  printf 'EVIDENCE: path not safely repo-relative -> fail-closed architectural — %s\n' "${unsafe[@]}"
   exit 0
 fi
 PATHS=("${norm[@]}")
