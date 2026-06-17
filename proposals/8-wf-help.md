@@ -19,8 +19,11 @@ header), and route bare invocation, `-h`, `--help`, and an unknown subcommand to
 - An unknown subcommand → print "unknown subcommand 'X'" to stderr THEN the usage, exit non-zero (so a
   typo still fails loudly for scripts, but a human sees the options).
 
-The usage text is a single here-doc listing the seven lifecycle steps with one-line descriptions, plus a
-pointer to SKILL.md for the full runbook and to RUNBOOK.md for Phase-2/rollback. No behavior change to any
+The usage text comes from a single `usage()` function — the **canonical runtime short-list** (design-review
+F2, DRY): help paths route to it, and the script-header usage block is trimmed to point at `wf.sh help`
+rather than duplicating the command list. `help` computes the script directory from `${BASH_SOURCE[0]}` and
+prints **concrete** paths to the adjacent `SKILL.md` / `RUNBOOK.md` (design-review F3) — unambiguous even
+though `wf.sh` is usually run from the target repo, not where the docs live. No behavior change to any
 existing subcommand — this is purely additive surface.
 
 ## Alternatives considered
@@ -32,7 +35,9 @@ existing subcommand — this is purely additive surface.
 
 ## Blast radius
 
-The SWE pipeline only (`wf.sh`, one script in the `aar-engineering` plugin). No change to the product
+The SWE pipeline only. Touches two files in the `aar-engineering` plugin: `scripts/wf.sh` (the help
+subcommand) AND `.claude-plugin/plugin.json` — a non-manifest script change requires a **version bump**
+(0.2.0 → 0.2.1) or the `.aar-ci` checks correctly block it (design-review F1). No change to the product
 research plugins, the instance, or any existing subcommand's behavior. Purely additive help text.
 
 ## Rollout + rollback
