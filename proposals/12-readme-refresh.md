@@ -41,5 +41,15 @@ Purely additive/corrective prose.
 ## Rollout + rollback
 
 Trivial + reversible: one squash commit; `git revert` if ever needed. No state, no migration. Ships through
-the normal lifecycle — and is the **first PR through the fully-enforced pipeline** (codex-engineer[bot] native
-approval required before merge).
+the normal lifecycle, and is the **first PR to merge with a native `codex-engineer[bot]` approval** (the
+Phase-2 reviewer identity). Branch protection requiring that approval is enabled as part of this rollout, so
+the merge is gated by it; updating the SKILL.md/RUNBOOK "shadow mode" wording to reflect active enforcement is
+a tracked follow-up scaffold change (kept out of this docs-only PR).
+
+## Design-review response (round 1, --scaffold)
+
+4 findings (0 HIGH), all folded: **F1** (versions duplicate plugin.json → re-staleness) — dropped exact
+versions for a durable shipped/planned status + a pointer to the manifests; **F2** (experiment-lifecycle
+under-specified) — added the execution-profile prerequisite note; **F3** (overclaimed "fully-enforced") —
+corrected wording (above) + branch protection actually enabled before merge; **F4** (two conflicting Claude
+install blocks) — labelled the interactive one and cross-pointed the headless agent path.
