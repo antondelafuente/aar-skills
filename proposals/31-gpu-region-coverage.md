@@ -33,15 +33,22 @@ where coverage matters most, and exactly where the blind spot bites hardest.
   - **Fallback:** if the GraphQL call fails (network, schema change, auth), fall back to a curated static
     list (the `listed: true` set as of 2026-06-17, 30 ids) so deploy never hard-depends on the extra call.
     The static list is the backstop, not the primary path.
-- **`DATA_CENTERS=all` → one batch of every creatable DC** (true-all). This matches `all`'s existing
-  single-batch semantics — RunPod's `dataCenterPriority: availability` then picks the best-available
-  region across the whole set in one call, which is exactly what a scarce-multi-GPU hunt wants.
-- **Default tiered retry → geographic buckets derived from the live set**, by id-prefix rules, preserving
+- **`DATA_CENTERS=all` → one batch of every *live* creatable DC** (true-all). Live ids come straight from
+  RunPod's current `listed: true` set, so they are valid enum members — safe to batch in one call, where
+  `dataCenterPriority: availability` picks the best-available region across the whole set (what a scarce
+  multi-GPU hunt wants). **If the live query failed** (fallback in play), `all` is sent as the geographic
+  buckets below instead of one batch — so a possibly-stale fallback id can only no-go its own small bucket,
+  never schema-reject the whole attempt (addresses design-review F1).
+- **Default tiered retry → geographic buckets derived from the set**, by id-prefix rules, preserving
   today's preference order (US-west → US-central → US-east → EU) and adding a final **rest-of-world** tier
   (CA / AP / OC / SEA) so the default path also benefits and a *brand-new* prefix never silently drops —
   any id matching no rule lands in a catch-all final tier (rot-proof by construction).
 - **Explicit `DATA_CENTERS=<csv>` is unchanged** — the operator's explicit list is honored verbatim
   (still the required path for region-locked `VOLUME_ID`).
+- **Stale-fallback containment (design-review F1):** the static list is a *backstop only* (used iff the
+  live query fails), and even then it is never sent as one all-or-nothing batch — it flows through the same
+  small geographic buckets, so a stale id degrades to "that bucket no-go," i.e. today's behavior, not a
+  hard failure. The live path (the normal case) is by construction never stale.
 
 Net behavior change: `all` and the default now cover the full creatable set instead of ~half; explicit
 csv and volume-locked deploys are byte-for-byte unchanged.
@@ -70,6 +77,13 @@ csv and volume-locked deploys are byte-for-byte unchanged.
 
 ## Rollout + rollback
 
+- **Deterministic test (design-review F2):** region selection is refactored into pure functions
+  (`listed_dcs(payload)`, `tiered(dcs)`, `select_tiers(mode, dcs, live)`) covered by an offline
+  `python3 deploy_pod.py --selftest` that mocks the GraphQL payload and asserts the tier construction for
+  every mode — live-listed, GraphQL-failure fallback, `DATA_CENTERS=all` (live vs fallback), explicit CSV,
+  prefix bucketing, and the unmatched-prefix catch-all. It hits no network and creates no pod, so it runs
+  as a plain unit check (evidence attached to the PR); the contract regression class F2 flags is now caught
+  deterministically, not only by syntax + install smoke.
 - **Rollout:** ships through the normal lifecycle; `.aar-ci` checks (syntax/compile/version-bump) +
   fake-HOME smoke run in `finish`. First real use is any subsequent pod deploy — observable in the
   `[deploy] attempt … tier …` log lines (now showing the fuller tier set).
