@@ -140,7 +140,7 @@ The contract is substrate-neutral:
 
 The executor MUST start with **fresh context** (no memory of this design conversation) — that property is the whole
 point. *How* you spawn it is the instance's implementation of the contract:
-- **Claude Code:** a new zero-context session in a dedicated ephemeral launch dir — one Claude per workdir, the experiment dir stays the shared records home (a launcher script + a session-manager skill).
+- **Claude Code:** a fresh zero-context session in its own dedicated working dir (a launcher script + the session-manager skill).
 - **Codex:** a fresh thread / watcher-driven local execution.
 - **Other substrates:** a CI job, a remote worker, or a hosted queue that reads the brief.
 

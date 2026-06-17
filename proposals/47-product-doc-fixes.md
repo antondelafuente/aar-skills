@@ -19,20 +19,24 @@ A batch of small, independent **documentation-accuracy** bugs in product-facing 
 
 ## Approach
 
-Pure text edits, product-clean:
+Pure text edits, product-clean (auth wording corrected per design-review):
 
-1. **Genericize auth:** product docs say to ensure `GH_TOKEN` is set (`gh auth login`, or
-   `export GH_TOKEN=…`) — no instance path. Where a per-instance hint is genuinely useful in shipped code
-   comments, keep it explicitly marked as an *example for this instance*, not the instruction.
-2. **Fix marketplace text:** replace "Phase 1 runs in shadow mode" with the as-built enforcement line
-   (the cross-family `codex-engineer[bot]` review is a native review that branch protection requires before
-   merge) — matching the `aar-engineering` `plugin.json` description.
-3. **Fix dispatch line:** "in the experiment dir" → "in a dedicated ephemeral launch dir (unique cwd per
-   dispatch; the experiment dir stays the records home)" — staying substrate-neutral (no instance script
-   name).
+1. **Genericize auth:** product docs say to **authenticate `gh` (`gh auth login`) or export `GH_TOKEN`** — no
+   instance `~/.env` path. `gh auth login` does *not* set `GH_TOKEN`; the driver accepts *either* stored `gh`
+   auth or the env var, so the wording says "either" (design-review F3). Covers `SKILL.md`, `wf.sh`, **and
+   the `RUNBOOK.md` token-rotation line** (F1 — the RUNBOOK keeps an explicitly instance-marked `~/.env`
+   example, not a product instruction).
+2. **Fix marketplace text:** replace "Phase 1 runs in shadow mode" with a faithful summary of the
+   `aar-engineering` `plugin.json` contract — the cross-family `--code` review posts a native GitHub review
+   via a **separate reviewer identity** that branch protection requires before merge (**falls back to
+   comments if none configured**); generic seam, not a hardcoded `codex-engineer[bot]` claim (design-review F4).
+3. **Fix dispatch line:** keep it **substrate-neutral** — "in the experiment dir" → "in its own dedicated
+   working dir" (the spawning mechanics are the instance's implementation, already stated by the line above;
+   design-review F2). Resolves the post-#30 staleness without baking a new instance convention into the
+   product skill. (#30 was instance-side — no product proposal.)
 
-Version bumps: `aar-engineering` (SKILL.md + wf.sh changed) and `experiment-lifecycle` (design-experiment
-SKILL.md changed). Closes #47 and #48; the dispatch line is a #30 follow-up folded in.
+Version bumps: `aar-engineering` (SKILL.md + wf.sh + RUNBOOK.md changed) and `experiment-lifecycle`
+(design-experiment SKILL.md changed). Closes #47 and #48.
 
 ## Alternatives considered
 
