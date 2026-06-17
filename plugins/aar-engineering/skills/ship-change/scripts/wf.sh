@@ -42,9 +42,13 @@ die(){ echo "BLOCKED: $*" >&2; exit 1; }
 note(){ echo "[wf] $*" >&2; }
 REVIEW_HIGH=0; REVIEW_ALL=0   # set by run_review (globals, nounset-safe defaults)
 
-# the main checkout that owns worktrees: env override, else the repo this script lives in
+# the main checkout that owns worktrees. When wf.sh runs from the INSTALLED PLUGIN CACHE, the script's own
+# dir is NOT the target repo — so default to the CWD's git root (the agent runs `start` from inside the repo
+# it's changing), and only fall back to the script's repo. Env override always wins. Subcommands that already
+# hold a worktree derive the repo/main-checkout FROM the worktree (see gh_repo / main_checkout) and don't
+# rely on this at all.
 SELF_REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")" && git rev-parse --show-toplevel 2>/dev/null || true)
-ORIGIN_REPO=${ORIGIN_REPO:-$SELF_REPO}
+ORIGIN_REPO=${ORIGIN_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || echo "$SELF_REPO")}
 
 need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
   || die "no GitHub auth — set GH_TOKEN (this instance: source ~/.env) before invoking; wf.sh sources no env file"; }
@@ -65,8 +69,10 @@ check_author(){  # cross-family: claude|codex; the Codex->Claude reverse reviewe
 }
 
 wt_branch(){ git -C "$1" rev-parse --abbrev-ref HEAD; }                       # branch of a worktree
-wt_pr(){     gh -R "$(gh_repo)" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null; }  # PR# for a worktree's branch
-gh_repo(){   git -C "$ORIGIN_REPO" remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##'; }
+# repo slug + main checkout, derived FROM a worktree dir (any worktree shares origin + the main checkout):
+gh_repo(){      git -C "${1:-$ORIGIN_REPO}" remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##'; }
+main_checkout(){ git -C "$1" worktree list --porcelain | awk '/^worktree /{print $2; exit}'; }   # 1st worktree = main
+wt_pr(){        gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null; }  # PR# for a worktree's branch
 
 # --- fail-closed review verdict ------------------------------------------------------------------
 require_valid_review(){ grep -qE '^SUMMARY: high=[0-9]+ med=[0-9]+ low=[0-9]+' "$1" \
@@ -90,8 +96,11 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading>
   REVIEW_HIGH=$(count_high "$rev"); REVIEW_ALL=$(count_all "$rev")
   note "$mode verdict: $REVIEW_ALL finding(s), $REVIEW_HIGH HIGH -> $rev"
   if [ -n "$pr" ]; then
+    # the posted review IS the durable record — fail CLOSED if it can't be written (don't silently skip it)
     { echo "## $heading"; echo; echo "_Cross-family \`$mode\` review — author \`$author\`, reviewer = opposite family. Posted by the workflow driver (shadow mode)._"; echo; echo '```'; cat "$rev"; echo '```'; } \
-      | gh -R "$(gh_repo)" pr comment "$pr" --body-file - >/dev/null && note "posted $mode review to PR #$pr"
+      | gh -R "$(gh_repo "$wt")" pr comment "$pr" --body-file - >/dev/null \
+      || die "could not post the $mode review to PR #$pr — the durable record is the point; failing closed (verdict was: $REVIEW_ALL finding(s), $REVIEW_HIGH HIGH; see $rev)"
+    note "posted $mode review to PR #$pr"
   else
     note "no PR yet — $mode review NOT posted (verdict above; $rev)"
   fi
@@ -104,7 +113,14 @@ case "$CMD" in
 start)  # wf.sh start <issue#> <slug>
   ISSUE=${1:?usage: wf.sh start <issue#> <slug>}; SLUG=${2:?slug (kebab-case)}
   [ "$(git -C "$ORIGIN_REPO" rev-parse --abbrev-ref HEAD)" = main ] || die "$ORIGIN_REPO is not on 'main' (base must be main)"
-  git -C "$ORIGIN_REPO" fetch -q origin && git -C "$ORIGIN_REPO" pull --ff-only -q origin main 2>/dev/null || true
+  # fail CLOSED on a stale base: every later gate assumes main...HEAD is THE integration diff, so main must be
+  # current with the remote before we branch from it. (Pass WF_OFFLINE=1 to skip — e.g. a deliberate offline run.)
+  if [ "${WF_OFFLINE:-}" != 1 ]; then
+    git -C "$ORIGIN_REPO" fetch -q origin || die "git fetch origin failed — can't confirm main is current (set WF_OFFLINE=1 to override)"
+    git -C "$ORIGIN_REPO" merge-base --is-ancestor origin/main HEAD \
+      || git -C "$ORIGIN_REPO" pull --ff-only -q origin main \
+      || die "local main is behind/diverged from origin/main and won't fast-forward — reconcile main before starting a change"
+  fi
   BR="change/${ISSUE}-${SLUG}"; WT="${WF_WORKTREE_ROOT:-/tmp}/wf-${ISSUE}-${SLUG}"
   [ -e "$WT" ] && die "worktree path already exists: $WT (finish or remove the prior run first)"
   git -C "$ORIGIN_REPO" worktree add -q "$WT" -b "$BR" main || die "could not create worktree/branch $BR"
@@ -156,7 +172,7 @@ Namespaced design doc for the scaffold change. Reviewed by --scaffold next.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" )
   ( cd "$WT" && git push -q -u origin "$BR" ) || die "push failed"
-  PRURL=$(gh -R "$(gh_repo)" pr create --draft --base main --head "$BR" \
+  PRURL=$(gh -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
     --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
     --body "Closes #${ISSUE}. Design doc: \`$DOC\` (on this branch; lands on main at merge).
 
@@ -178,6 +194,8 @@ design-review)  # wf.sh design-review <worktree> <author>
 code-review)    # wf.sh code-review <worktree> <author>
   need_gh; WT=${1:?usage: wf.sh code-review <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
   check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  # push first so the PR (what the human + reviewer see) reflects the reviewed commits — no local/remote gap
+  ( cd "$WT" && git push -q origin HEAD ) || die "push failed — can't review a diff the PR doesn't reflect"
   DIFF="${TMPDIR:-/tmp}/wf_code_$(wt_branch "$WT" | tr '/' '_').diff"
   ( cd "$WT" && git diff main...HEAD ) > "$DIFF"
   [ -s "$DIFF" ] || die "empty diff main...$(wt_branch "$WT") — implement + commit the change first"
@@ -197,7 +215,7 @@ classify)       # wf.sh classify <worktree>   — shadow-mode record (never bloc
   if [ -n "$PR" ]; then
     { echo "## Change classification (shadow mode — recorded, not enforced)"; echo;
       echo "**$CLASS** — architectural changes need the PM's design approval; mechanical merge on the cross-family review + checks alone. (Phase 1: recorded only; Phase 2 wires this to a required \`design-gate\` check.)"; echo;
-      echo '```'; echo "$OUT"; echo '```'; } | gh -R "$(gh_repo)" pr comment "$PR" --body-file - >/dev/null \
+      echo '```'; echo "$OUT"; echo '```'; } | gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
       && note "posted classification to PR #$PR"
   fi
   echo "$OUT"
@@ -206,9 +224,16 @@ classify)       # wf.sh classify <worktree>   — shadow-mode record (never bloc
 finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gate + ready + merge + cleanup
   need_gh; WT=${1:?usage: wf.sh finish <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
   check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  REPO=$(gh_repo "$WT"); MAIN_CO=$(main_checkout "$WT")
   BR=$(wt_branch "$WT"); PR=$(wt_pr "$WT"); [ -n "$PR" ] || die "no PR for branch $BR (run: wf.sh open $WT)"
   mapfile -t PATHS < <(cd "$WT" && git diff --name-only main...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD — nothing to merge"
+  # 0. SYNC: push the worktree so the PR head == the LOCAL HEAD we're about to review (F1). Otherwise we'd
+  #    review the local diff but merge a different remote head, then delete the reviewed worktree.
+  ( cd "$WT" && git push -q origin HEAD ) || die "push failed — refusing to merge a PR that may not match the reviewed diff"
+  LOCAL_SHA=$(git -C "$WT" rev-parse HEAD)
+  REMOTE_SHA=$(gh -R "$REPO" pr view "$PR" --json headRefOid -q .headRefOid)
+  [ "$LOCAL_SHA" = "$REMOTE_SHA" ] || die "PR #$PR head ($REMOTE_SHA) != local HEAD ($LOCAL_SHA) — the reviewed diff is not what would merge. Resolve (re-push / reconcile) before finishing."
   # 1. deterministic checks + behavior smoke, on the BRANCH's actual content (the worktree)
   [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
   note "running .aar-ci checks + smoke on branch content…"
@@ -218,14 +243,14 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   ( cd "$WT" && git diff main...HEAD ) > "$DIFF"
   run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)"
   [ "$REVIEW_HIGH" = 0 ] || die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
-  # 3. merge (shadow mode: agent merge after the gate; branch protection not required yet)
-  note "gate clean (no HIGH) + checks passed -> marking ready + merging PR #$PR"
-  gh -R "$(gh_repo)" pr ready "$PR" >/dev/null 2>&1 || true
-  gh -R "$(gh_repo)" pr merge "$PR" --squash --delete-branch || die "merge failed"
-  # 4. cleanup: sync main, remove the worktree
-  git -C "$ORIGIN_REPO" worktree remove --force "$WT" 2>/dev/null || true
-  git -C "$ORIGIN_REPO" checkout -q main 2>/dev/null || true
-  git -C "$ORIGIN_REPO" pull --ff-only -q origin main 2>/dev/null || note "WARN: could not ff-only pull main — reconcile manually"
+  # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced) — shadow
+  #    mode: agent merge after the gate; branch protection not required yet.
+  note "gate clean (no HIGH) + checks passed -> marking ready + merging PR #$PR @ $LOCAL_SHA"
+  gh -R "$REPO" pr ready "$PR" >/dev/null 2>&1 || true
+  gh -R "$REPO" pr merge "$PR" --squash --delete-branch --match-head-commit "$LOCAL_SHA" || die "merge failed (head may have moved since review — re-run finish)"
+  # 4. cleanup: remove the worktree (derive the main checkout FROM the worktree), sync main
+  git -C "$MAIN_CO" worktree remove --force "$WT" 2>/dev/null || true
+  git -C "$MAIN_CO" pull --ff-only -q origin main 2>/dev/null || note "WARN: could not ff-only pull main ($MAIN_CO) — reconcile manually"
   local_manifest=0; for p in "${PATHS[@]}"; do case "$p" in */plugin.json|*marketplace.json) local_manifest=1;; esac; done
   [ "$local_manifest" = 1 ] && note "a plugin manifest changed — refresh installs: claude plugin marketplace update aar-skills && claude plugin update <name>@aar-skills"
   echo "SHIPPED: PR #$PR merged (shadow mode — clean cross-family review + checks). Worktree cleaned."
