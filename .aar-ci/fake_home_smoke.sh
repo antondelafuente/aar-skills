@@ -4,7 +4,9 @@
 # Args: <marketplace-source-repo> <plugin-name>.  Exit non-zero on any failure. Destroys the fake HOME after.
 set -uo pipefail
 REPO=${1:?marketplace source repo}; PLUG=${2:?plugin name}
-V="${TMPDIR:-/tmp}/smoke-$PLUG-$$"
+# validate the plugin name before it ever touches a path or CLI arg (no traversal/injection)
+[[ "$PLUG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "  SMOKE-FAIL: invalid plugin name: $PLUG" >&2; exit 1; }
+V=$(mktemp -d "${TMPDIR:-/tmp}/smoke.XXXXXX")   # private dir, independent of $PLUG
 cleanup(){ rm -rf "$V"; }
 trap cleanup EXIT
 fail=0; err(){ echo "  SMOKE-FAIL: $*" >&2; fail=1; }

@@ -52,8 +52,12 @@ ROOT="$(git rev-parse --show-toplevel)"
 SMOKE="$ROOT/.aar-ci/fake_home_smoke.sh"
 SMOKE_PLUGS=$(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#plugins/([^/]+)/.*#\1#')
 if printf '%s\n' "${PATHS[@]}" | grep -q '^\.claude-plugin/marketplace.json$'; then
-  SMOKE_PLUGS="$SMOKE_PLUGS
-$(python3 -c "import json;print('\n'.join(p['name'] for p in json.load(open('$ROOT/.claude-plugin/marketplace.json'))['plugins']))" 2>/dev/null)"
+  if mp=$(python3 -c "import json;print('\n'.join(p['name'] for p in json.load(open('$ROOT/.claude-plugin/marketplace.json'))['plugins']))" 2>/dev/null); then
+    SMOKE_PLUGS="$SMOKE_PLUGS
+$mp"
+  else
+    err "marketplace.json changed but its plugin list could not be parsed (schema broken?) — cannot smoke discovery"
+  fi
 fi
 for plug in $(printf '%s\n' "$SMOKE_PLUGS" | grep -v '^$' | sort -u); do
   if [ -f "$SMOKE" ]; then
