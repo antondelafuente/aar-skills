@@ -17,10 +17,16 @@ for p in "${PATHS[@]}"; do case "$p" in
   *.json) [ -f "$p" ] && { python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$p" 2>/dev/null && ok "json $p" || err "invalid JSON: $p"; } ;;
 esac; done
 
-# 2. shell syntax
-for p in "${PATHS[@]}"; do case "$p" in
-  *.sh) [ -f "$p" ] && { bash -n "$p" 2>/dev/null && ok "bash -n $p" || err "bash syntax: $p"; } ;;
-esac; done
+# 2. shell syntax — *.sh AND extensionless shell scripts (e.g. .githooks/* hooks) detected by shebang
+for p in "${PATHS[@]}"; do
+  [ -f "$p" ] || continue
+  is_sh=0
+  case "$p" in
+    *.sh) is_sh=1 ;;
+    *) head -1 "$p" 2>/dev/null | grep -qE '^#!.*(bash|/sh|env +sh)\b' && is_sh=1 ;;
+  esac
+  [ "$is_sh" = 1 ] && { bash -n "$p" 2>/dev/null && ok "bash -n $p" || err "bash syntax: $p"; }
+done
 
 # 3. python compiles
 for p in "${PATHS[@]}"; do case "$p" in

@@ -16,8 +16,10 @@ today is **asymmetric**:
 
 This is the commit-time layer of the broader #40 defense. (Tiers 1 and 3 — a Claude Code PreToolUse
 edit-guard and a SessionStart drift tripwire — are **instance** hooks and already landed on the box; this PR
-is the one **product** layer, so it ships through ship-change and protects every clone/substrate, not just
-this box.)
+is the one **product** layer, so it ships through ship-change and is available to every clone/substrate, not
+just this box — protecting a given clone once it runs the documented per-clone install
+`git config core.hooksPath .githooks` (design-review F2). Making a *missing* `core.hooksPath` visible to a new
+developer is a related onboarding gap, tracked separately under #26, not solved here.)
 
 ## Approach
 
@@ -57,9 +59,11 @@ fi
 
 ## Blast radius
 
-- **One file:** `aar-skills/.githooks/pre-commit` (a new early branch check; the existing secret-scan logic is
-  untouched). Active only where `core.hooksPath=.githooks` is set (the documented per-clone install, already
-  in force on this box).
+- **Two files:** `aar-skills/.githooks/pre-commit` (a new early branch check; the existing secret-scan logic is
+  untouched) and `aar-skills/.aar-ci/checks.sh` (design-review F1: the shell-syntax check only `bash -n`'d
+  `*.sh`, so the extensionless hook wasn't covered — now it lints any shell script by shebang, including
+  `.githooks/*`). The guard is active only where `core.hooksPath=.githooks` is set (the documented per-clone
+  install, already in force on this box).
 - Affects **every committer on a `main` branch** — which, in the ship-change model, should be nobody (all work
   is on `change/*`). The `--no-verify` hatch covers the rare genuine exception (e.g. the bootstrap path).
 - Does **not** affect the merge: `gh pr merge --squash` runs server-side and never triggers the local hook;
