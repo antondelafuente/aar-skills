@@ -23,7 +23,7 @@
     {
       "name": "aar-engineering",
       "source": "./plugins/aar-engineering",
-      "description": "The SWE pipeline that builds the product itself: ship-change drives a scaffold change through a GitHub-backed lifecycle — Issue → worktree branch → namespaced design doc → draft PR → cross-family --scaffold design review → implement → cross-family --code review → mechanical/architectural classifier → tracked .aar-ci checks + behavior smoke → fail-closed merge-when-clean. The agents are the engineers; a change is authored by one model family and reviewed by the other. Phase 1 runs in shadow mode. Pairs with verify-claims and a per-repo .aar-ci/ profile."
+      "description": "The SWE pipeline that builds the product itself: ship-change drives a scaffold change through a GitHub-backed lifecycle — Issue → worktree branch → namespaced design doc → draft PR → cross-family --scaffold design review → implement → cross-family --code review → mechanical/architectural classifier → tracked .aar-ci checks + behavior smoke → fail-closed merge-when-clean. The agents are the engineers; a change is authored by one model family and reviewed by the other. Enforced: the cross-family --code review posts a native GitHub review via a separate reviewer identity that branch protection requires before merge (falls back to comments if none is configured). Pairs with verify-claims and a per-repo .aar-ci/ profile."
     }
   ]
 }

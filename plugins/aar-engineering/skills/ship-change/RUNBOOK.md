@@ -58,9 +58,9 @@ shouldn't be able to bypass its own gate). Instead the owner edits the rule:
 
 ## Token / identity rotation
 
-- **`GH_TOKEN`** (author/driver auth; this instance: `~/.env`). Rotate: mint a new fine-grained PAT (repo:
-  contents + pull_requests), replace in `~/.env`, re-`source`. `wf.sh` sources no env file itself. NEVER print
-  it; scrub from captured output (`sed "s/${GH_TOKEN}/***/g"`).
+- **`GH_TOKEN`** (author/driver auth). Rotate: mint a new fine-grained PAT (repo: contents + pull_requests),
+  replace it wherever your environment provides `GH_TOKEN` *(this instance: `~/.env`, re-`source`)*. `wf.sh`
+  sources no env file itself. NEVER print it; scrub from captured output (`sed "s/${GH_TOKEN}/***/g"`).
 - **`codex-engineer` App** (reviewer identity). Rotate the App's private key in the App settings and replace
   `~/.config/codex-engineer/key.pem`; the minter picks it up. Revoking the App stops approvals immediately.
 
