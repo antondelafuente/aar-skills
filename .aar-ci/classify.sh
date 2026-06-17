@@ -59,14 +59,27 @@ if [ ${#PATHS[@]} -eq 0 ]; then
 fi
 
 # normalize every input to a repo-relative path so a protected file can't dodge the globs by being passed as
-# ./AGENTS.md, from a subdir, or as an absolute path (the globs are repo-relative; git diff --name-only is too,
-# but a caller may not be). Strip a leading ./ and rebase an under-$ROOT absolute path onto $ROOT.
-norm=()
+# ./AGENTS.md, ../AGENTS.md from a subdir, subdir/../AGENTS.md, or an absolute path (the globs are
+# repo-relative; `git diff --name-only` — the canonical caller — is too, but we don't trust the caller).
+# CONTRACT: inputs are repo-relative (git's form), so relatives resolve against $ROOT; we canonicalize away
+# any ./ and ../ with realpath -m (no on-disk existence needed — diffs reference deleted paths too).
+# FAIL-CLOSED: any path that resolves OUTSIDE the repo root is malformed/suspicious -> architectural, never
+# allowed to slip to mechanical.
+norm=(); outside=()
 for p in "${PATHS[@]}"; do
-  q="${p#./}"
-  case "$q" in "$ROOT"/*) q="${q#"$ROOT"/}";; esac
-  norm+=("$q")
+  case "$p" in /*) abs="$p";; *) abs="$ROOT/$p";; esac
+  abs=$(realpath -m -- "$abs" 2>/dev/null || printf '%s' "$abs")
+  case "$abs" in
+    "$ROOT")    norm+=(".") ;;
+    "$ROOT"/*)  norm+=("${abs#"$ROOT"/}") ;;
+    *)          outside+=("$p") ;;
+  esac
 done
+if [ ${#outside[@]} -gt 0 ]; then
+  echo "CLASSIFICATION: architectural"
+  printf 'EVIDENCE: path resolves outside the repo root -> fail-closed architectural — %s\n' "${outside[@]}"
+  exit 0
+fi
 PATHS=("${norm[@]}")
 
 # hard rules: any changed path matching the effective always-architectural set => architectural (can't downgrade)
