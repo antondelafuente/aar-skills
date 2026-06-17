@@ -69,6 +69,12 @@ check_author(){  # cross-family: claude|codex; the Codex->Claude reverse reviewe
 }
 
 wt_branch(){ git -C "$1" rev-parse --abbrev-ref HEAD; }                       # branch of a worktree
+# the reviewed + merged content must be the COMMITTED content: refuse to act on a dirty tree (uncommitted or
+# untracked changes would make checks/review see content that isn't what merges, and --force removal would
+# then destroy it).
+require_clean(){ [ -z "$(git -C "$1" status --porcelain)" ] || die "worktree $1 has uncommitted/untracked changes — commit or discard them first (reviewed+merged content must be the committed content)"; }
+# every post-open review/finish subcommand REQUIRES a PR (the durable record); a failed lookup is fatal, never silent.
+wt_pr_required(){ local pr; pr=$(wt_pr "$1"); [ -n "$pr" ] || die "no PR found for branch $(wt_branch "$1") — run 'wf.sh open $1' first (or PR lookup/auth failed)"; echo "$pr"; }
 # repo slug + main checkout, derived FROM a worktree dir (any worktree shares origin + the main checkout):
 gh_repo(){      git -C "${1:-$ORIGIN_REPO}" remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##'; }
 main_checkout(){ git -C "$1" worktree list --porcelain | awk '/^worktree /{print $2; exit}'; }   # 1st worktree = main
@@ -117,9 +123,11 @@ start)  # wf.sh start <issue#> <slug>
   # current with the remote before we branch from it. (Pass WF_OFFLINE=1 to skip — e.g. a deliberate offline run.)
   if [ "${WF_OFFLINE:-}" != 1 ]; then
     git -C "$ORIGIN_REPO" fetch -q origin || die "git fetch origin failed — can't confirm main is current (set WF_OFFLINE=1 to override)"
-    git -C "$ORIGIN_REPO" merge-base --is-ancestor origin/main HEAD \
-      || git -C "$ORIGIN_REPO" pull --ff-only -q origin main \
-      || die "local main is behind/diverged from origin/main and won't fast-forward — reconcile main before starting a change"
+    git -C "$ORIGIN_REPO" pull --ff-only -q origin main 2>/dev/null || true   # catch up if simply behind
+    # require EXACT equality with origin/main: if local main is AHEAD (unpublished commits) those would ride
+    # into the PR while `main...HEAD` reviews/checks omit them; if behind/diverged the base is stale.
+    [ "$(git -C "$ORIGIN_REPO" rev-parse main)" = "$(git -C "$ORIGIN_REPO" rev-parse origin/main)" ] \
+      || die "local main != origin/main (unpublished/diverged commits) — reconcile main with origin before starting; otherwise unreviewed main commits would merge through this PR"
   fi
   BR="change/${ISSUE}-${SLUG}"; WT="${WF_WORKTREE_ROOT:-/tmp}/wf-${ISSUE}-${SLUG}"
   [ -e "$WT" ] && die "worktree path already exists: $WT (finish or remove the prior run first)"
@@ -166,11 +174,11 @@ open)   # wf.sh open <worktree>   — commit the design doc, push, open the DRAF
   [ -n "$DOC" ] || DOC=$(cd "$WT" && git diff --name-only main...HEAD -- proposals/ | head -1)
   [ -n "$DOC" ] || die "no design doc under proposals/ found (write proposals/<issue>-<slug>.md first)"
   ISSUE=$(basename "$DOC" | sed -E 's/^([0-9]+)-.*/\1/')
+  # attribution comes from the committer's git identity + the PR — don't hardcode an author family here
+  # (this is product code; a Codex- or other-authored change must not get a Claude trailer).
   ( cd "$WT" && git add -- "$DOC" && git commit -q -m "design: $(basename "$DOC" .md) (#${ISSUE})
 
-Namespaced design doc for the scaffold change. Reviewed by --scaffold next.
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" )
+Namespaced design doc for the scaffold change. Reviewed by --scaffold next." )
   ( cd "$WT" && git push -q -u origin "$BR" ) || die "push failed"
   PRURL=$(gh -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
     --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
@@ -187,19 +195,21 @@ design-review)  # wf.sh design-review <worktree> <author>
   check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
   DOC=$(cd "$WT" && git diff --name-only main...HEAD -- proposals/ | head -1)
   [ -n "$DOC" ] || die "no committed design doc under proposals/ (run: wf.sh open $WT)"
-  run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$(wt_pr "$WT")" "Design review (\`--scaffold\`)"
+  PR=$(wt_pr_required "$WT")
+  run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Design review (\`--scaffold\`)"
   note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings; the PM's design approval is the human gate (shadow: recorded). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
   ;;
 
 code-review)    # wf.sh code-review <worktree> <author>
   need_gh; WT=${1:?usage: wf.sh code-review <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
   check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  require_clean "$WT"; PR=$(wt_pr_required "$WT")
   # push first so the PR (what the human + reviewer see) reflects the reviewed commits — no local/remote gap
   ( cd "$WT" && git push -q origin HEAD ) || die "push failed — can't review a diff the PR doesn't reflect"
   DIFF="${TMPDIR:-/tmp}/wf_code_$(wt_branch "$WT" | tr '/' '_').diff"
   ( cd "$WT" && git diff main...HEAD ) > "$DIFF"
   [ -s "$DIFF" ] || die "empty diff main...$(wt_branch "$WT") — implement + commit the change first"
-  run_review --code "$WT" "$AUTHOR" "$DIFF" "$(wt_pr "$WT")" "Code review (\`--code\`)"
+  run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Code review (\`--code\`)"
   note "code-review done (HIGH=$REVIEW_HIGH). Triage findings (fix in $WT + commit, or respond on the PR). Then: wf.sh classify $WT ; wf.sh finish $WT $AUTHOR"
   ;;
 
@@ -207,11 +217,12 @@ classify)       # wf.sh classify <worktree>   — shadow-mode record (never bloc
   need_gh; WT=${1:?usage: wf.sh classify <worktree>}
   [ -d "$WT" ] || die "no such worktree: $WT"
   [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the aar-skills repo?)"
+  require_clean "$WT"
   mapfile -t PATHS < <(cd "$WT" && git diff --name-only main...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD"
   OUT=$( cd "$WT" && .aar-ci/classify.sh "${PATHS[@]}" )
   CLASS=$(echo "$OUT" | sed -nE 's/^CLASSIFICATION: //p' | head -1)
-  PR=$(wt_pr "$WT")
+  PR=$(wt_pr_required "$WT")
   if [ -n "$PR" ]; then
     { echo "## Change classification (shadow mode — recorded, not enforced)"; echo;
       echo "**$CLASS** — architectural changes need the PM's design approval; mechanical merge on the cross-family review + checks alone. (Phase 1: recorded only; Phase 2 wires this to a required \`design-gate\` check.)"; echo;
@@ -224,8 +235,9 @@ classify)       # wf.sh classify <worktree>   — shadow-mode record (never bloc
 finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gate + ready + merge + cleanup
   need_gh; WT=${1:?usage: wf.sh finish <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
   check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  require_clean "$WT"   # everything must be committed: reviewed == checked == merged, and nothing lost on --force removal
   REPO=$(gh_repo "$WT"); MAIN_CO=$(main_checkout "$WT")
-  BR=$(wt_branch "$WT"); PR=$(wt_pr "$WT"); [ -n "$PR" ] || die "no PR for branch $BR (run: wf.sh open $WT)"
+  BR=$(wt_branch "$WT"); PR=$(wt_pr_required "$WT")
   mapfile -t PATHS < <(cd "$WT" && git diff --name-only main...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD — nothing to merge"
   # 0. SYNC: push the worktree so the PR head == the LOCAL HEAD we're about to review (F1). Otherwise we'd
