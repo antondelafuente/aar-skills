@@ -109,6 +109,18 @@ gh_repo(){      git -C "${1:-$ORIGIN_REPO}" remote get-url origin | sed -E 's#(g
 main_checkout(){ git -C "$1" worktree list --porcelain | awk '/^worktree /{print $2; exit}'; }   # 1st worktree = main
 wt_pr(){        gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null; }  # PR# for a worktree's branch
 
+# render_pr_body <worktree> <doc-relpath> <issue> — the PR body as a generated VIEW of the committed
+# design doc (#24): a self-describing, plain-language PR with zero duplicate authoring. Doc from its first
+# '## ' section (drops the H1 title — already the PR title — and the boilerplate blockquote); falls back to
+# whole-doc-minus-H1 if there's no '## '. Re-rendered at finish so the merged record matches the landed doc.
+render_pr_body(){
+  local wt="$1" doc="$2" issue="$3" body
+  body=$(awk 'f||/^## /{f=1}f' "$wt/$doc")
+  [ -n "$body" ] || body=$(sed '1{/^# /d;}' "$wt/$doc")
+  printf 'Closes #%s.\n\n%s\n\n---\n\n**Design doc:** `%s` (lands on main at merge) · **Issue:** #%s\n\n_Lifecycle: draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. The cross-family review is a native codex-engineer[bot] review; branch protection requires that approval before merge._\n' \
+    "$issue" "$body" "$doc" "$issue"
+}
+
 # --- fail-closed review verdict ------------------------------------------------------------------
 require_valid_review(){ grep -qE '^SUMMARY: high=[0-9]+ med=[0-9]+ low=[0-9]+' "$1" \
   || die "review output malformed/incomplete (no valid 'SUMMARY: high=.. med=.. low=..') — failing CLOSED. See $1"; }
@@ -250,11 +262,12 @@ open)   # wf.sh open <worktree>   — commit the design doc, push, open the DRAF
 
 Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- "$DOC" )
   ( cd "$WT" && git push -q -u origin "$BR" ) || die "push failed"
-  PRURL=$(gh -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
+  # PR body = the design doc RENDERED (#24) — self-describing, plain-language, zero duplicate authoring.
+  # render_pr_body re-runs at finish so the merged record matches the landed doc. --body-file - (stdin)
+  # so the doc's backticks/code fences/$/# survive untouched.
+  PRURL=$(render_pr_body "$WT" "$DOC" "$ISSUE" | gh -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
     --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
-    --body "Closes #${ISSUE}. Design doc: \`$DOC\` (on this branch; lands on main at merge).
-
-Lifecycle: draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. The cross-family review is a native codex-engineer[bot] review; branch protection requires that approval before merge.") \
+    --body-file -) \
     || die "gh pr create failed"
   PR=$(basename "$PRURL")
   echo "PR=$PR"; note "draft PR #$PR opened: $PRURL"; note "next: wf.sh design-review $WT <author>"
@@ -343,6 +356,18 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   REMOTE_SHA=$(git -C "$WT" ls-remote --heads origin "refs/heads/$BR" | awk '{print $1}')
   [ -n "$REMOTE_SHA" ] || die "branch $BR has no head on origin — push it first"
   [ "$LOCAL_SHA" = "$REMOTE_SHA" ] || die "branch $BR remote head ($REMOTE_SHA) != local HEAD ($LOCAL_SHA) — the reviewed diff is not what would merge. Re-push / reconcile before finishing."
+  # 0c. Refresh the PR body from the now-final committed design doc (#24 F1): the doc may have been revised
+  #     during review since `open`, so re-render before merge to keep the durable record == the landed doc.
+  #     Best-effort — a cosmetic body refresh must never block an otherwise-clean merge.
+  FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
+  if [ -n "$FDOC" ]; then
+    FISSUE=$(basename "$FDOC" | sed -E 's/^([0-9]+)-.*/\1/')
+    if render_pr_body "$WT" "$FDOC" "$FISSUE" | gh -R "$REPO" pr edit "$PR" --body-file - >/dev/null 2>&1; then
+      note "refreshed PR #$PR body from the final design doc"
+    else
+      note "WARN: could not refresh PR #$PR body (cosmetic — proceeding to merge)"
+    fi
+  fi
   # 1. deterministic checks + behavior smoke, on the BRANCH's actual content (the worktree)
   [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
   note "running .aar-ci checks + smoke on branch content…"
