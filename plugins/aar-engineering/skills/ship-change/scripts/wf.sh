@@ -336,7 +336,9 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   # ref updates atomically on push, while GitHub's PR-head association LAGS a beat — querying headRefOid right
   # after a push intermittently returned the old SHA and wedged finish on a phantom mismatch. The merge below
   # still uses --match-head-commit "$LOCAL_SHA" as the authoritative guard against a head that moved.
-  REMOTE_SHA=$(git -C "$WT" ls-remote origin "$BR" | awk '{print $1}')
+  # exact head ref only (--heads + refs/heads/$BR) so a tag or other ref with the same tail can't match
+  REMOTE_SHA=$(git -C "$WT" ls-remote --heads origin "refs/heads/$BR" | awk '{print $1}')
+  [ -n "$REMOTE_SHA" ] || die "branch $BR has no head on origin — push it first"
   [ "$LOCAL_SHA" = "$REMOTE_SHA" ] || die "branch $BR remote head ($REMOTE_SHA) != local HEAD ($LOCAL_SHA) — the reviewed diff is not what would merge. Re-push / reconcile before finishing."
   # 1. deterministic checks + behavior smoke, on the BRANCH's actual content (the worktree)
   [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
