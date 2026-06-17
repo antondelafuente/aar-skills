@@ -33,11 +33,16 @@ esac; done
 #    check would itself be instance-coupling (and trips the secrets hook on its own regex).
 
 # 5. version bump: if a plugin's non-manifest file changed, its plugin.json version must have moved
+# Compare against the INTEGRATION BASE (merge-base with main), not HEAD: the change may be uncommitted on
+# main (old flow → base==HEAD==main) OR already committed on a branch (worktree-from-the-start flow → HEAD
+# already has the new version; only the merge-base holds the prior one). Using HEAD broke the committed flow
+# (it compared the new version against itself). Falls back to HEAD when there's no main (e.g. a fresh repo).
+BASE=$(git merge-base HEAD main 2>/dev/null || git rev-parse HEAD 2>/dev/null || echo HEAD)
 for plugdir in $(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#(plugins/[^/]+)/.*#\1#' | sort -u); do
   nonmanifest=$(printf '%s\n' "${PATHS[@]}" | grep "^$plugdir/" | grep -v '\.claude-plugin/plugin.json' || true)
   [ -n "$nonmanifest" ] || continue
   pj="$plugdir/.claude-plugin/plugin.json"
-  oldv=$(git show "HEAD:$pj" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null)
+  oldv=$(git show "$BASE:$pj" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null)
   newv=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('version',''))" "$pj" 2>/dev/null)
   if [ -z "$oldv" ]; then ok "new plugin manifest $pj (v${newv:-?})"; continue; fi   # new plugin: no prior version to bump
   # require the version to actually INCREASE (an added/moved/reformatted/downgraded version line is not a bump)
