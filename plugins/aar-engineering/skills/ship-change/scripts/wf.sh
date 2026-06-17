@@ -282,8 +282,8 @@ code-review)    # wf.sh code-review <worktree> <author>
   note "code-review done (HIGH=$REVIEW_HIGH). Triage findings (fix in $WT + commit, or respond on the PR). Then: wf.sh classify $WT ; wf.sh finish $WT $AUTHOR"
   ;;
 
-classify)       # wf.sh classify <worktree>   — shadow-mode record (never blocks)
-  need_gh; WT=${1:?usage: wf.sh classify <worktree>}
+classify)       # wf.sh classify <worktree> [author]   — shadow-mode record (never blocks)
+  need_gh; WT=${1:?usage: wf.sh classify <worktree> [author]}; AUTHOR=${2:-claude}   # author optional; only claude is wired
   [ -d "$WT" ] || die "no such worktree: $WT"
   [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the aar-skills repo?)"
   require_clean "$WT"
@@ -295,9 +295,10 @@ classify)       # wf.sh classify <worktree>   — shadow-mode record (never bloc
   BODY=$( { echo "## Change classification (recorded; the design-gate is not yet a required check)"; echo;
       echo "**$CLASS** — architectural changes need the PM's design approval; mechanical merge on the cross-family review + checks alone. (Recorded for now; wiring this to a required \`design-gate\` check is a follow-up.)"; echo;
       echo '```'; echo "$OUT"; echo '```'; } )
-  # attribute the classification to the reviewer identity (the bot) when configured — it's automated workflow
-  # output, not the human's; claude-authored is the only wired direction. Falls back to the default token.
-  RTOK=$(reviewer_token)
+  # attribute the classification to the reviewer identity (the bot) when configured AND the change is
+  # claude-authored — it's automated workflow output, not the human's. Falls back to the default token
+  # (also the path for any non-claude-authored direction, matching the rest of the driver).
+  RTOK=""; [ "$AUTHOR" = claude ] && RTOK=$(reviewer_token)
   if [ -n "$RTOK" ]; then
     echo "$BODY" | GH_TOKEN="$RTOK" gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
       || die "could not post the classification to PR #$PR as the reviewer identity — failing closed (classification was: $CLASS)"
