@@ -84,9 +84,10 @@ If *you* are setting these up by hand in the Claude Code UI (the agent path is t
 /plugin install experiment-lifecycle@aar-skills
 ```
 
-**Codex CLI / other Agent-Skills harnesses:** clone, then symlink or copy
-`plugins/<module>/skills/<module>` into your harness's skills directory
-(e.g. `~/.codex/skills/`). Scripts are referenced relative to each skill.
+**Codex CLI / other Agent-Skills harnesses:** clone, then symlink each skill dir into your harness's
+skills directory (e.g. `~/.codex/skills/`) — use the explicit per-skill `ln -s` lines in "If you are a
+coding agent" above (a plugin can expose more than one skill, so symlink the `skills/<skill>` dirs, not
+`skills/<module>`). Scripts are referenced relative to each skill.
 
 ## Updating
 
