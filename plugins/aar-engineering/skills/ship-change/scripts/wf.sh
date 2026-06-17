@@ -146,11 +146,11 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
   local repo body; repo=$(gh_repo "$wt")
   body=$(printf '## %s\n\n_Cross-family `%s` review — author `%s`, reviewer = opposite family._\n\n```\n%s\n```\n' "$heading" "$mode" "$author" "$(cat "$rev")")
-  # NATIVE review via the reviewer identity — ONLY for --code AND author=claude (the single reviewer token is
-  # the CODEX identity, which may only review CLAUDE-authored work; codex-authored would be same-family, so it
-  # falls through to a comment). --scaffold/other modes = comment.
-  local rtok=""; { [ "$mode" = --code ] && [ "$author" = claude ]; } && rtok=$(reviewer_token)
-  if [ -n "$rtok" ]; then
+  # The reviewer identity (the CODEX bot, for claude-authored work) attributes ALL its output to ITSELF — a
+  # NATIVE review for --code (the merge gate), a COMMENT for --scaffold (the design review isn't the gate).
+  # Codex-authored work has no wired Claude reviewer, so author!=claude falls back to the default token.
+  local rtok=""; [ "$author" = claude ] && rtok=$(reviewer_token)
+  if [ "$mode" = --code ] && [ -n "$rtok" ]; then
     local event sha; sha=$(git -C "$wt" rev-parse HEAD)
     if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then event=APPROVE              # finish gate, clean -> APPROVE
     elif [ "$REVIEW_HIGH" != 0 ]; then event=REQUEST_CHANGES                           # any blocking finding
@@ -162,10 +162,17 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
         -f commit_id="$sha" -f event="$event" -f body="$body" >/dev/null \
       || die "could not post the native $event review (commit $sha) to PR #$pr as the reviewer identity — failing closed (verdict: $REVIEW_ALL findings, $REVIEW_HIGH HIGH; see $rev)"
     note "posted NATIVE review ($event @ ${sha:0:8}) to PR #$pr as the reviewer identity"
+  elif [ -n "$rtok" ]; then
+    # --scaffold (or any non-code): a COMMENT attributed to the reviewer identity (so the design review reads
+    # as the bot, not the author's token).
+    echo "$body" | GH_TOKEN="$rtok" gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
+      || die "could not post the $mode review comment to PR #$pr as the reviewer identity — failing closed (see $rev)"
+    note "posted $mode review COMMENT to PR #$pr as the reviewer identity"
   else
+    # no reviewer identity configured (shadow / unsupported direction): comment under the default token
     echo "$body" | gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
-      || die "could not post the $mode review comment to PR #$pr — failing closed (verdict: $REVIEW_ALL findings, $REVIEW_HIGH HIGH; see $rev)"
-    note "posted $mode review COMMENT to PR #$pr"
+      || die "could not post the $mode review comment to PR #$pr — failing closed (see $rev)"
+    note "posted $mode review COMMENT to PR #$pr (default token)"
   fi
 }
 
@@ -285,12 +292,20 @@ classify)       # wf.sh classify <worktree>   — shadow-mode record (never bloc
   OUT=$( cd "$WT" && .aar-ci/classify.sh "${PATHS[@]}" )
   CLASS=$(echo "$OUT" | sed -nE 's/^CLASSIFICATION: //p' | head -1)
   PR=$(wt_pr_required "$WT")
-  if [ -n "$PR" ]; then
-    { echo "## Change classification (shadow mode — recorded, not enforced)"; echo;
-      echo "**$CLASS** — architectural changes need the PM's design approval; mechanical merge on the cross-family review + checks alone. (Phase 1: recorded only; Phase 2 wires this to a required \`design-gate\` check.)"; echo;
-      echo '```'; echo "$OUT"; echo '```'; } | gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
-      || die "could not post the classification to PR #$PR — the shadow-mode record is the point; failing closed (classification was: $CLASS)"
-    note "posted classification to PR #$PR"
+  BODY=$( { echo "## Change classification (recorded; the design-gate is not yet a required check)"; echo;
+      echo "**$CLASS** — architectural changes need the PM's design approval; mechanical merge on the cross-family review + checks alone. (Recorded for now; wiring this to a required \`design-gate\` check is a follow-up.)"; echo;
+      echo '```'; echo "$OUT"; echo '```'; } )
+  # attribute the classification to the reviewer identity (the bot) when configured — it's automated workflow
+  # output, not the human's; claude-authored is the only wired direction. Falls back to the default token.
+  RTOK=$(reviewer_token)
+  if [ -n "$RTOK" ]; then
+    echo "$BODY" | GH_TOKEN="$RTOK" gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
+      || die "could not post the classification to PR #$PR as the reviewer identity — failing closed (classification was: $CLASS)"
+    note "posted classification to PR #$PR as the reviewer identity"
+  else
+    echo "$BODY" | gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
+      || die "could not post the classification to PR #$PR — failing closed (classification was: $CLASS)"
+    note "posted classification to PR #$PR (default token)"
   fi
   echo "$OUT"
   ;;
