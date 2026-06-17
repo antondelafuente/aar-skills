@@ -1,0 +1,235 @@
+#!/bin/bash
+# wf.sh — the GitHub-backed scaffold-change workflow driver (SWE pipeline, Phase 1 / SHADOW MODE).
+#
+# Drives one scaffold change through its whole lifecycle, GitHub as the durable coordination layer:
+#   Issue -> worktree branch -> namespaced proposals/<issue>-<slug>.md -> draft PR -> --scaffold design
+#   review (posted) -> implement -> --code review (posted) -> classifier (records mechanical|architectural
+#   with evidence, posted) -> checks + fail-closed gate -> merge-when-clean.
+# The agent (following SKILL.md) does the JUDGMENT steps (write the design doc, implement, respond to
+# findings) BETWEEN these mechanical subcommands; wf.sh is the glue that is too error-prone to hand-run.
+#
+# WHY worktree-from-the-start (PR #3's review, folded): the standalone predecessor used a
+# `checkout -b -> commit -> checkout main` dance on the SHARED main checkout, which bred three real races —
+# reviewing STALE files, a commit-failure STRANDING the shared checkout off main, and a remote-vs-local SHA
+# gap. A dedicated worktree dissolves all three: the branch work never touches the shared `main` checkout.
+#
+# WHY fail-closed everywhere (ship-change's hardening, folded): a crashed/garbage review must NEVER read as
+# "clean" and merge. Every review verdict is parsed from the AUTHORITATIVE `SUMMARY: high=.. med=.. low=..`
+# line; a missing/malformed summary BLOCKS. A reviewer process error BLOCKS. We also re-run --code as the
+# merge gate so the merged diff is the reviewed diff (a HIGH fix earlier this program slipped a re-review).
+#
+# SHADOW MODE (Phase 1): wf.sh RUNS + POSTS + RECORDS, but nothing is enforced by GitHub branch protection
+# yet (Phase 2 adds the per-family GitHub Apps + required checks). The merge here is the agent's own
+# `gh pr merge` after the script's fail-closed gate — the gate logic lives in this script for now, not in
+# branch protection. The classifier output is RECORDED on the PR (the human reads it), never blocks.
+#
+# Usage (see SKILL.md for the full lifecycle):
+#   wf.sh start  <issue#> <slug>            -> worktree + branch + design-doc skeleton   [then: write the doc]
+#   wf.sh open   <worktree>                 -> commit the doc, push, open the DRAFT PR
+#   wf.sh design-review <worktree> <author> -> --scaffold on the doc, post to PR (fail-closed verdict)
+#                                              [then: revise doc as needed; implement the change + commit]
+#   wf.sh code-review   <worktree> <author> -> --code on the diff, post to PR (fail-closed verdict)
+#   wf.sh classify      <worktree>          -> classifier on changed paths, post evidence (shadow record)
+#   wf.sh finish <worktree> <author>        -> checks + fail-closed --code gate + ready + merge + cleanup
+#
+# Env: GH_TOKEN must be set (this instance: source ~/.env — wf.sh sources NO env file itself).
+#      AUDIT_EXPERIMENT=<path to verify-claims audit_experiment.sh> overrides auto-location.
+#      WF_WORKTREE_ROOT=<dir> (default /tmp) where worktrees are created.
+#      ORIGIN_REPO=<path> the main checkout that owns the worktrees (default: this script's repo root).
+set -euo pipefail
+
+die(){ echo "BLOCKED: $*" >&2; exit 1; }
+note(){ echo "[wf] $*" >&2; }
+REVIEW_HIGH=0; REVIEW_ALL=0   # set by run_review (globals, nounset-safe defaults)
+
+# the main checkout that owns worktrees: env override, else the repo this script lives in
+SELF_REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")" && git rev-parse --show-toplevel 2>/dev/null || true)
+ORIGIN_REPO=${ORIGIN_REPO:-$SELF_REPO}
+
+need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
+  || die "no GitHub auth — set GH_TOKEN (this instance: source ~/.env) before invoking; wf.sh sources no env file"; }
+
+locate_audit(){
+  if [ -n "${AUDIT_EXPERIMENT:-}" ] && [ -f "$AUDIT_EXPERIMENT" ]; then echo "$AUDIT_EXPERIMENT"; return; fi
+  local hit; hit=$(find "$HOME/.claude/plugins/cache" -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1)
+  [ -n "$hit" ] || die "cannot locate verify-claims audit_experiment.sh (install verify-claims, or set AUDIT_EXPERIMENT)"
+  echo "$hit"
+}
+
+check_author(){  # cross-family: claude|codex; the Codex->Claude reverse reviewer isn't wired yet
+  case "$1" in
+    claude) ;;
+    codex)  [ -n "${AUDIT_VERIFIER_CMD:-}" ] || die "author=codex needs a Claude reviewer (AUDIT_VERIFIER_CMD); the Codex->Claude reverse path is a tracked follow-up, not yet wired. Ship Claude-authored changes for now." ;;
+    *) die "author must be 'claude' or 'codex' (got '$1')" ;;
+  esac
+}
+
+wt_branch(){ git -C "$1" rev-parse --abbrev-ref HEAD; }                       # branch of a worktree
+wt_pr(){     gh -R "$(gh_repo)" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null; }  # PR# for a worktree's branch
+gh_repo(){   git -C "$ORIGIN_REPO" remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##'; }
+
+# --- fail-closed review verdict ------------------------------------------------------------------
+require_valid_review(){ grep -qE '^SUMMARY: high=[0-9]+ med=[0-9]+ low=[0-9]+' "$1" \
+  || die "review output malformed/incomplete (no valid 'SUMMARY: high=.. med=.. low=..') — failing CLOSED. See $1"; }
+sum_line(){ grep -E '^SUMMARY:' "$1" | tail -1; }
+count_high(){ sum_line "$1" | sed -E 's/.*high=([0-9]+).*/\1/'; }
+count_all(){ local s; s=$(sum_line "$1"); echo $(( $(sed -E 's/.*high=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*med=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*low=([0-9]+).*/\1/'<<<"$s") )); }
+
+# run a cross-family review (mode = --scaffold|--code) on TARGET, write REV, post it to the PR.
+# Sets the globals REVIEW_HIGH / REVIEW_ALL (NOT via $(...) — so a fail-closed `die` here hard-stops the
+# whole script, instead of being swallowed by a command-substitution subshell).
+run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading>
+  local mode=$1 wt=$2 author=$3 target=$4 pr=$5 heading=$6
+  local audit rev; audit=$(locate_audit)
+  rev="${TMPDIR:-/tmp}/wf_${mode#--}_$(wt_branch "$wt" | tr '/' '_').md"
+  note "$mode review (author=$author, reviewer=opposite family)…"
+  AAR_SUBSTRATE="$author" AUDIT_CONSTITUTION="${AUDIT_CONSTITUTION:-$wt/AGENTS.md}" \
+    bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
+    || { echo "BLOCKED: reviewer process failed — tail of log:" >&2; tail -8 "$rev.run.log" >&2; exit 1; }
+  require_valid_review "$rev"
+  REVIEW_HIGH=$(count_high "$rev"); REVIEW_ALL=$(count_all "$rev")
+  note "$mode verdict: $REVIEW_ALL finding(s), $REVIEW_HIGH HIGH -> $rev"
+  if [ -n "$pr" ]; then
+    { echo "## $heading"; echo; echo "_Cross-family \`$mode\` review — author \`$author\`, reviewer = opposite family. Posted by the workflow driver (shadow mode)._"; echo; echo '```'; cat "$rev"; echo '```'; } \
+      | gh -R "$(gh_repo)" pr comment "$pr" --body-file - >/dev/null && note "posted $mode review to PR #$pr"
+  else
+    note "no PR yet — $mode review NOT posted (verdict above; $rev)"
+  fi
+}
+
+# =================================================================================================
+CMD=${1:-}; shift || true
+case "$CMD" in
+
+start)  # wf.sh start <issue#> <slug>
+  ISSUE=${1:?usage: wf.sh start <issue#> <slug>}; SLUG=${2:?slug (kebab-case)}
+  [ "$(git -C "$ORIGIN_REPO" rev-parse --abbrev-ref HEAD)" = main ] || die "$ORIGIN_REPO is not on 'main' (base must be main)"
+  git -C "$ORIGIN_REPO" fetch -q origin && git -C "$ORIGIN_REPO" pull --ff-only -q origin main 2>/dev/null || true
+  BR="change/${ISSUE}-${SLUG}"; WT="${WF_WORKTREE_ROOT:-/tmp}/wf-${ISSUE}-${SLUG}"
+  [ -e "$WT" ] && die "worktree path already exists: $WT (finish or remove the prior run first)"
+  git -C "$ORIGIN_REPO" worktree add -q "$WT" -b "$BR" main || die "could not create worktree/branch $BR"
+  DOC="proposals/${ISSUE}-${SLUG}.md"
+  if [ ! -f "$WT/$DOC" ]; then
+    mkdir -p "$WT/proposals"
+    cat > "$WT/$DOC" <<EOF
+# Proposal: <title> (#${ISSUE})
+
+> The canonical design doc (ADR + PR description). Reviewed by \`--scaffold\` before build. Lands on main.
+
+## Problem
+
+<what's broken / missing, concretely>
+
+## Approach
+
+<the design — the lifecycle/change, the load-bearing decisions>
+
+## Alternatives considered
+
+<what else, why rejected>
+
+## Blast radius
+
+<what this touches; product vs SWE pipeline vs instance>
+
+## Rollout + rollback
+
+<for risky changes: staged rollout, escape hatch, how to revert>
+EOF
+    note "scaffolded design-doc skeleton: $DOC"
+  fi
+  echo "WORKTREE=$WT"; echo "BRANCH=$BR"; echo "DOC=$DOC"
+  note "next: write the design doc at $WT/$DOC, then: wf.sh open $WT"
+  ;;
+
+open)   # wf.sh open <worktree>   — commit the design doc, push, open the DRAFT PR
+  need_gh; WT=${1:?usage: wf.sh open <worktree>}
+  [ -d "$WT" ] || die "no such worktree: $WT"
+  BR=$(wt_branch "$WT")
+  DOC=$(cd "$WT" && git status --porcelain proposals/ | sed 's/^...//' | head -1)
+  [ -n "$DOC" ] || DOC=$(cd "$WT" && git diff --name-only main...HEAD -- proposals/ | head -1)
+  [ -n "$DOC" ] || die "no design doc under proposals/ found (write proposals/<issue>-<slug>.md first)"
+  ISSUE=$(basename "$DOC" | sed -E 's/^([0-9]+)-.*/\1/')
+  ( cd "$WT" && git add -- "$DOC" && git commit -q -m "design: $(basename "$DOC" .md) (#${ISSUE})
+
+Namespaced design doc for the scaffold change. Reviewed by --scaffold next.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" )
+  ( cd "$WT" && git push -q -u origin "$BR" ) || die "push failed"
+  PRURL=$(gh -R "$(gh_repo)" pr create --draft --base main --head "$BR" \
+    --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
+    --body "Closes #${ISSUE}. Design doc: \`$DOC\` (on this branch; lands on main at merge).
+
+Lifecycle (shadow mode): draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. Reviews are posted as comments by the workflow driver.") \
+    || die "gh pr create failed"
+  PR=$(basename "$PRURL")
+  echo "PR=$PR"; note "draft PR #$PR opened: $PRURL"; note "next: wf.sh design-review $WT <author>"
+  ;;
+
+design-review)  # wf.sh design-review <worktree> <author>
+  need_gh; WT=${1:?usage: wf.sh design-review <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
+  check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  DOC=$(cd "$WT" && git diff --name-only main...HEAD -- proposals/ | head -1)
+  [ -n "$DOC" ] || die "no committed design doc under proposals/ (run: wf.sh open $WT)"
+  run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$(wt_pr "$WT")" "Design review (\`--scaffold\`)"
+  note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings; the PM's design approval is the human gate (shadow: recorded). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
+  ;;
+
+code-review)    # wf.sh code-review <worktree> <author>
+  need_gh; WT=${1:?usage: wf.sh code-review <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
+  check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  DIFF="${TMPDIR:-/tmp}/wf_code_$(wt_branch "$WT" | tr '/' '_').diff"
+  ( cd "$WT" && git diff main...HEAD ) > "$DIFF"
+  [ -s "$DIFF" ] || die "empty diff main...$(wt_branch "$WT") — implement + commit the change first"
+  run_review --code "$WT" "$AUTHOR" "$DIFF" "$(wt_pr "$WT")" "Code review (\`--code\`)"
+  note "code-review done (HIGH=$REVIEW_HIGH). Triage findings (fix in $WT + commit, or respond on the PR). Then: wf.sh classify $WT ; wf.sh finish $WT $AUTHOR"
+  ;;
+
+classify)       # wf.sh classify <worktree>   — shadow-mode record (never blocks)
+  need_gh; WT=${1:?usage: wf.sh classify <worktree>}
+  [ -d "$WT" ] || die "no such worktree: $WT"
+  [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the aar-skills repo?)"
+  mapfile -t PATHS < <(cd "$WT" && git diff --name-only main...HEAD)
+  [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD"
+  OUT=$( cd "$WT" && .aar-ci/classify.sh "${PATHS[@]}" )
+  CLASS=$(echo "$OUT" | sed -nE 's/^CLASSIFICATION: //p' | head -1)
+  PR=$(wt_pr "$WT")
+  if [ -n "$PR" ]; then
+    { echo "## Change classification (shadow mode — recorded, not enforced)"; echo;
+      echo "**$CLASS** — architectural changes need the PM's design approval; mechanical merge on the cross-family review + checks alone. (Phase 1: recorded only; Phase 2 wires this to a required \`design-gate\` check.)"; echo;
+      echo '```'; echo "$OUT"; echo '```'; } | gh -R "$(gh_repo)" pr comment "$PR" --body-file - >/dev/null \
+      && note "posted classification to PR #$PR"
+  fi
+  echo "$OUT"
+  ;;
+
+finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gate + ready + merge + cleanup
+  need_gh; WT=${1:?usage: wf.sh finish <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
+  check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  BR=$(wt_branch "$WT"); PR=$(wt_pr "$WT"); [ -n "$PR" ] || die "no PR for branch $BR (run: wf.sh open $WT)"
+  mapfile -t PATHS < <(cd "$WT" && git diff --name-only main...HEAD)
+  [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD — nothing to merge"
+  # 1. deterministic checks + behavior smoke, on the BRANCH's actual content (the worktree)
+  [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
+  note "running .aar-ci checks + smoke on branch content…"
+  ( cd "$WT" && bash .aar-ci/checks.sh "${PATHS[@]}" ) || die "deterministic checks/behavior-smoke FAILED — fix before merging"
+  # 2. the authoritative merge gate: re-run --code on the FINAL diff, fail-closed, NO HIGH
+  DIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
+  ( cd "$WT" && git diff main...HEAD ) > "$DIFF"
+  run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)"
+  [ "$REVIEW_HIGH" = 0 ] || die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
+  # 3. merge (shadow mode: agent merge after the gate; branch protection not required yet)
+  note "gate clean (no HIGH) + checks passed -> marking ready + merging PR #$PR"
+  gh -R "$(gh_repo)" pr ready "$PR" >/dev/null 2>&1 || true
+  gh -R "$(gh_repo)" pr merge "$PR" --squash --delete-branch || die "merge failed"
+  # 4. cleanup: sync main, remove the worktree
+  git -C "$ORIGIN_REPO" worktree remove --force "$WT" 2>/dev/null || true
+  git -C "$ORIGIN_REPO" checkout -q main 2>/dev/null || true
+  git -C "$ORIGIN_REPO" pull --ff-only -q origin main 2>/dev/null || note "WARN: could not ff-only pull main — reconcile manually"
+  local_manifest=0; for p in "${PATHS[@]}"; do case "$p" in */plugin.json|*marketplace.json) local_manifest=1;; esac; done
+  [ "$local_manifest" = 1 ] && note "a plugin manifest changed — refresh installs: claude plugin marketplace update aar-skills && claude plugin update <name>@aar-skills"
+  echo "SHIPPED: PR #$PR merged (shadow mode — clean cross-family review + checks). Worktree cleaned."
+  ;;
+
+*) die "unknown subcommand '${CMD:-}'. Use: start|open|design-review|code-review|classify|finish (see SKILL.md)";;
+esac
