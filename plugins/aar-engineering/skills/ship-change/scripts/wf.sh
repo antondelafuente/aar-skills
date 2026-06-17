@@ -250,11 +250,18 @@ open)   # wf.sh open <worktree>   — commit the design doc, push, open the DRAF
 
 Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- "$DOC" )
   ( cd "$WT" && git push -q -u origin "$BR" ) || die "push failed"
-  PRURL=$(gh -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
+  # PR body = the design doc RENDERED (its own header calls it "ADR + PR description"), so the PR is
+  # self-describing in plain language with zero duplicate authoring and no drift (#24): Problem=why,
+  # Approach=what, Blast radius=review focus, Rollout=risk/rollback. Take the doc from its first '## '
+  # section (drops the H1 title — already the PR title — and the boilerplate blockquote); fall back to
+  # the whole doc minus the H1 if it has no '## ' sections, so `open` never fails on an odd doc.
+  DOCBODY=$(awk 'f||/^## /{f=1}f' "$WT/$DOC")
+  [ -n "$DOCBODY" ] || DOCBODY=$(sed '1{/^# /d;}' "$WT/$DOC")
+  PRBODY=$(printf 'Closes #%s.\n\n%s\n\n---\n\n**Design doc:** `%s` (lands on main at merge) · **Issue:** #%s\n\n_Lifecycle: draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. The cross-family review is a native codex-engineer[bot] review; branch protection requires that approval before merge._\n' \
+    "$ISSUE" "$DOCBODY" "$DOC" "$ISSUE")
+  PRURL=$(printf '%s' "$PRBODY" | gh -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
     --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
-    --body "Closes #${ISSUE}. Design doc: \`$DOC\` (on this branch; lands on main at merge).
-
-Lifecycle: draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. The cross-family review is a native codex-engineer[bot] review; branch protection requires that approval before merge.") \
+    --body-file -) \
     || die "gh pr create failed"
   PR=$(basename "$PRURL")
   echo "PR=$PR"; note "draft PR #$PR opened: $PRURL"; note "next: wf.sh design-review $WT <author>"
