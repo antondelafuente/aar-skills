@@ -54,7 +54,7 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
 ## The lifecycle (the agent drives; `wf.sh` is the mechanical glue)
 
 You do the JUDGMENT steps (write the design doc, implement, triage findings) BETWEEN these subcommands.
-`source ~/.env` first (GH_TOKEN). `wf.sh` is `scripts/wf.sh` in this skill.
+Ensure `GH_TOKEN` is set first (`gh auth login`, or `export GH_TOKEN=…`). `wf.sh` is `scripts/wf.sh` in this skill.
 
 ```
 # 0. An Issue exists (the backlog item). Create it if not: gh issue create …  → note its number <N>.
@@ -112,7 +112,7 @@ HIGH=0 into endless polish; the merge bar is HIGH=0 + checks green.)
 
 - **verify-claims `--scaffold` / `--code`** — the cross-family design + code reviewers (located from the
   installed plugin, or `AUDIT_EXPERIMENT=<path>`). Same engine the research audits use.
-- **gh** — Issues, draft PR, PR comments, merge (auth from `GH_TOKEN`; this instance: `source ~/.env`).
+- **gh** — Issues, draft PR, PR comments, merge (auth from `GH_TOKEN`, set however your environment provides it).
 - **`RUNBOOK.md`** (this dir) — the as-built branch-protection config + the rollback/escape-hatch + token rotation.
 
 ## Bootstrap note

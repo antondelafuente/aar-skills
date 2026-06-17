@@ -29,7 +29,7 @@
 # Usage: run `wf.sh help` (or `-h` / no args) for the lifecycle short-list; SKILL.md is the full runbook.
 # (The command list lives in ONE place — the usage() function below — not duplicated here.)
 #
-# Env: GH_TOKEN must be set (this instance: source ~/.env — wf.sh sources NO env file itself).
+# Env: GH_TOKEN must be set in the environment (gh auth login / export GH_TOKEN; wf.sh sources NO env file itself).
 #      AUDIT_EXPERIMENT=<path to verify-claims audit_experiment.sh> overrides auto-location.
 #      WF_WORKTREE_ROOT=<dir> (default /tmp) where worktrees are created.
 #      ORIGIN_REPO=<path> the main checkout that owns the worktrees (default: this script's repo root).
@@ -55,7 +55,7 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh help                              this message
 
-<author> = claude | codex (the OPPOSITE family reviews). Auth: GH_TOKEN (this instance: source ~/.env).
+<author> = claude | codex (the OPPOSITE family reviews). Auth: GH_TOKEN (gh auth login / export; wf.sh sources no env file).
 Full runbook: ${d:-<plugin>}/SKILL.md    Phase-2 + rollback: ${d:-<plugin>}/RUNBOOK.md
 EOF
 }
@@ -69,7 +69,7 @@ SELF_REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")" && git rev-parse --show-toplevel
 ORIGIN_REPO=${ORIGIN_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || echo "$SELF_REPO")}
 
 need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
-  || die "no GitHub auth — set GH_TOKEN (this instance: source ~/.env) before invoking; wf.sh sources no env file"; }
+  || die "no GitHub auth — set GH_TOKEN (gh auth login / export GH_TOKEN) before invoking; wf.sh sources no env file"; }
 
 locate_audit(){  # locate_audit [context-repo-dir]
   if [ -n "${AUDIT_EXPERIMENT:-}" ] && [ -f "$AUDIT_EXPERIMENT" ]; then echo "$AUDIT_EXPERIMENT"; return; fi
