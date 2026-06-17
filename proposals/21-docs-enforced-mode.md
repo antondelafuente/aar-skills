@@ -5,8 +5,9 @@
 ## Problem
 
 The pipeline is now **enforced**: the repo is public, branch protection on `main` requires a counting
-`codex-engineer[bot]` approval (plus the checks), and `include administrators` means even the admin author
-token can't bypass. But `wf.sh`, `SKILL.md`, and `RUNBOOK.md` still describe "Phase 1 / shadow mode /
+`codex-engineer[bot]` approval (the `.aar-ci` checks are enforced by `wf.sh finish`, not yet as GitHub
+required status checks), and `include administrators` means even the admin author token can't bypass. But
+`wf.sh`, `SKILL.md`, and `RUNBOOK.md` still describe "Phase 1 / shadow mode /
 nothing enforced / branch protection not required yet." That's now false and misleading to any reader.
 
 A subtlety to preserve: the **code-review gate** is enforced, but the **classifier / design-gate** is still
