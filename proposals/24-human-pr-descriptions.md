@@ -17,25 +17,32 @@ just doesn't surface it — it links to it.
 
 ## Approach
 
-**Render the design doc body into the PR description at `open`** instead of only linking to it. The doc is
-the single source of truth (its own header already calls it "ADR + PR description"); surfacing it means a
-self-describing PR with **zero duplicate authoring and no drift** — the author writes the doc once.
+**Render the design doc body into the PR description** instead of only linking to it. The doc is the single
+source of truth (its own header already calls it "ADR + PR description"); surfacing it means a
+self-describing PR with **zero duplicate authoring** — the author writes the doc once.
 
-`wf.sh open` builds the PR body as:
+The PR body is a **generated view of the committed doc**, composed by a reusable `render_pr_body` helper:
 
 1. `Closes #N.`
-2. The design doc body **verbatim minus its H1 title line** (the title already populates the PR title) —
-   so the reader gets Problem / Approach / Alternatives / Blast radius / Rollout-rollback as plain prose.
+2. The design doc body from its first `## ` section (drops the H1 title — already the PR title — and the
+   boilerplate blockquote): Problem / Approach / Alternatives / Blast radius / Rollout-rollback as plain prose.
 3. A `---` separator + a compact **formal footer**: the design-doc path (lands on main at merge), the
    issue link, and the one-line lifecycle/enforcement note that the body carries today.
 
 This maps cleanly onto the sections the issue asked for — *What changed* (Approach), *Why* (Problem),
 *Review focus* (Blast radius), *Risk / rollback* (Rollout) — without forcing the author to re-summarize.
 
-Implementation: in the `open)` branch, after the doc is committed, read `$WT/$DOC`, strip the leading H1,
-and compose the body; pass it via `gh pr create --body-file -` (stdin) rather than `--body "$str"` so the
-doc's backticks, code fences, and `$`/`#` survive untouched. Robustness: if the doc has no readable body
-the footer-only form is still emitted (never a failed `open`).
+**Drift (design-review F1):** because the design-review loop *revises the doc for findings* (exactly this
+PR), a body rendered only at `open` would go stale. So the helper is also called at **`finish`**, which
+re-renders from the now-final committed doc and `gh pr edit`s the body **before merge** — guaranteeing the
+durable record (the merged PR) matches the doc that actually lands. (The draft body between open and finish
+may lag a mid-review doc edit; that's low-harm — the `--scaffold`/`--code` reviewers read the committed doc
+file, not the PR body — and `finish` reconciles it before it becomes the permanent record.)
+
+Implementation: `render_pr_body <WT> <DOC> <ISSUE>` prints the body (doc from first `## `, footer); both
+`open` (create) and `finish` (edit before merge) pipe it via `--body-file -` (stdin) so the doc's
+backticks, code fences, and `$`/`#` survive untouched. Robustness: if the doc has no `## ` section the
+whole-doc-minus-H1 form is emitted (never a failed `open`/`finish`).
 
 ## Alternatives considered
 
@@ -50,10 +57,10 @@ the footer-only form is still emitted (never a failed `open`).
 
 ## Blast radius
 
-- **SWE pipeline only:** `plugins/aar-engineering/skills/ship-change/scripts/wf.sh`, the `open)` branch
-  (PR-body construction). No change to design-review / code-review / classify / finish, the review-posting
-  paths, or branch protection. Behavior change is **cosmetic** — richer PR descriptions; the gate is
-  identical.
+- **SWE pipeline only:** `plugins/aar-engineering/skills/ship-change/scripts/wf.sh` — a new `render_pr_body`
+  helper, the `open)` branch (create with it), and one `gh pr edit --body-file -` line in `finish)` (refresh
+  before merge). No change to the review-posting paths, the merge gate, the classifier, or branch protection.
+  Behavior change is **cosmetic** — richer, drift-free PR descriptions; the gate is identical.
 - Version bump on the `aar-engineering` plugin manifest.
 - Every future scaffold-change PR gets the fuller description; existing merged PRs are unaffected.
 
