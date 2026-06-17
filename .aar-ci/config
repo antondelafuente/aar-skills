@@ -1,0 +1,4 @@
+# aar-skills CI profile (sourced by ship_change.sh). TRACKED — not hidden local config.
+# aar-skills should usually be clean, so strict: refuse to ship if any file outside the named
+# changed-path list is dirty. (Shared lab repos like orchestrator use DIRTY_POLICY=quiescence instead.)
+DIRTY_POLICY=strict
