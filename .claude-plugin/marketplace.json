@@ -19,6 +19,11 @@
       "name": "experiment-lifecycle",
       "source": "./plugins/experiment-lifecycle",
       "description": "Run GPU experiments like a researcher — the full lifecycle: design-experiment (pre-register a DESIGN.md, clear it with the human through cross-family validity gates, emit a START.md brief + CHECKLIST.md, dispatch to a fresh-context executor) and run-experiment (the zero-context executor: self-wake, acquire/provision/drive/collect/close). Instance specifics live in an execution profile; pairs with gpu-job and verify-claims."
+    },
+    {
+      "name": "aar-engineering",
+      "source": "./plugins/aar-engineering",
+      "description": "The SWE pipeline that builds the product itself: ship-change drives a scaffold change through a GitHub-backed lifecycle — Issue → worktree branch → namespaced design doc → draft PR → cross-family --scaffold design review → implement → cross-family --code review → mechanical/architectural classifier → tracked .aar-ci checks + behavior smoke → fail-closed merge-when-clean. The agents are the engineers; a change is authored by one model family and reviewed by the other. Phase 1 runs in shadow mode. Pairs with verify-claims and a per-repo .aar-ci/ profile."
     }
   ]
 }
