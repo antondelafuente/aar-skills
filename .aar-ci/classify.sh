@@ -3,26 +3,40 @@
 #
 # Architectural = needs the human (PM)'s design approval; mechanical = the agents merge it on the cross-family
 # review + checks alone. FAIL-CLOSED: a change defaults to ARCHITECTURAL unless it is explicitly marked
-# mechanical — a mislabel can never silently skip the human gate. Policy lives in the adjustable .aar-ci/classifier.conf.
+# mechanical — a mislabel can never silently skip the human gate.
+#
+# TWO sources of "always architectural", checked together:
+#   1. A NON-CONFIGURABLE protected floor (hardcoded below) — the CI policy itself, the constitution, the secrets
+#      gate. The adjustable config CANNOT remove these, so a change to the policy can't downgrade itself (the
+#      self-referential bypass a review caught). The config can only ADD more.
+#   2. The adjustable .aar-ci/classifier.conf (ALWAYS_ARCHITECTURAL) — the tunable part.
 #
 # Usage: classify.sh [--mechanical "<reason>"] <changed-path>...
-#   (no flag)               -> architectural unless every path is clearly low-risk AND nothing hits a hard rule;
-#                              with the fail-closed default that means: architectural unless explicitly downgraded.
-#   --mechanical "<reason>" -> the reviewer/human DOWNGRADES to mechanical, recorded with the reason — only honored
-#                              if NO always-architectural hard rule fired (you can't downgrade a constitution change).
-# Output: "CLASSIFICATION: architectural|mechanical" + "EVIDENCE: ..." lines. Always exit 0 — it RECORDS, never blocks
-# (shadow mode and beyond: the gate that acts on this lives in the workflow / branch protection, not here).
+#   --mechanical "<reason>" downgrades to mechanical, recorded with the reason — honored ONLY if no
+#   always-architectural path (floor or config) fired (you can't downgrade a constitution/policy change).
+# Output: "CLASSIFICATION: architectural|mechanical" + "EVIDENCE: ...". ALWAYS exits 0 — it RECORDS, never blocks.
 set -uo pipefail
 
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-if ! source "$ROOT/.aar-ci/classifier.conf" 2>/dev/null || [ "${#ALWAYS_ARCHITECTURAL[@]}" -eq 0 ]; then
-  echo "CLASSIFICATION: architectural"
-  echo "EVIDENCE: no usable .aar-ci/classifier.conf -> fail-closed to architectural"
-  exit 0
-fi
+# 1. the non-configurable protected floor (the config cannot remove these)
+PROTECTED_FLOOR=(
+  '.aar-ci/*'           # the CI policy + this classifier itself
+  '.githooks/*'         # the secrets gate
+  'CLAUDE.md' 'AGENTS.md' '*/CLAUDE.md' '*/AGENTS.md'   # the constitution
+)
 
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+# 2. the adjustable config (best-effort). Initialize first so a missing/broken config is nounset-safe -> floor only.
+ALWAYS_ARCHITECTURAL=()
+# shellcheck source=/dev/null
+source "$ROOT/.aar-ci/classifier.conf" 2>/dev/null || true
+
+# the effective always-architectural set = floor (always) + config (additive)
+EFFECTIVE=("${PROTECTED_FLOOR[@]}" "${ALWAYS_ARCHITECTURAL[@]}")
+
+# parse a --mechanical override (a missing/empty reason is just ignored -> fail-closed, never aborts)
 MECH_REASON=""
-if [ "${1:-}" = "--mechanical" ]; then MECH_REASON=${2:?--mechanical needs a reason}; shift 2; fi
+if [ "${1:-}" = "--mechanical" ]; then MECH_REASON="${2:-}"; shift; [ $# -gt 0 ] && shift; fi
+
 PATHS=("$@")
 if [ ${#PATHS[@]} -eq 0 ]; then
   echo "CLASSIFICATION: architectural"
@@ -30,10 +44,10 @@ if [ ${#PATHS[@]} -eq 0 ]; then
   exit 0
 fi
 
-# Hard rules: any changed path matching an ALWAYS_ARCHITECTURAL glob => architectural (cannot be downgraded).
+# hard rules: any changed path matching the effective always-architectural set => architectural (can't downgrade)
 hits=()
 for p in "${PATHS[@]}"; do
-  for g in "${ALWAYS_ARCHITECTURAL[@]}"; do
+  for g in "${EFFECTIVE[@]}"; do
     # shellcheck disable=SC2254
     case "$p" in $g) hits+=("$p matches '$g'");; esac
   done
@@ -42,16 +56,16 @@ done
 if [ ${#hits[@]} -gt 0 ]; then
   echo "CLASSIFICATION: architectural"
   printf 'EVIDENCE: always-architectural — %s\n' "${hits[@]}"
-  [ -n "$MECH_REASON" ] && echo "EVIDENCE: --mechanical override IGNORED — a hard-rule path can't be downgraded"
+  [ -n "$MECH_REASON" ] && echo "EVIDENCE: --mechanical override IGNORED — an always-architectural path can't be downgraded"
   exit 0
 fi
 
-# No hard rule fired.
+# No always-architectural path fired.
 if [ -n "$MECH_REASON" ]; then
   echo "CLASSIFICATION: mechanical"
   echo "EVIDENCE: no always-architectural path; explicitly downgraded by reviewer — $MECH_REASON"
 else
   echo "CLASSIFICATION: architectural"
-  echo "EVIDENCE: no always-architectural path matched, and not explicitly marked mechanical -> fail-closed default (architectural)"
+  echo "EVIDENCE: no always-architectural path matched, and not explicitly marked mechanical (or no reason given) -> fail-closed default (architectural)"
 fi
 exit 0
