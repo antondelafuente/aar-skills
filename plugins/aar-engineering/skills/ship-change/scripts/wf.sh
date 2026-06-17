@@ -332,8 +332,14 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   #    review the local diff but merge a different remote head, then delete the reviewed worktree.
   ( cd "$WT" && git push -q origin HEAD ) || die "push failed — refusing to merge a PR that may not match the reviewed diff"
   LOCAL_SHA=$(git -C "$WT" rev-parse HEAD)
-  REMOTE_SHA=$(gh -R "$REPO" pr view "$PR" --json headRefOid -q .headRefOid)
-  [ "$LOCAL_SHA" = "$REMOTE_SHA" ] || die "PR #$PR head ($REMOTE_SHA) != local HEAD ($LOCAL_SHA) — the reviewed diff is not what would merge. Resolve (re-push / reconcile) before finishing."
+  # Verify the pushed state via the remote BRANCH ref (git ls-remote), NOT `gh pr view headRefOid`: the branch
+  # ref updates atomically on push, while GitHub's PR-head association LAGS a beat — querying headRefOid right
+  # after a push intermittently returned the old SHA and wedged finish on a phantom mismatch. The merge below
+  # still uses --match-head-commit "$LOCAL_SHA" as the authoritative guard against a head that moved.
+  # exact head ref only (--heads + refs/heads/$BR) so a tag or other ref with the same tail can't match
+  REMOTE_SHA=$(git -C "$WT" ls-remote --heads origin "refs/heads/$BR" | awk '{print $1}')
+  [ -n "$REMOTE_SHA" ] || die "branch $BR has no head on origin — push it first"
+  [ "$LOCAL_SHA" = "$REMOTE_SHA" ] || die "branch $BR remote head ($REMOTE_SHA) != local HEAD ($LOCAL_SHA) — the reviewed diff is not what would merge. Re-push / reconcile before finishing."
   # 1. deterministic checks + behavior smoke, on the BRANCH's actual content (the worktree)
   [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
   note "running .aar-ci checks + smoke on branch content…"
