@@ -24,7 +24,7 @@ esac; done
 
 # 3. python compiles
 for p in "${PATHS[@]}"; do case "$p" in
-  *.py) [ -f "$p" ] && { python3 -m py_compile "$p" 2>/dev/null && ok "py_compile $p" || err "py_compile: $p"; } ;;
+  *.py) [ -f "$p" ] && { python3 -c "import sys; compile(open(sys.argv[1]).read(), sys.argv[1], 'exec')" "$p" 2>/dev/null && ok "py-syntax $p" || err "py-syntax: $p"; } ;;   # in-memory: no __pycache__ written (keeps the tree clean)
 esac; done
 
 # 4. instance-leak / secrets: NOT re-implemented here. The repo's pre-commit secrets hook
@@ -37,15 +37,25 @@ for plugdir in $(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#(plu
   nonmanifest=$(printf '%s\n' "${PATHS[@]}" | grep "^$plugdir/" | grep -v '\.claude-plugin/plugin.json' || true)
   [ -n "$nonmanifest" ] || continue
   pj="$plugdir/.claude-plugin/plugin.json"
-  # zero-context diff: only an ACTUALLY added/changed "version" line counts (a context line must not satisfy it)
-  if git diff -U0 HEAD -- "$pj" 2>/dev/null | grep -qE '^\+[^+].*"version"'; then ok "version bumped: $pj"
-  else err "$plugdir changed but $pj version not bumped (consumers would miss the change)"; fi
+  oldv=$(git show "HEAD:$pj" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null)
+  newv=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('version',''))" "$pj" 2>/dev/null)
+  if [ -z "$oldv" ]; then ok "new plugin manifest $pj (v${newv:-?})"; continue; fi   # new plugin: no prior version to bump
+  # require the version to actually INCREASE (an added/moved/reformatted/downgraded version line is not a bump)
+  if [ -n "$newv" ] && python3 -c "import sys; o=[int(x) for x in sys.argv[1].split('.')]; n=[int(x) for x in sys.argv[2].split('.')]; sys.exit(0 if n>o else 1)" "$oldv" "$newv" 2>/dev/null; then ok "version bumped $oldv -> $newv: $pj"
+  else err "$plugdir changed but $pj version not INCREASED ($oldv -> ${newv:-?}); consumers would miss the change"; fi
 done
 
-# 6. behavior smoke (fake-HOME install -> skill discovery) for any changed plugin — F3 gate: deterministic
-#    checks can't catch an install/discovery break, so this gates auto-merge for plugin/skill changes.
-SMOKE="$(git rev-parse --show-toplevel)/.aar-ci/fake_home_smoke.sh"
-for plug in $(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#plugins/([^/]+)/.*#\1#' | sort -u); do
+# 6. behavior smoke (fake-HOME install -> skill discovery) — gates auto-merge for plugin/skill changes (deterministic
+#    checks can't catch an install/discovery break). Smoke the changed plugins; AND if the root marketplace.json
+#    changed, smoke every plugin it declares (a marketplace edit can break discovery for any of them).
+ROOT="$(git rev-parse --show-toplevel)"
+SMOKE="$ROOT/.aar-ci/fake_home_smoke.sh"
+SMOKE_PLUGS=$(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#plugins/([^/]+)/.*#\1#')
+if printf '%s\n' "${PATHS[@]}" | grep -q '^\.claude-plugin/marketplace.json$'; then
+  SMOKE_PLUGS="$SMOKE_PLUGS
+$(python3 -c "import json;print('\n'.join(p['name'] for p in json.load(open('$ROOT/.claude-plugin/marketplace.json'))['plugins']))" 2>/dev/null)"
+fi
+for plug in $(printf '%s\n' "$SMOKE_PLUGS" | grep -v '^$' | sort -u); do
   if [ -f "$SMOKE" ]; then
     echo "[checks] behavior smoke: $plug" >&2
     bash "$SMOKE" "$(git rev-parse --show-toplevel)" "$plug" && ok "smoke $plug" || err "fake-HOME smoke FAILED for $plug"
