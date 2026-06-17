@@ -56,11 +56,13 @@ need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; [ -n "${GH_TOKEN:-}
 locate_audit(){  # locate_audit [context-repo-dir]
   if [ -n "${AUDIT_EXPERIMENT:-}" ] && [ -f "$AUDIT_EXPERIMENT" ]; then echo "$AUDIT_EXPERIMENT"; return; fi
   local repo=${1:-} hit=""
-  # 1. installed reviewer, highest version — Claude plugin cache AND Claude/Codex skill installs (symlink or copy)
+  # 1. installed reviewer, highest version — Claude plugin cache AND Claude/Codex skill installs (symlink or copy).
+  #    `|| true` is load-bearing under `set -euo pipefail`: a MISSING search dir makes find exit non-zero and
+  #    (with pipefail) would abort the assignment BEFORE the in-tree fallback below — swallow it so we continue.
   hit=$(find "$HOME/.claude/plugins/cache" "$HOME/.claude/skills" "$HOME/.codex/skills" \
-        -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1)
+        -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1 || true)
   # 2. fallback: the context repo's OWN in-tree copy (a repo-only checkout with no install still works)
-  [ -n "$hit" ] || { [ -n "$repo" ] && hit=$(find "$repo/plugins" -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1); }
+  [ -n "$hit" ] || { [ -n "$repo" ] && hit=$(find "$repo/plugins" -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1 || true); }
   [ -n "$hit" ] || die "cannot locate verify-claims audit_experiment.sh (searched the plugin cache, Claude/Codex skills, and ${repo:-the repo}/plugins; install verify-claims or set AUDIT_EXPERIMENT)"
   echo "$hit"
 }
@@ -203,9 +205,11 @@ Lifecycle (shadow mode): draft PR -> --scaffold design review -> implement -> --
 design-review)  # wf.sh design-review <worktree> <author>
   need_gh; WT=${1:?usage: wf.sh design-review <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
   check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  require_clean "$WT"; PR=$(wt_pr_required "$WT")
   DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
   [ -n "$DOC" ] || die "no committed design doc under proposals/ (run: wf.sh open $WT)"
-  PR=$(wt_pr_required "$WT")
+  # push so the reviewed doc == what the PR shows (consistency with code-review)
+  ( cd "$WT" && git push -q origin HEAD ) || die "push failed — can't review a doc the PR doesn't reflect"
   run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Design review (\`--scaffold\`)"
   note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings; the PM's design approval is the human gate (shadow: recorded). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
   ;;
