@@ -25,9 +25,11 @@ gh api --method PATCH "repos/$REPO/pulls/$PR" -F body=@"$TMP"
 ```
 
 `gh api` PATCH on `pulls/{n}` with a `body` field is a plain REST call (no org/team GraphQL), verified working
-on a `repo`-scoped token. Keep it **best-effort/non-blocking** exactly as today (a refresh failure must never
-block an otherwise-clean merge — the `if … then note ok … else note WARN …` shape is preserved). Render to a
-temp file and `-F body=@file` (proven) rather than piping, so backticks/code-fences/`$`/`#` in the doc survive.
+on a `repo`-scoped token. Render to a temp file and `-F body=@file` (proven) rather than piping, so
+backticks/code-fences/`$`/`#` in the doc survive. **Best-effort/non-blocking:** the render *and* the PATCH go
+inside a single `if` condition (`render … && gh api …`), so under the script's `set -euo pipefail` a failure
+on *either* the render/write or the API logs WARN and proceeds — a cosmetic refresh can never abort an
+otherwise-clean `finish` (design-review F1).
 
 This is also the right fix for adopters: it drops the `read:org` requirement entirely rather than asking every
 user to broaden their token scope.

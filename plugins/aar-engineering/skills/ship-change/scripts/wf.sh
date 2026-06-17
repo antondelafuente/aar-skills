@@ -365,8 +365,10 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   if [ -n "$FDOC" ]; then
     FISSUE=$(basename "$FDOC" | sed -E 's/^([0-9]+)-.*/\1/')
     BODYTMP="${TMPDIR:-/tmp}/wf_prbody_${BR//\//_}.md"
-    render_pr_body "$WT" "$FDOC" "$FISSUE" > "$BODYTMP"
-    if gh api --method PATCH "repos/$REPO/pulls/$PR" -F body=@"$BODYTMP" >/dev/null 2>&1; then
+    # Render AND patch inside one if-condition so set -e can't abort finish on a render/write/API failure
+    # — the refresh is best-effort and must never block an otherwise-clean merge (#43/F1).
+    if render_pr_body "$WT" "$FDOC" "$FISSUE" > "$BODYTMP" 2>/dev/null \
+       && gh api --method PATCH "repos/$REPO/pulls/$PR" -F body=@"$BODYTMP" >/dev/null 2>&1; then
       note "refreshed PR #$PR body from the final design doc"
     else
       note "WARN: could not refresh PR #$PR body (cosmetic — proceeding to merge)"
