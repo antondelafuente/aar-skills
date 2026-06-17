@@ -21,11 +21,21 @@ Your human wants these skills available. Do this, in order:
      claude plugin marketplace add ~/aar-skills
      claude plugin install gpu-job@aar-skills
      claude plugin install verify-claims@aar-skills
+     claude plugin install experiment-lifecycle@aar-skills
      ```
      Then tell your human to run `/reload-plugins` (or restart the session) to activate.
-   - *Codex CLI / other Agent-Skills harnesses* — symlink each module's skill dir:
-     `ln -s ~/aar-skills/plugins/gpu-job/skills/gpu-job ~/.codex/skills/gpu-job` (same for
-     verify-claims).
+     (`experiment-lifecycle` also needs an **execution profile** — your instance's provisioning,
+     frozen recipes, artifact store, ledger, and teardown/cost policy — before `run-experiment`
+     can drive a real run; the installed skill alone is not enough. `aar-engineering` is the
+     build-the-product layer — install it only if you're developing these skills, not just using them.)
+   - *Codex CLI / other Agent-Skills harnesses* — symlink each skill dir (note a plugin can expose
+     more than one skill — `experiment-lifecycle` has two):
+     ```
+     ln -s ~/aar-skills/plugins/gpu-job/skills/gpu-job                    ~/.codex/skills/gpu-job
+     ln -s ~/aar-skills/plugins/verify-claims/skills/verify-claims        ~/.codex/skills/verify-claims
+     ln -s ~/aar-skills/plugins/experiment-lifecycle/skills/design-experiment ~/.codex/skills/design-experiment
+     ln -s ~/aar-skills/plugins/experiment-lifecycle/skills/run-experiment    ~/.codex/skills/run-experiment
+     ```
 3. **Configure gpu-job:** run `~/aar-skills/plugins/gpu-job/skills/gpu-job/scripts/gpu_job_init.sh`.
    It writes a local config (`~/.config/gpu-job/env`, chmod 600) and uploads nothing.
    **You will need to ask your human for, verbatim:**
@@ -50,23 +60,34 @@ Your human wants these skills available. Do this, in order:
 
 | module | what your agent learns | status |
 |---|---|---|
-| **gpu-job** | disposable cloud GPU pods: deploy, run detached, persist artifacts, verified teardown — never bill an idle GPU | v0.1 |
-| **verify-claims** | adversarial fact-checking of load-bearing claims against primary records by an independent model | v0.1 |
-| *watch-run* | heartbeats + look-again deadlines for long unattended runs | planned |
+| **gpu-job** | disposable cloud GPU pods: deploy, run detached, persist artifacts, verified teardown — never bill an idle GPU | shipped |
+| **verify-claims** | adversarial fact / design / data / code review of load-bearing work, read by an independent model *family* — the cross-family validity gate | shipped |
+| **experiment-lifecycle** | run a GPU experiment like a researcher: `design-experiment` (pre-register a design, clear it with the human through the validity gates) → `run-experiment` (a zero-context executor acquires, provisions, drives, collects, closes) | shipped |
+| **aar-engineering** | the SWE pipeline that builds the product itself: ship a scaffold change through a GitHub-backed lifecycle — design doc → cross-family review → classifier → checks → merge-when-clean | shipped |
 | *reproduce-paper* | point an agent at a paper, get a graded reproduction | planned |
 
-## Install
+(Exact versions live in each `plugins/<module>/.claude-plugin/plugin.json` — the one canonical home — not duplicated here.)
 
-**Claude Code** (plugin marketplace):
+**Two layers.** The first three modules are what an agent *uses* to do research. **aar-engineering** is
+different: it's the SWE pipeline that *builds* this product — agents author changes, review each other's
+PRs across model families (Claude's work reviewed by Codex and vice-versa), and merge when clean. The
+product is built the way it ships: by agents, gated by agents. (Detail: `AGENTS.md`.)
+
+## Install (human, interactive)
+
+If *you* are setting these up by hand in the Claude Code UI (the agent path is the headless CLI in
+"If you are a coding agent" above — follow one or the other, not both):
 ```
 /plugin marketplace add <this-repo>
 /plugin install gpu-job@aar-skills
 /plugin install verify-claims@aar-skills
+/plugin install experiment-lifecycle@aar-skills
 ```
 
-**Codex CLI / other Agent-Skills harnesses:** clone, then symlink or copy
-`plugins/<module>/skills/<module>` into your harness's skills directory
-(e.g. `~/.codex/skills/`). Scripts are referenced relative to each skill.
+**Codex CLI / other Agent-Skills harnesses:** clone, then symlink each skill dir into your harness's
+skills directory (e.g. `~/.codex/skills/`) — use the explicit per-skill `ln -s` lines in "If you are a
+coding agent" above (a plugin can expose more than one skill, so symlink the `skills/<skill>` dirs, not
+`skills/<module>`). Scripts are referenced relative to each skill.
 
 ## Updating
 
