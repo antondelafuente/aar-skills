@@ -22,6 +22,7 @@ set -uo pipefail
 PROTECTED_FLOOR=(
   '.aar-ci/*'           # the CI policy + this classifier itself
   '.githooks/*'         # the secrets gate
+  '.github/*'           # GitHub Actions / branch-protection gate wiring (CI policy too)
   'CLAUDE.md' 'AGENTS.md' '*/CLAUDE.md' '*/AGENTS.md'   # the constitution
 )
 
@@ -43,12 +44,19 @@ if [ -e "$CONF" ] && [ ! -r "$CONF" ]; then
   exit 0
 fi
 if [ -f "$CONF" ]; then
-  while IFS= read -r line || [ -n "$line" ]; do
+  # open via an explicit fd so an OPEN failure (e.g. a race after the -r precheck) is caught, not swallowed
+  if ! exec 3< "$CONF"; then
+    echo "CLASSIFICATION: architectural"
+    echo "EVIDENCE: classifier.conf could not be opened -> fail-closed architectural (additive rules can't be loaded)"
+    exit 0
+  fi
+  while IFS= read -r line <&3 || [ -n "$line" ]; do
     line="${line%%#*}"                              # strip trailing/whole-line comments
     line="${line#"${line%%[![:space:]]*}"}"         # ltrim
     line="${line%"${line##*[![:space:]]}"}"         # rtrim
     [ -n "$line" ] && ALWAYS_ARCHITECTURAL+=("$line")
-  done < "$CONF"
+  done
+  exec 3<&-
 fi
 
 # the effective always-architectural set = floor (always, never weakenable) + config (additive)
