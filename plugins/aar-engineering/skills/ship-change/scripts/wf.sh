@@ -364,7 +364,9 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
   if [ -n "$FDOC" ]; then
     FISSUE=$(basename "$FDOC" | sed -E 's/^([0-9]+)-.*/\1/')
-    BODYTMP="${TMPDIR:-/tmp}/wf_prbody_${BR//\//_}.md"
+    # mktemp -> a guaranteed-unique path (no stale-path/dir collision); fall back to a fixed path if mktemp
+    # is unavailable. The trailing `||` keeps the assignment from tripping set -e.
+    BODYTMP=$(mktemp 2>/dev/null) || BODYTMP="${TMPDIR:-/tmp}/wf_prbody_${BR//\//_}.md"
     # Render AND patch inside one if-condition so set -e can't abort finish on a render/write/API failure
     # — the refresh is best-effort and must never block an otherwise-clean merge (#43/F1).
     if render_pr_body "$WT" "$FDOC" "$FISSUE" > "$BODYTMP" 2>/dev/null \
@@ -373,7 +375,7 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
     else
       note "WARN: could not refresh PR #$PR body (cosmetic — proceeding to merge)"
     fi
-    rm -f "$BODYTMP"
+    rm -f "$BODYTMP" 2>/dev/null || true   # non-fatal cleanup: never abort finish on a cosmetic temp removal
   fi
   # 1. deterministic checks + behavior smoke, on the BRANCH's actual content (the worktree)
   [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
