@@ -146,17 +146,22 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
   local repo body; repo=$(gh_repo "$wt")
   body=$(printf '## %s\n\n_Cross-family `%s` review — author `%s`, reviewer = opposite family._\n\n```\n%s\n```\n' "$heading" "$mode" "$author" "$(cat "$rev")")
-  # NATIVE review via the reviewer identity — ONLY for --code (the merge-gating review). --scaffold/other = comment.
-  local rtok=""; [ "$mode" = --code ] && rtok=$(reviewer_token)
+  # NATIVE review via the reviewer identity — ONLY for --code AND author=claude (the single reviewer token is
+  # the CODEX identity, which may only review CLAUDE-authored work; codex-authored would be same-family, so it
+  # falls through to a comment). --scaffold/other modes = comment.
+  local rtok=""; { [ "$mode" = --code ] && [ "$author" = claude ]; } && rtok=$(reviewer_token)
   if [ -n "$rtok" ]; then
-    local action
-    if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then action=--approve          # finish gate, clean -> APPROVE
-    elif [ "$REVIEW_HIGH" != 0 ]; then action=--request-changes                        # any blocking finding
-    else action=--comment; fi                                                          # clean interim -> comment, not approve
-    # GitHub rejects self-approval; if the reviewer identity == the PR author this errors -> we fail closed (loud).
-    GH_TOKEN="$rtok" gh -R "$repo" pr review "$pr" "$action" --body "$body" >/dev/null \
-      || die "could not post the native '$action' review to PR #$pr as the reviewer identity — failing closed (verdict: $REVIEW_ALL findings, $REVIEW_HIGH HIGH; see $rev)"
-    note "posted NATIVE review ($action) to PR #$pr as the reviewer identity"
+    local event sha; sha=$(git -C "$wt" rev-parse HEAD)
+    if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then event=APPROVE              # finish gate, clean -> APPROVE
+    elif [ "$REVIEW_HIGH" != 0 ]; then event=REQUEST_CHANGES                           # any blocking finding
+    else event=COMMENT; fi                                                             # clean interim -> comment, not approve
+    # Bind the review to the EXACT reviewed SHA via commit_id (F1): if the head advanced since we checked it,
+    # the approval is for the OLD sha -> won't satisfy branch protection on the new head -> merge blocked (safe).
+    # GitHub also rejects self-approval; reviewer identity == author errors here -> we fail closed (loud).
+    GH_TOKEN="$rtok" gh api -X POST "repos/$repo/pulls/$pr/reviews" \
+        -f commit_id="$sha" -f event="$event" -f body="$body" >/dev/null \
+      || die "could not post the native $event review (commit $sha) to PR #$pr as the reviewer identity — failing closed (verdict: $REVIEW_ALL findings, $REVIEW_HIGH HIGH; see $rev)"
+    note "posted NATIVE review ($event @ ${sha:0:8}) to PR #$pr as the reviewer identity"
   else
     echo "$body" | gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
       || die "could not post the $mode review comment to PR #$pr — failing closed (verdict: $REVIEW_ALL findings, $REVIEW_HIGH HIGH; see $rev)"

@@ -57,7 +57,8 @@ reviewer identity exists.
 ## Rollout + rollback
 
 Staged, matching RUNBOOK: (1) land this code (comments still, seam unset); (2) operator creates the reviewer
-identity + sets `WF_REVIEWER_GH_TOKEN`; (3) test a throwaway change → confirm a native `Approve` posts;
-(4) only then turn on branch protection (require 1 approval + dismiss-stale-approvals). Rollback is trivial:
-unset `WF_REVIEWER_GH_TOKEN` (reverts to comments) and/or remove branch protection (back to shadow mode). One
-squash commit; revertible.
+identity + sets `WF_REVIEWER_TOKEN_CMD` (a command that prints a fresh reviewer token — e.g. a GitHub App
+installation-token minter); (3) test a throwaway change → confirm a native `Approve` posts; (4) only then turn
+on branch protection (require 1 approval + dismiss-stale-approvals + include administrators, so the admin
+authoring token can't bypass the gate). Rollback is trivial: unset `WF_REVIEWER_TOKEN_CMD` (reverts to
+comments) and/or remove branch protection (back to shadow mode). One squash commit; revertible.
