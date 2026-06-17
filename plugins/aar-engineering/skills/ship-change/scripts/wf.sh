@@ -227,7 +227,8 @@ classify)       # wf.sh classify <worktree>   — shadow-mode record (never bloc
     { echo "## Change classification (shadow mode — recorded, not enforced)"; echo;
       echo "**$CLASS** — architectural changes need the PM's design approval; mechanical merge on the cross-family review + checks alone. (Phase 1: recorded only; Phase 2 wires this to a required \`design-gate\` check.)"; echo;
       echo '```'; echo "$OUT"; echo '```'; } | gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
-      && note "posted classification to PR #$PR"
+      || die "could not post the classification to PR #$PR — the shadow-mode record is the point; failing closed (classification was: $CLASS)"
+    note "posted classification to PR #$PR"
   fi
   echo "$OUT"
   ;;
@@ -240,7 +241,16 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   BR=$(wt_branch "$WT"); PR=$(wt_pr_required "$WT")
   mapfile -t PATHS < <(cd "$WT" && git diff --name-only main...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD — nothing to merge"
-  # 0. SYNC: push the worktree so the PR head == the LOCAL HEAD we're about to review (F1). Otherwise we'd
+  # 0a. BASE FRESHNESS: origin/main may have ADVANCED since `start` (a peer PR merged). The merge would land
+  #     on that newer main, but checks/review run against this branch's base — so the integrated tree that
+  #     actually lands was never checked. Block unless the branch is rebased onto current origin/main (the
+  #     agent: `cd $WT && git rebase origin/main`, then re-run code-review, then finish). WF_OFFLINE=1 skips.
+  if [ "${WF_OFFLINE:-}" != 1 ]; then
+    git -C "$WT" fetch -q origin main || die "git fetch origin failed — can't confirm the merge base is current (WF_OFFLINE=1 to override)"
+    BASE=$(git -C "$WT" merge-base HEAD origin/main); OMAIN=$(git -C "$WT" rev-parse origin/main)
+    [ "$BASE" = "$OMAIN" ] || die "origin/main advanced since this branch started — the merge would land on newer main than was checked. Integrate + re-review: (cd $WT && git rebase origin/main) then re-run code-review, then finish."
+  fi
+  # 0b. SYNC: push the worktree so the PR head == the LOCAL HEAD we're about to review (F1). Otherwise we'd
   #    review the local diff but merge a different remote head, then delete the reviewed worktree.
   ( cd "$WT" && git push -q origin HEAD ) || die "push failed — refusing to merge a PR that may not match the reviewed diff"
   LOCAL_SHA=$(git -C "$WT" rev-parse HEAD)
