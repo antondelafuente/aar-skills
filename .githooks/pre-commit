@@ -1,11 +1,25 @@
 #!/bin/bash
-# aar-skills pre-commit: this repo is PUBLIC — block committing secrets or instance specifics.
+# aar-skills pre-commit: this repo is PUBLIC — block committing secrets or instance specifics,
+# AND block direct commits to `main` (scaffold changes go through ship-change).
 # Install once per clone: git config core.hooksPath .githooks
 #
 # Committed here: GENERIC secret regexes only — no instance values (the rule this repo follows). Instance-
 # specific patterns (your bucket name, IPs, volume IDs, handles) go in a LOCAL, gitignored file so they
 # protect your commits WITHOUT entering the public history themselves — one regex per line, '#' comments ok:
 #   printf 'r2:mybucket\n10\\.0\\.0\\.\n' > .githooks/patterns.local
+
+# --- ship-change guard (#40 Tier 2): refuse a direct commit to `main` ---------------------------------
+# Every legitimate change is committed on a `change/*` branch in a ship-change worktree; `main` only gets
+# commits via GitHub's server-side squash-merge of an approved PR (which does NOT run this local hook). So a
+# LOCAL commit on `main` is always the workflow bypass — block it (deliberate exception: git commit --no-verify).
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ "$BRANCH" = "main" ]; then
+  echo "BLOCKED: direct commit to aar-skills 'main' — scaffold changes go through ship-change:" >&2
+  echo "  wf.sh start <issue> <slug>  ->  edit in the /tmp/wf-* worktree (a change/* branch)  ->  PR + cross-family review  ->  merge." >&2
+  echo "  (Deliberate exception only: git commit --no-verify.)" >&2
+  exit 1
+fi
+
 PATTERNS='ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|ghu_[A-Za-z0-9]|ghs_[A-Za-z0-9]|github_pat_[A-Za-z0-9]|sk-ant-|sk-proj-|AKIA[A-Z0-9]{12}|-----BEGIN[A-Z ]*PRIVATE KEY|RUNPOD[A-Z_]*API_KEY=.+[A-Za-z0-9]|AIza[0-9A-Za-z_-]{20}|xox[baprs]-[A-Za-z0-9]'
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 LOCAL="$ROOT/.githooks/patterns.local"
