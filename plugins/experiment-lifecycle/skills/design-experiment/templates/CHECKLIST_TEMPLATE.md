@@ -26,7 +26,7 @@
 
 ## UNIVERSAL  (every GPU experiment)
 - ☐ [BLOCK] Read DESIGN.md + START.md; design is locked (no redesign).                          ev:
-- ☐ [BLOCK] Self-wake / idle-cost backstop armed PER SUBSTRATE before detached billable work.
+- ☐ [BLOCK] Self-wake / idle-cost backstop armed PER SUBSTRATE before autonomous detached runs or detached billable work.
       Autonomous detached runs MUST name the independent waker id/handle; any detached compute MUST name the
       idle-cost teardown backstop. An in-process monitor alone is FAIL for autonomous detached runs.
       (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + box-side idle-teardown watchdog).  ev:
