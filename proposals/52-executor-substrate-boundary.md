@@ -22,10 +22,11 @@ Make the boundary explicit in the existing skill docs and templates:
   local launcher), not an Agent-tool subagent.
 - State that subagents are fine for short, idempotent, controller-supervised probes, but not for autonomous
   detached runs where the controller expects the executor to own liveness.
-- In `run-experiment`, add a first-step substrate check: if the substrate cannot arm an independent recurring
-  self-wake, stop or escalate before GPU/API spend instead of silently substituting a weaker monitor.
-- In the checklist/template, make the self-wake gate ask for evidence that the chosen substrate can actually arm
-  the independent wake.
+- Make the existing checklist self-wake gate the canonical fail-closed mechanism: it requires the independent
+  waker/backstop id or handle as evidence, and says an in-process monitor alone is FAIL.
+- In `run-experiment`, scope the substrate check to **autonomous detached runs**: if the substrate cannot arm an
+  independent recurring wake, mark the checklist gate FAIL and escalate before GPU/API spend instead of silently
+  substituting a weaker monitor. Short controller-supervised probes remain allowed.
 
 This is documentation/protocol only. It does not build a detector for subagent tool registries in this change.
 

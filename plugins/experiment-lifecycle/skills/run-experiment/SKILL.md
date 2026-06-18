@@ -76,9 +76,17 @@ working from a wedged hot-loop), plus the driver log for BLOCKED/errors; and it 
 a deadline quietly gone past with compute still billing is the signal you parked, so STOP re-waiting, diagnose, and
 notify the human.
 
+For an **autonomous detached run**, this is a capability requirement, not a best-effort preference. If your substrate
+cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and proceed. Mark the
+`CHECKLIST.md` self-wake gate **FAIL**, notify/escalate before GPU/API spend, and either relaunch in a substrate that
+can own its wake or keep the work explicitly controller-supervised. Short controller-supervised probes may use weaker
+watching, but then they are not autonomous detached runs.
+
 > **Claude Code implementation:** a non-durable recurring `CronCreate` (~every 12 min) whose prompt re-checks the pods
 > and honors a `LOOK_AGAIN.md` marker (`last_looked` / `look_again_by`, generous). Session-scoped (wakes only its
-> creating session; auto-expires ~7 days — re-arm for longer runs). Other substrates: the equivalent recurring wake.
+> creating session; auto-expires ~7 days — re-arm for longer runs). A tool-spawned Agent subagent cannot use this
+> independent wake path, so it is not a valid autonomous detached executor. Other substrates: the equivalent recurring
+> wake.
 
 ## Topology: detached driver (default) vs on-compute agent (rare)
 

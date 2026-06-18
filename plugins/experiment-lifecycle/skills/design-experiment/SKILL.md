@@ -140,7 +140,12 @@ The contract is substrate-neutral:
 
 The executor MUST start with **fresh context** (no memory of this design conversation) — that property is the whole
 point. *How* you spawn it is the instance's implementation of the contract:
+- **Autonomous detached run requirement:** the executor substrate must be able to arm its **own independent recurring
+  self-wake** and record the waker/backstop id in `CHECKLIST.md`. A controller-held wake or in-process monitor does
+  not satisfy the autonomous detached-run contract.
 - **Claude Code:** a fresh zero-context session in its own dedicated working dir (a launcher script + the session-manager skill).
+  A tool-spawned Agent subagent is fine for short controller-supervised probes, but not as the autonomous detached
+  executor: it cannot arm the independent recurring wake this contract requires.
 - **Codex:** a fresh thread / watcher-driven local execution.
 - **Other substrates:** a CI job, a remote worker, or a hosted queue that reads the brief.
 
