@@ -41,7 +41,10 @@ say(){ echo "=== [$(date -u +%H:%M:%S)] $* ==="; }
 if rclone lsf "$REMOTE/" 2>/dev/null | grep -q .; then
   if [ "${STAGE_FORCE:-0}" = "1" ]; then
     say "STAGE_FORCE=1: purging existing $REMOTE/ before re-stage"
-    rclone purge "$REMOTE" 2>/dev/null || true
+    # Fail closed: a swallowed purge error would leave stale objects under the prefix, so the
+    # aggregate count+bytes manifest would describe a tree that isn't actually there.
+    rclone purge "$REMOTE" 2>/dev/null || { echo "BLOCKED: purge of $REMOTE failed" >&2; exit 1; }
+    rclone lsf "$REMOTE/" 2>/dev/null | grep -q . && { echo "BLOCKED: $REMOTE/ still not empty after purge" >&2; exit 1; }
   else
     echo "BLOCKED: $REMOTE/ is not empty — refusing to stage into it. Set STAGE_FORCE=1 to purge+restage, or pick a fresh path." >&2
     exit 1

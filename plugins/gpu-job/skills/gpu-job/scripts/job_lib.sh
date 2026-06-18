@@ -96,9 +96,11 @@ pull_model(){ # pull_model <remote-model-path> <local-dir> [deadline-min=30] —
     [ "$i" -gt "$max" ] && { echo "pull_model: no _STAGED.json at $remote/ after ${deadline}min — wrong path, or staging never finished?" >&2; return 1; }
     say "pull_model: waiting for staging to finish ($remote/_STAGED.json) [${i}/${max}]"; sleep 30
   done
-  man=$(rclone cat "$remote/_STAGED.json" 2>/dev/null)
-  exp_n=$(printf '%s' "$man" | grep -o '"object_count":[0-9]*' | grep -o '[0-9]*$')
-  exp_b=$(printf '%s' "$man" | grep -o '"total_bytes":[0-9]*' | grep -o '[0-9]*$')
+  man=$(rclone cat "$remote/_STAGED.json" 2>/dev/null || true)
+  # `|| true` so a malformed manifest (grep miss) doesn't trip the caller's `set -e` here — let
+  # the explicit empty-field check below return the clear error instead.
+  exp_n=$(printf '%s' "$man" | grep -o '"object_count":[0-9]*' | grep -o '[0-9]*$' || true)
+  exp_b=$(printf '%s' "$man" | grep -o '"total_bytes":[0-9]*' | grep -o '[0-9]*$' || true)
   [ -n "$exp_n" ] && [ -n "$exp_b" ] || { echo "pull_model: bad/missing manifest at $remote/_STAGED.json" >&2; return 1; }
   say "pull_model: pulling $remote -> $dest (expect $exp_n files, $exp_b bytes)"
   rclone copy "$remote/" "$dest/" --transfers=8 --checkers=8
