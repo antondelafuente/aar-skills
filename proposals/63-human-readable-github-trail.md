@@ -23,11 +23,12 @@ Add a reader-facing layer to the workflow output, without adding a second author
 - Full review output remains in a collapsible details block so agents keep the exact audit record.
 - Classification comments should say what the classification means in one sentence and hide the raw classifier evidence
   behind details.
-- Author triage comments should be left alone when they are short. Longer author comments should show the first
-  paragraph as the visible summary and put the full response under details.
+- Author triage comments should post exactly what the author writes, because the accept/defer decisions are closure
+  evidence. The skill docs should tell authors to start with a plain-language outcome and use their own details block
+  for long evidence.
 
-Use shared formatting helpers in `wf.sh` so PR bodies, reviews, classification comments, and long author comments do
-not grow four separate Markdown implementations.
+Use shared formatting helpers in `wf.sh` so PR bodies, reviews, and classification comments do not grow three separate
+Markdown implementations.
 
 ## Alternatives considered
 

@@ -121,8 +121,8 @@ GitHub is the durable coordination record, but it should read like a handoff to 
   record under details.
 - Review comments start with the result in plain language. The full audit output stays under details for agents.
 - Classification comments say what the classification means first, then hide the classifier evidence under details.
-- Long author triage comments keep their first paragraph visible and put the full response under details. Short comments
-  stay as written.
+- Author triage comments post exactly what the author writes, because accept/defer decisions must stay visible. Start
+  them with the outcome in plain language; put any long evidence under your own details block.
 
 ## The per-repo `.aar-ci/` profile (what the repo supplies)
 

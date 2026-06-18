@@ -120,21 +120,6 @@ opposite_family(){
   esac
 }
 
-engineer_label(){
-  local fam=$1 suffix var
-  suffix=$(family_suffix "$fam"); var="WF_ENGINEER_LABEL_$suffix"
-  echo "${!var:-}"
-}
-
-reviewer_phrase(){
-  local author=${1:-} reviewer label
-  if [ "$author" = claude ] || [ "$author" = codex ]; then
-    reviewer=$(opposite_family "$author"); label=$(engineer_label "$reviewer")
-    [ -n "$label" ] && { echo "$label"; return; }
-  fi
-  echo "the opposite-family reviewer identity"
-}
-
 engineer_token_cmd(){
   local fam=$1 suffix var cmd
   suffix=$(family_suffix "$fam"); var="WF_ENGINEER_TOKEN_CMD_$suffix"
@@ -198,15 +183,15 @@ markdown_details(){  # markdown_details <summary> <body>
   printf '<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n' "$summary" "$body"
 }
 
-review_summary_text(){  # review_summary_text <heading> <high> <med> <low>
-  local heading=$1 high=$2 med=$3 low=$4
+review_summary_text(){  # review_summary_text <heading> <high> <med> <low> <approving:0|1>
+  local heading=$1 high=$2 med=$3 low=$4 approving=${5:-0}
   if [ "$high" -gt 0 ]; then
     printf 'This review found %s serious issue(s). Fix them or clearly explain why they are not real before this PR moves forward.' "$high"
   elif [ "$med" -gt 0 ]; then
     printf 'This review found %s issue(s) that should be fixed or answered before merging.' "$med"
   elif [ "$low" -gt 0 ]; then
     printf 'This review found only minor notes. The PR can continue after the author records what they did with them.'
-  elif [[ "$heading" == Final* ]]; then
+  elif [ "$approving" = 1 ]; then
     printf 'Final review approved this PR. It found no problems.'
   else
     printf 'This review found no problems.'
@@ -217,7 +202,7 @@ classification_summary_text(){  # classification_summary_text <classification>
   local class=$1
   case "$class" in
     architectural)
-      printf 'This PR changes workflow, skill, or proposal files, so it may affect how agents work. That does not block merging by itself; it is recorded for the human reader.'
+      printf 'This PR touches a high-impact part of the scaffold. A human design approval is expected before treating it as routine. The detailed rule that matched is below.'
       ;;
     mechanical)
       printf 'This PR looks mechanical. It can merge on the normal review and checks if no serious issues remain.'
@@ -226,19 +211,6 @@ classification_summary_text(){  # classification_summary_text <classification>
       printf 'This PR was classified as %s. The detailed classifier output is below.' "$class"
       ;;
   esac
-}
-
-format_author_comment(){  # format_author_comment <body>
-  local body=${1:-} lines first
-  lines=$(printf '%s\n' "$body" | wc -l | tr -d ' ')
-  if [ "${#body}" -le 1200 ] && [ "$lines" -le 16 ]; then
-    printf '%s' "$body"
-    return
-  fi
-  first=$(first_paragraph "$body")
-  [ -n "$first" ] || first="The author responded to the review."
-  printf '## Author response\n\n%s\n\n' "$first"
-  markdown_details "Full response" "$body"
 }
 
 author_token_optional(){
@@ -348,7 +320,7 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   note "$mode verdict: $REVIEW_ALL finding(s), $REVIEW_HIGH HIGH -> $rev"
   [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
   local repo body review_text; repo=$(gh_repo "$wt"); review_text=$(cat "$rev")
-  body=$( { printf '## %s\n\n%s\n\n' "$heading" "$(review_summary_text "$heading" "$REVIEW_HIGH" "$review_med" "$review_low")"; markdown_details "Full review details" "$review_text"; } )
+  body=$( { printf '## %s\n\n%s\n\n' "$heading" "$(review_summary_text "$heading" "$REVIEW_HIGH" "$review_med" "$review_low" "$approving")"; markdown_details "Full review details" "$review_text"; } )
   # The reviewer identity attributes its output to the opposite-family engineer — a NATIVE review for --code
   # when configured, a COMMENT for --scaffold. Unconfigured installs fall back to ambient comments unless
   # WF_REQUIRE_NATIVE_REVIEW=1. Advisory scaffold/classification comments still fall back when no reviewer
@@ -523,7 +495,7 @@ comment)        # wf.sh comment <worktree> <author> [body-file]   — post an AU
   PR=$(wt_pr_required "$WT" "$ATOK")
   if [ "$BODYFILE" = - ]; then BODY=$(cat); else [ -f "$BODYFILE" ] || die "no such body file: $BODYFILE"; BODY=$(cat "$BODYFILE"); fi
   [ -n "$BODY" ] || die "empty comment body (nothing on stdin / empty file)"
-  format_author_comment "$BODY" | gh_author "$ATOK" -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
+  echo "$BODY" | gh_author "$ATOK" -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
     || die "could not post the author comment to PR #$PR — failing closed"
   if [ -n "$ATOK" ]; then note "posted author COMMENT to PR #$PR as the $AUTHOR engineer identity"
   else note "posted author COMMENT to PR #$PR (ambient token — no engineer identity configured for $AUTHOR)"; fi
