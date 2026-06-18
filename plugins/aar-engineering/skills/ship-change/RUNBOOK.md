@@ -42,9 +42,8 @@ check). Wiring either as a GitHub-required status is a tracked follow-up (needs 
 - **Instance wiring (not product):** each App's id + private key live on the instance under e.g.
   `~/.config/<family>-engineer/`. `WF_ENGINEER_TOKEN_CMD_CLAUDE` / `WF_ENGINEER_TOKEN_CMD_CODEX` mint fresh
   installation tokens per use (they expire ~1h); `WF_ENGINEER_GIT_AUTHOR_CLAUDE` /
-  `WF_ENGINEER_GIT_AUTHOR_CODEX` provide `Name <email>` for strict commit attribution. Optional
-  `WF_ENGINEER_LABEL_CLAUDE` / `WF_ENGINEER_LABEL_CODEX` label PR text. `wf.sh` consumes only these seams — no
-  App specifics in product code. `WF_REQUIRE_ENGINEER_IDENTITY=1` makes missing author identity config block;
+  `WF_ENGINEER_GIT_AUTHOR_CODEX` provide `Name <email>` for strict commit attribution. `wf.sh` consumes only these
+  seams — no App specifics in product code. `WF_REQUIRE_ENGINEER_IDENTITY=1` makes missing author identity config block;
   `WF_REQUIRE_NATIVE_REVIEW=1` makes the final merge-gate review block when the opposite-family reviewer
   identity is absent.
 

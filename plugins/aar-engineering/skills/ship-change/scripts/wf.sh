@@ -120,21 +120,6 @@ opposite_family(){
   esac
 }
 
-engineer_label(){
-  local fam=$1 suffix var
-  suffix=$(family_suffix "$fam"); var="WF_ENGINEER_LABEL_$suffix"
-  echo "${!var:-}"
-}
-
-reviewer_phrase(){
-  local author=${1:-} reviewer label
-  if [ "$author" = claude ] || [ "$author" = codex ]; then
-    reviewer=$(opposite_family "$author"); label=$(engineer_label "$reviewer")
-    [ -n "$label" ] && { echo "$label"; return; }
-  fi
-  echo "the opposite-family reviewer identity"
-}
-
 engineer_token_cmd(){
   local fam=$1 suffix var cmd
   suffix=$(family_suffix "$fam"); var="WF_ENGINEER_TOKEN_CMD_$suffix"
@@ -176,6 +161,86 @@ engineer_git_author(){
 
 git_author_name(){ sed -E 's/[[:space:]]*<[^>]+>[[:space:]]*$//' <<<"$1"; }
 git_author_email(){ sed -nE 's/.*<([^>]+)>.*/\1/p' <<<"$1"; }
+
+section_text(){  # section_text <markdown-file> <section-name-without-##>
+  local file=$1 name=$2
+  awk -v name="$name" '
+    {
+      line=$0
+      sub(/[[:space:]]+$/, "", line)
+    }
+    line == "## " name { found=1; next }
+    found && /^## / { exit }
+    found { print }
+  ' "$file" || true
+}
+
+first_paragraph(){  # first_paragraph <text>
+  awk '
+    /^[[:space:]]*$/ { if (seen) exit; next }
+    { seen=1; print }
+  ' <<<"${1:-}" || true
+}
+
+markdown_details(){  # markdown_details <summary> <body>
+  local summary=$1 body=${2:-}
+  printf '<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n' "$summary" "$body"
+}
+
+markdown_code_details(){  # markdown_code_details <summary> <body>
+  local summary=$1 body=${2:-} fence_len fence
+  fence_len=$(awk '
+    {
+      line=$0
+      while (match(line, /`+/)) {
+        if (RLENGTH > max) max=RLENGTH
+        line=substr(line, RSTART + RLENGTH)
+      }
+    }
+    END {
+      if (max < 3) max=3
+      print max + 1
+    }
+  ' <<<"$body" || true)
+  : "${fence_len:=4}"
+  printf -v fence '%*s' "$fence_len" ''
+  fence=${fence// /\`}
+  printf '<details>\n<summary>%s</summary>\n\n%stext\n%s\n%s\n\n</details>\n' "$summary" "$fence" "$body" "$fence"
+}
+
+review_summary_text(){  # review_summary_text <high> <med> <low> <approving:0|1>
+  local high=$1 med=$2 low=$3 approving=${4:-0}
+  if [ "$high" -gt 0 ]; then
+    printf 'This review found %s serious issue(s). Fix them or clearly explain why they are not real before this PR moves forward.' "$high"
+  elif [ "$approving" = 1 ] && [ "$med" -gt 0 ]; then
+    printf 'Final review approved this PR. It found %s non-blocking issue(s), recorded below for the author and human reader.' "$med"
+  elif [ "$approving" = 1 ] && [ "$low" -gt 0 ]; then
+    printf 'Final review approved this PR. It found only minor notes, recorded below for the author and human reader.'
+  elif [ "$med" -gt 0 ]; then
+    printf 'This review found %s issue(s) that should be fixed or answered before merging.' "$med"
+  elif [ "$low" -gt 0 ]; then
+    printf 'This review found only minor notes. The PR can continue after the author records what they did with them.'
+  elif [ "$approving" = 1 ]; then
+    printf 'Final review approved this PR. It found no problems.'
+  else
+    printf 'This review found no problems.'
+  fi
+}
+
+classification_summary_text(){  # classification_summary_text <classification>
+  local class=$1
+  case "$class" in
+    architectural)
+      printf 'This PR touches a high-impact part of the scaffold. A human design approval is expected before treating it as routine. The detailed rule that matched is below.'
+      ;;
+    mechanical)
+      printf 'This PR looks mechanical. It can merge on the normal review and checks if no serious issues remain.'
+      ;;
+    *)
+      printf 'This PR was classified as %s. The detailed classifier output is below.' "$class"
+      ;;
+  esac
+}
 
 author_token_optional(){
   local author=$1 tok
@@ -220,17 +285,28 @@ wt_pr(){
   fi
 }  # PR# for a worktree's branch
 
-# render_pr_body <worktree> <doc-relpath> <issue> [author] — the PR body as a generated VIEW of the committed
-# design doc (#24): a self-describing, plain-language PR with zero duplicate authoring. Doc from its first
-# '## ' section (drops the H1 title — already the PR title — and the boilerplate blockquote); falls back to
-# whole-doc-minus-H1 if there's no '## '. Re-rendered at finish so the merged record matches the landed doc.
+# render_pr_body <worktree> <doc-relpath> <issue> — the PR body as a generated VIEW of the committed
+# design doc (#24): a self-describing, plain-language PR with zero duplicate authoring. The visible body
+# uses the first paragraphs of Problem + Approach; the full design record stays under details. Re-rendered
+# at finish so the merged record matches the landed doc.
 render_pr_body(){
-  local wt="$1" doc="$2" issue="$3" author=${4:-} body reviewer
-  reviewer=$(reviewer_phrase "$author")
+  local wt="$1" doc="$2" issue="$3" body problem approach visible fallback_body title
   body=$(awk 'f||/^## /{f=1}f' "$wt/$doc")
   [ -n "$body" ] || body=$(sed '1{/^# /d;}' "$wt/$doc")
-  printf 'Closes #%s.\n\n%s\n\n---\n\n**Design doc:** `%s` (lands on main at merge) · **Issue:** #%s\n\n_Lifecycle: draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. The cross-family review can be posted as a native review through %s; branch protection can require that approval before merge._\n' \
-    "$issue" "$body" "$doc" "$issue" "$reviewer"
+  problem=$(first_paragraph "$(section_text "$wt/$doc" "Problem")")
+  approach=$(first_paragraph "$(section_text "$wt/$doc" "Approach")")
+  visible="$problem"
+  if [ -n "$problem" ] && [ -n "$approach" ]; then visible=$(printf '%s\n\n%s' "$problem" "$approach")
+  elif [ -n "$approach" ]; then visible="$approach"; fi
+  fallback_body=$(sed '1{/^## /d;}' <<<"$body")
+  [ -n "$visible" ] || visible=$(first_paragraph "$fallback_body")
+  if [ -z "$visible" ]; then
+    title=$(sed -nE 's/^# +//p' "$wt/$doc" | head -1 || true)
+    visible="$title"
+  fi
+  printf 'Closes #%s.\n\n%s\n\n' "$issue" "$visible"
+  markdown_details "Design record" "$body"
+  printf '\n\nDesign record: `%s`. It lands in the repo when this PR merges.\n' "$doc"
 }
 
 # --- fail-closed review verdict ------------------------------------------------------------------
@@ -238,6 +314,8 @@ require_valid_review(){ grep -qE '^SUMMARY: high=[0-9]+ med=[0-9]+ low=[0-9]+' "
   || die "review output malformed/incomplete (no valid 'SUMMARY: high=.. med=.. low=..') — failing CLOSED. See $1"; }
 sum_line(){ grep -E '^SUMMARY:' "$1" | tail -1; }
 count_high(){ sum_line "$1" | sed -E 's/.*high=([0-9]+).*/\1/'; }
+count_med(){ sum_line "$1" | sed -E 's/.*med=([0-9]+).*/\1/'; }
+count_low(){ sum_line "$1" | sed -E 's/.*low=([0-9]+).*/\1/'; }
 count_all(){ local s; s=$(sum_line "$1"); echo $(( $(sed -E 's/.*high=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*med=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*low=([0-9]+).*/\1/'<<<"$s") )); }
 
 # resolve a fresh token for the REVIEWER identity (opposite family from the author), used to post a NATIVE
@@ -271,11 +349,12 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
     bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
     || { echo "BLOCKED: reviewer process failed — tail of log:" >&2; tail -8 "$rev.run.log" >&2; exit 1; }
   require_valid_review "$rev"
-  REVIEW_HIGH=$(count_high "$rev"); REVIEW_ALL=$(count_all "$rev")
+  local review_med review_low
+  REVIEW_HIGH=$(count_high "$rev"); review_med=$(count_med "$rev"); review_low=$(count_low "$rev"); REVIEW_ALL=$(count_all "$rev")
   note "$mode verdict: $REVIEW_ALL finding(s), $REVIEW_HIGH HIGH -> $rev"
   [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
-  local repo body; repo=$(gh_repo "$wt")
-  body=$(printf '## %s\n\n_Cross-family `%s` review — author `%s`, reviewer = opposite family._\n\n```\n%s\n```\n' "$heading" "$mode" "$author" "$(cat "$rev")")
+  local repo body review_text; repo=$(gh_repo "$wt"); review_text=$(cat "$rev")
+  body=$( { printf '## %s\n\n%s\n\n' "$heading" "$(review_summary_text "$REVIEW_HIGH" "$review_med" "$review_low" "$approving")"; markdown_code_details "Full review details" "$review_text"; } )
   # The reviewer identity attributes its output to the opposite-family engineer — a NATIVE review for --code
   # when configured, a COMMENT for --scaffold. Unconfigured installs fall back to ambient comments unless
   # WF_REQUIRE_NATIVE_REVIEW=1. Advisory scaffold/classification comments still fall back when no reviewer
@@ -401,7 +480,7 @@ Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- 
   # PR body = the design doc RENDERED (#24) — self-describing, plain-language, zero duplicate authoring.
   # render_pr_body re-runs at finish so the merged record matches the landed doc. --body-file - (stdin)
   # so the doc's backticks/code fences/$/# survive untouched.
-  PRURL=$(render_pr_body "$WT" "$DOC" "$ISSUE" "$AUTHOR" | gh_author "$AUTHOR_TOKEN" -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
+  PRURL=$(render_pr_body "$WT" "$DOC" "$ISSUE" | gh_author "$AUTHOR_TOKEN" -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
     --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
     --body-file -) \
     || die "gh pr create failed"
@@ -476,9 +555,9 @@ classify)       # wf.sh classify <worktree> [author]   — advisory record (neve
   fi
   [ -n "$RTOK" ] || need_ambient_gh
   PR=$(wt_pr_required "$WT" "$RTOK")
-  BODY=$( { echo "## Change classification (recorded; the design-gate is not yet a required check)"; echo;
-      echo "**$CLASS** — architectural changes need the PM's design approval; mechanical merge on the cross-family review + checks alone. (Recorded for now; wiring this to a required \`design-gate\` check is a follow-up.)"; echo;
-      echo '```'; echo "$OUT"; echo '```'; } )
+  BODY=$( { echo "## Type of change"; echo;
+      classification_summary_text "$CLASS"; echo; echo;
+      markdown_code_details "Classifier details" "$OUT"; } )
   if [ -n "$RTOK" ]; then
     echo "$BODY" | GH_TOKEN="$RTOK" gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
       || die "could not post the classification to PR #$PR as the reviewer identity — failing closed (classification was: $CLASS)"
@@ -535,7 +614,7 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
     BODYTMP=$(mktemp 2>/dev/null) || BODYTMP="${TMPDIR:-/tmp}/wf_prbody_${BR//\//_}.md"
     # Render AND patch inside one if-condition so set -e can't abort finish on a render/write/API failure
     # — the refresh is best-effort and must never block an otherwise-clean merge (#43/F1).
-    if render_pr_body "$WT" "$FDOC" "$FISSUE" "$AUTHOR" > "$BODYTMP" 2>/dev/null \
+    if render_pr_body "$WT" "$FDOC" "$FISSUE" > "$BODYTMP" 2>/dev/null \
        && gh_author "$ATOK" api --method PATCH "repos/$REPO/pulls/$PR" -F body=@"$BODYTMP" >/dev/null 2>&1; then
       note "refreshed PR #$PR body from the final design doc"
     else

@@ -72,6 +72,8 @@ configured `WF_ENGINEER_TOKEN_CMD_*` commands. `wf.sh` is `scripts/wf.sh` in thi
 wf.sh start <N> <slug>            # prints WORKTREE=… BRANCH=… DOC=proposals/<N>-<slug>.md
 #   → WRITE the design doc at <WORKTREE>/proposals/<N>-<slug>.md (problem, approach, alternatives,
 #     blast radius, rollout). This is the ADR; it lands on main and survives branch deletion.
+#     The PR body is a short reader view derived from the first paragraphs of Problem + Approach;
+#     write those first paragraphs as plain English for a human opening the PR cold.
 
 # 2. OPEN — commit the doc, push, open the DRAFT PR (links the Issue)
 wf.sh open <WORKTREE> [author]    # prints PR=<n>; author=claude|codex enables bot identity when configured
@@ -110,6 +112,17 @@ reason on the PR). Post PR responses via `wf.sh comment <WORKTREE> <author>` so 
 engineer identity, not the human owner's token. A HIGH must be fixed or genuinely refuted before merge; the driver blocks on any HIGH.
 (The cross-family reviewer is *told* to find the next thing, so it won't self-converge — don't chase it past
 HIGH=0 into endless polish; the merge bar is HIGH=0 + checks green.)
+
+## GitHub reader surface
+
+GitHub is the durable coordination record, but it should read like a handoff to a human who opened the PR cold.
+
+- PR bodies show the first paragraph of `Problem` and the first paragraph of `Approach`, then hide the full design
+  record under details.
+- Review comments start with the result in plain language. The full audit output stays under details for agents.
+- Classification comments say what the classification means first, then hide the classifier evidence under details.
+- Author triage comments post exactly what the author writes, because accept/defer decisions must stay visible. Start
+  them with the outcome in plain language; put any long evidence under your own details block.
 
 ## The per-repo `.aar-ci/` profile (what the repo supplies)
 
