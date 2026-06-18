@@ -28,35 +28,41 @@ declared author family.
    roles: Claude identity authors Claude work and reviews Codex work; Codex identity authors Codex work and
    reviews Claude work. Backward compatibility: the existing `WF_REVIEWER_TOKEN_CMD` aliases
    `WF_ENGINEER_TOKEN_CMD_CODEX`, because that is the currently configured `codex-engineer` token command.
-2. **Strict identity path plus explicit legacy path.** Add `wf.sh open <worktree> <author>` as the strict
-   agent-owned path. It uses the author family's engineer token for commit, push, and PR creation; missing,
-   failing, or empty token command blocks before mutation. Keep the current `wf.sh open <worktree>` as a
-   named legacy/bootstrap path that uses ambient auth and prints a warning. This prevents the workflow from
-   bricking before `claude-engineer` exists, while making agent-owned authorship discoverable and non-silent.
-   Once both identities are configured, a later hardening change can remove or gate the legacy path.
-3. **Author-side GitHub routing.** For commands that already require `<author>` (`design-review`, `code-review`,
+2. **Git commit identity seam.** Add `WF_ENGINEER_GIT_AUTHOR_CLAUDE` and `WF_ENGINEER_GIT_AUTHOR_CODEX`, each in
+   `Name <email>` form. A strict agent-owned `open` uses this for `GIT_AUTHOR_*` and `GIT_COMMITTER_*` on the
+   design-doc commit. Token routing alone does not and cannot change commit metadata, so missing git-author
+   config blocks before mutation on the strict path.
+3. **Strict identity path plus explicit legacy path.** Add `wf.sh open <worktree> <author>` as the strict
+   agent-owned path. It uses the author family's engineer token for push and PR creation, and the author family's
+   git identity for the commit. Missing, failing, or empty token/git-author config blocks before mutation. Keep
+   bootstrap available only through an explicit `wf.sh open <worktree> --legacy` form that uses ambient auth and
+   prints a warning. A missing author arg blocks with usage, not silently falling back to Anton. Once both
+   identities are configured, a later hardening change can remove or gate the legacy path.
+4. **Author-side GitHub routing.** For commands that already require `<author>` (`design-review`, `code-review`,
    `finish`) use the author token for author-side mutations: pushing the branch, refreshing the PR body, marking
    ready, and merging. `classify` should require `<author>` too, so automated comments can be attributed to the
    opposite-family reviewer identity.
-4. **Reviewer routing by opposite family.** Native reviews and reviewer-owned comments use the opposite-family
-   engineer token. Missing reviewer config blocks native review/comment posting for commands that know the
-   author. There is no default-token fallback on the strict path.
-5. **Codex author support.** Remove the hard block in `check_author`. Codex-authored work still needs a
+5. **Reviewer routing by opposite family.** Native reviews and reviewer-owned comments use the opposite-family
+   engineer token. Preserve the existing product fallback for unenforced installs: if no reviewer token command is
+   configured, review output can still post as an ambient comment and merge only if the repo permits it. If a
+   reviewer token command is configured but fails/returns empty, block. Add `WF_REQUIRE_NATIVE_REVIEW=1` for this
+   repo's enforced mode: with it set, missing reviewer identity blocks before posting fallback comments.
+6. **Codex author support.** Remove the hard block in `check_author`. Codex-authored work still needs a
    different-family verifier command (`AUDIT_VERIFIER_CMD`, usually `claude -p ...`) because `audit_experiment.sh`
    enforces model-family independence. The GitHub identity path is independent of that model-reviewer command.
-6. **PR body correctness.** Parameterize `render_pr_body` by author family so it names the actual
-   opposite-family reviewer identity (`codex-engineer[bot]` for Claude authors, `claude-engineer[bot]` for Codex
-   authors, generic wording for the legacy path).
-7. **Docs/runbook.** Update `SKILL.md`, `RUNBOOK.md`, and `wf.sh help` to show the new lifecycle signature:
-   `open <worktree> <author>`, `classify <worktree> <author>`, the legacy bootstrap form, and the two
-   identity-keyed env vars. Keep the note that actual GitHub App creation/key storage is instance config, not
-   product code.
+7. **PR body correctness.** Stop hardcoding `codex-engineer[bot]` in generated PR prose. Use generic wording by
+   default ("the opposite-family reviewer identity") and allow optional labels
+   `WF_ENGINEER_LABEL_CLAUDE` / `WF_ENGINEER_LABEL_CODEX` for instances that want concrete bot names in PR text.
+8. **Docs/runbook.** Update `SKILL.md`, `RUNBOOK.md`, `plugin.json`, and `wf.sh help` to show the new lifecycle
+   signature: `open <worktree> <author>`, `open <worktree> --legacy`, `classify <worktree> <author>`, the
+   identity-keyed env vars, the git-author vars, and the native-review-required flag. Keep the note that actual
+   GitHub App creation/key storage is instance config, not product code.
 
 The first implementation can be product-complete while instance-config incomplete: on this box today only
-`codex-engineer` is configured. That means a strict Codex-authored run can open as Codex, but should fail at a
-clear "missing `claude-engineer` reviewer token command" boundary until the app/key is installed; it should not
-post the enforced review under Anton. Existing Claude-authored changes can still use the explicit legacy open
-path until `claude-engineer` is configured.
+`codex-engineer` is configured. That means a strict Codex-authored run can open as Codex once
+`WF_ENGINEER_GIT_AUTHOR_CODEX` is configured, but should fail at a clear "missing `claude-engineer` reviewer
+token command" boundary when `WF_REQUIRE_NATIVE_REVIEW=1` is set. Existing Claude-authored changes can still use
+the explicit legacy open path until `claude-engineer` is configured.
 
 ## Alternatives considered
 
@@ -66,7 +72,9 @@ path until `claude-engineer` is configured.
   identity model. Each family has one engineer identity; role is derived from `author` and opposite-family review.
 - **Make strict author identity mandatory for every `open` immediately.** Rejected for this first rollout:
   without `claude-engineer` config it bricks the shipping path needed to land the remaining setup/hardening
-  changes. The no-author `open` remains only as a loud legacy/bootstrap path.
+  changes. `open --legacy` remains only as an explicit bootstrap path.
+- **Scope commit authorship out.** Rejected: issue #20 asks for the trail to be attributable to the correct
+  engineer. PR actor alone is not enough if commits still carry the ambient user's name/email.
 - **Reuse `codex-engineer` as both Codex author and Claude reviewer.** Rejected: GitHub self-approval would fail,
   and it violates the cross-family review invariant.
 - **Create the `claude-engineer` GitHub App inside product code.** Rejected: GitHub App creation and private-key
@@ -82,18 +90,21 @@ SWE pipeline only:
 - `plugins/aar-engineering/.claude-plugin/plugin.json` version bump.
 
 No research-product behavior changes. No instance secrets are committed. Existing Claude-authored changes remain
-compatible through the legacy no-author `open` path and the `WF_REVIEWER_TOKEN_CMD` -> Codex-token alias, but
-the strict path blocks missing identity config instead of silently falling back to Anton.
+compatible through the explicit `open --legacy` path and the `WF_REVIEWER_TOKEN_CMD` -> Codex-token alias, but
+the strict path blocks missing author identity config instead of silently falling back to Anton. Unenforced
+outside installs keep the comment fallback unless they opt into `WF_REQUIRE_NATIVE_REVIEW=1`.
 
 ## Rollout + rollback
 
 Rollout:
 
 - Ship the product seam and docs through `ship-change`.
-- Configure this instance with `WF_ENGINEER_TOKEN_CMD_CLAUDE` and `WF_ENGINEER_TOKEN_CMD_CODEX` once the
+- Configure this instance with `WF_ENGINEER_TOKEN_CMD_CLAUDE`, `WF_ENGINEER_TOKEN_CMD_CODEX`,
+  `WF_ENGINEER_GIT_AUTHOR_CLAUDE`, `WF_ENGINEER_GIT_AUTHOR_CODEX`, and `WF_REQUIRE_NATIVE_REVIEW=1` once the
   `claude-engineer` app/key exists (or keep `WF_REVIEWER_TOKEN_CMD` as the temporary Codex-token alias).
-- Smoke-test both directions with a doc-only change: Claude author -> Codex reviewer, then Codex author ->
-  Claude reviewer.
+- At merge time, test the available boundary: strict Codex author opens with `codex-engineer`; enforced review
+  blocks clearly if `claude-engineer` is missing. The full happy-path Codex author -> Claude reviewer smoke is
+  deferred until that app/key is installed.
 
 Rollback:
 
@@ -101,4 +112,4 @@ Rollback:
 - Emergency: temporarily relax branch protection per `RUNBOOK.md` if a token/app misconfiguration traps merges.
 
 The likely first-run block is configuration, not code: no local `~/.config/claude-engineer` exists yet. The
-desired product behavior in that state is a clear block before PR mutation or native review, not fallback.
+desired product behavior in enforced mode is a clear block before native review, not a misleading fallback.
