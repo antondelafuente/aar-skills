@@ -36,8 +36,9 @@ where there is no local source tree to point at.
 This yields two tracks, divided by **where the consumer runs**:
 
 ### Track 1 — point on-box sessions at the live source *(do now)*
-The current fleet (all `claude-N` and Codex AARs on this box) reads source directly; "update everyone"
-collapses to `git pull` in `~/aar-skills` (+ a reload for already-running Claude sessions).
+After Track 1, the current fleet (all `claude-N` and Codex AARs on this box) reads source directly, so
+"update everyone" collapses to `git pull` in `~/aar-skills` (+ a reload for already-running Claude
+sessions). Today they are still on stale copies/cache — that is the state Track 1 changes.
 - **Claude:** launch with `--plugin-dir ~/aar-skills/plugins/<plugin>` for each of the four aar-skills
   plugins (`gpu-job`, `verify-claims`, `experiment-lifecycle`, `aar-engineering`) — reads source in-place,
   bypasses the cache; `/reload-plugins` then picks up SKILL.md edits live.
