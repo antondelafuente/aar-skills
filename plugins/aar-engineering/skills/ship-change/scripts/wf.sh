@@ -187,6 +187,10 @@ review_summary_text(){  # review_summary_text <heading> <high> <med> <low> <appr
   local heading=$1 high=$2 med=$3 low=$4 approving=${5:-0}
   if [ "$high" -gt 0 ]; then
     printf 'This review found %s serious issue(s). Fix them or clearly explain why they are not real before this PR moves forward.' "$high"
+  elif [ "$approving" = 1 ] && [ "$med" -gt 0 ]; then
+    printf 'Final review approved this PR. It found %s non-blocking issue(s), recorded below for the author and human reader.' "$med"
+  elif [ "$approving" = 1 ] && [ "$low" -gt 0 ]; then
+    printf 'Final review approved this PR. It found only minor notes, recorded below for the author and human reader.'
   elif [ "$med" -gt 0 ]; then
     printf 'This review found %s issue(s) that should be fixed or answered before merging.' "$med"
   elif [ "$low" -gt 0 ]; then
@@ -261,7 +265,7 @@ wt_pr(){
 # uses the first paragraphs of Problem + Approach; the full design record stays under details. Re-rendered
 # at finish so the merged record matches the landed doc.
 render_pr_body(){
-  local wt="$1" doc="$2" issue="$3" author=${4:-} body problem approach visible
+  local wt="$1" doc="$2" issue="$3" body problem approach visible
   body=$(awk 'f||/^## /{f=1}f' "$wt/$doc")
   [ -n "$body" ] || body=$(sed '1{/^# /d;}' "$wt/$doc")
   problem=$(first_paragraph "$(section_text "$wt/$doc" "Problem")")
