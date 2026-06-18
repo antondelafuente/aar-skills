@@ -16,10 +16,18 @@ peer and self-identified as `claude-1` — guessed purely from the naming exampl
 correction. Session names are **not guaranteed**: a session may be named for its experiment
 (`washout-curve`, `viz`, …), not `claude-N`.
 
-The instance-side `message-aar` skill has already been fixed locally. This proposal carries the same
-self-identify-by-lookup convention into the **product** so any future productized peer-coordination
-guidance inherits it. The product currently has no peer-messaging skill; its durable, substrate-neutral
-home for cross-session coordination conventions is `AGENTS.md`'s "Multi-agent dev" rule.
+The instance-side `message-aar` skill is the live consumer path. **Prerequisite, landed alongside this
+change (directly, since it's an instance file — not through this product PR):** its self-identify rule,
+its `MSG=` template, and its "Discover the sessions" block now resolve the sender's name by lookup
+(`ME=$(tmux display-message -p '#S')`) instead of leaving a `<name>` placeholder ringed by `claude-N`
+examples. (The original issue claimed this was "already fixed locally"; the cross-family design review
+caught that the live file was in fact still unfixed — so the instance fix is a prerequisite of this PR,
+not a past event.)
+
+This proposal carries the same self-identify-by-lookup convention into the **product** so any future
+productized peer-coordination guidance inherits it. The product currently has no peer-messaging skill; its
+durable, substrate-neutral home for cross-session coordination conventions is `AGENTS.md`'s "Multi-agent
+dev" rule.
 
 ## Approach
 
@@ -33,9 +41,12 @@ Load-bearing decisions:
 - **Home = `AGENTS.md`, not a new skill.** The product has no peer-messaging skill to attach this to;
   `AGENTS.md` is the agent-neutral constitution and already owns the multi-agent-dev coordination rule.
   One canonical home per fact.
-- **Substrate-neutral phrasing.** `tmux display-message -p '#S'` is the Claude/tmux mechanism, given as
-  the concrete example, but the rule states "or the substrate's equivalent" so it holds for Codex and any
-  other multi-session substrate.
+- **Substrate-neutral phrasing, as an explicit fallback contract.** `tmux display-message -p '#S'` is the
+  Claude/tmux mechanism, given as the concrete example. For non-tmux substrates (Codex, other Agent-Skills
+  harnesses) the rule is stated as an ordered fallback rather than a vague "or equivalent": use the
+  channel's own self-identity lookup if it has one → else the substrate's session-name primitive → else an
+  observable stable runtime handle, stated as such. The one thing never allowed is substituting an example
+  name.
 - **Convention, not enforcement.** This is a documented discipline (like the rest of the Rules section),
   not a mechanical gate — matching how the surrounding coordination rules are stated.
 
@@ -49,8 +60,12 @@ Load-bearing decisions:
 
 ## Blast radius
 
-`aar-skills/AGENTS.md` only — one bullet in the Rules section. Documentation; no code, no skill behavior,
-no plugin version bump. Product (SWE-pipeline constitution) layer. No instance or research-product impact.
+**This PR:** `aar-skills/AGENTS.md` only — one bullet in the Rules section. Documentation; no code, no
+plugin version bump. Product (SWE-pipeline constitution) layer.
+
+**Prerequisite, outside this PR (instance):** `~/.claude/skills/message-aar/SKILL.md` — the live consumer
+path, fixed directly (instance files don't route through ship-change). Behavior change is doc-only (the
+skill is instructions): the sender now looks up its own name. No research-product impact.
 
 ## Rollout + rollback
 
