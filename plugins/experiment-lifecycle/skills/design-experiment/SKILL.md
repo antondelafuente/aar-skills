@@ -147,7 +147,9 @@ point. *How* you spawn it is the instance's implementation of the contract:
 - **Claude Code:** a fresh zero-context session in its own dedicated working dir (a launcher script + the session-manager skill).
   A tool-spawned Agent subagent is fine for short controller-supervised probes, but not as the autonomous detached
   executor: it cannot arm the independent recurring wake this contract requires.
-- **Codex:** a fresh thread / watcher-driven local execution.
+- **Codex:** a fresh thread / watcher-driven local execution. A blocking watcher is the controller-supervised
+  implementation: it keeps the executor turn alive and, with an idle-teardown backstop for billable compute, satisfies
+  this dispatch contract without claiming autonomous-detached status.
 - **Other substrates:** a CI job, a remote worker, or a hosted queue that reads the brief.
 
 Why fresh-context dispatch is the default:
