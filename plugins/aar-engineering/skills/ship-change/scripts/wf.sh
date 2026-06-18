@@ -165,7 +165,7 @@ git_author_email(){ sed -nE 's/.*<([^>]+)>.*/\1/p' <<<"$1"; }
 section_text(){  # section_text <markdown-file> <section-name-without-##>
   local file=$1 name=$2
   awk -v name="$name" '
-    $0 == "## " name { found=1; next }
+    $0 ~ "^## " name "[[:space:]]*$" { found=1; next }
     found && /^## / { exit }
     found { print }
   ' "$file" || true
@@ -184,8 +184,23 @@ markdown_details(){  # markdown_details <summary> <body>
 }
 
 markdown_code_details(){  # markdown_code_details <summary> <body>
-  local summary=$1 body=${2:-}
-  printf '<details>\n<summary>%s</summary>\n\n````text\n%s\n````\n\n</details>\n' "$summary" "$body"
+  local summary=$1 body=${2:-} fence_len fence
+  fence_len=$(awk '
+    {
+      line=$0
+      while (match(line, /`+/)) {
+        if (RLENGTH > max) max=RLENGTH
+        line=substr(line, RSTART + RLENGTH)
+      }
+    }
+    END {
+      if (max < 3) max=3
+      print max + 1
+    }
+  ' <<<"$body")
+  printf -v fence '%*s' "$fence_len" ''
+  fence=${fence// /\`}
+  printf '<details>\n<summary>%s</summary>\n\n%stext\n%s\n%s\n\n</details>\n' "$summary" "$fence" "$body" "$fence"
 }
 
 review_summary_text(){  # review_summary_text <high> <med> <low> <approving:0|1>
