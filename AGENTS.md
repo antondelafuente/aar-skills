@@ -57,4 +57,11 @@ layer that builds them).
 - **Test through the user path**, not by inspection: fresh session → plugin install →
   invoke → file friction. Friction reports are the product's most valuable input.
 - Multi-agent dev: path-scoped commits; coordinate via the instance's channels before
-  editing a module a peer has in flight.
+  editing a module a peer has in flight. When a peer-coordination channel asks you to
+  self-identify, resolve your OWN identity by lookup, never by an assumed naming scheme
+  like `claude-N`: use the channel's own self-identity lookup if it provides one, else the
+  substrate's session-name primitive (`tmux display-message -p '#S'` for tmux); if the
+  substrate exposes no session-name lookup, identify with an observable stable runtime
+  handle and say so — never substitute an example name. Session names aren't guaranteed (a
+  session may be named for its experiment), and a guessed name silently defeats the point
+  of self-identifying.
