@@ -147,7 +147,13 @@ engineer_token(){  # engineer_token <family> <required:0|1>
   local fam=$1 required=${2:-0} cmd t suffix
   suffix=$(family_suffix "$fam"); cmd=$(engineer_token_cmd "$fam")
   if [ -z "$cmd" ]; then
-    [ "$required" = 1 ] && die "missing WF_ENGINEER_TOKEN_CMD_$suffix (or legacy WF_REVIEWER_TOKEN_CMD for CODEX)"
+    if [ "$required" = 1 ]; then
+      if [ "$fam" = codex ]; then
+        die "missing WF_ENGINEER_TOKEN_CMD_CODEX (or legacy WF_REVIEWER_TOKEN_CMD)"
+      else
+        die "missing WF_ENGINEER_TOKEN_CMD_$suffix"
+      fi
+    fi
     echo ""; return 0
   fi
   t=$(eval "$cmd") || die "WF_ENGINEER_TOKEN_CMD_$suffix failed — can't get the $fam engineer token (failing closed)"
