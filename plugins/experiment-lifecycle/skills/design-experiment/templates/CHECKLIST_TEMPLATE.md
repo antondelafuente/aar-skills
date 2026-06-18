@@ -26,7 +26,11 @@
 
 ## UNIVERSAL  (every GPU experiment)
 - ☐ [BLOCK] Read DESIGN.md + START.md; design is locked (no redesign).                          ev:
-- ☐ [BLOCK] Self-wake / idle-cost backstop armed PER SUBSTRATE before any detached run
+- ☐ [BLOCK] Self-wake / idle-cost backstop armed PER SUBSTRATE before any detached run or billable background work.
+      Autonomous detached runs MUST name the independent waker id/handle; billable background compute MUST name the
+      idle-cost teardown backstop; controller-supervised detached probes MUST name the supervising watcher/driver.
+      Parking with only an in-process monitor is FAIL for autonomous detached runs; a blocking watcher that keeps the
+      executor turn alive is controller-supervised, not autonomous detached.
       (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + box-side idle-teardown watchdog).  ev:
 - ☐ Read experiment_gotchas.md tail (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample

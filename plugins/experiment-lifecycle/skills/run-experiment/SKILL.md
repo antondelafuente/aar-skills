@@ -64,21 +64,31 @@ section as you go. Commit `CHECKLIST.md` at close — the cross-family close aud
 training environment (venvs, the model repo). **Provisioning** (next, per your execution profile) is what installs them;
 skip it and every command fails.
 
-## Arm your self-wake FIRST — before any detached work (do not skip)
+## Arm your self-wake / idle-cost backstop FIRST — before any detached run or billable background work (do not skip)
 
 A detached run means **you end your turn and wait to be re-invoked.** The silent-failure class that bites an autonomous
-executor is **never-re-invoked** — you sit parked, nothing errored, the compute bills, the research stalls. So **the
-moment you start execution — before launching any compute or detached driver — arm an independent, recurring self-wake**
-as your standing waker (any single in-process waker can die and leave you parked; the independent waker is the mandatory
-backstop). It must, each tick: check each job's **done-marker**, a **liveness** signal (compute busy = alive; idle AND
-not-done = hung), AND a **positive-progress** signal (a stage advancing / bytes growing — liveness alone can't tell
-working from a wedged hot-loop), plus the driver log for BLOCKED/errors; and it must honor a **look-again deadline** —
-a deadline quietly gone past with compute still billing is the signal you parked, so STOP re-waiting, diagnose, and
-notify the human.
+executor is **never-re-invoked** — you sit parked, nothing errored, the compute bills, the research stalls. So **for
+autonomous detached execution, the moment you start execution — before launching any compute or detached driver — arm an
+independent, recurring self-wake** as your standing waker (any single in-process waker can die and leave you parked; the
+independent waker is the mandatory backstop). If any background work leaves billable compute running, arm the idle-cost
+teardown backstop before you detach. The autonomous self-wake must, each tick: check each job's **done-marker**, a
+**liveness** signal (compute busy = alive; idle AND not-done = hung), AND a **positive-progress** signal (a stage
+advancing / bytes growing — liveness alone can't tell working from a wedged hot-loop), plus the driver log for
+BLOCKED/errors; and it must honor a **look-again deadline** — a deadline quietly gone past with compute still billing is
+the signal you parked, so STOP re-waiting, diagnose, and notify the human.
+
+For an **autonomous detached run**, this is a capability requirement, not a best-effort preference. If your substrate
+cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and then park. Mark the
+`CHECKLIST.md` self-wake gate **FAIL**, notify/escalate before GPU/API spend, and either relaunch in a substrate that
+can own its wake or keep the work explicitly controller-supervised. A blocking watcher that keeps the executor turn
+alive is controller-supervised, not autonomous detached; if it leaves billable compute running in the background, still
+arm the idle-cost teardown backstop.
 
 > **Claude Code implementation:** a non-durable recurring `CronCreate` (~every 12 min) whose prompt re-checks the pods
 > and honors a `LOOK_AGAIN.md` marker (`last_looked` / `look_again_by`, generous). Session-scoped (wakes only its
-> creating session; auto-expires ~7 days — re-arm for longer runs). Other substrates: the equivalent recurring wake.
+> creating session; auto-expires ~7 days — re-arm for longer runs). A tool-spawned Agent subagent cannot use this
+> independent wake path, so it is not a valid autonomous detached executor. Other substrates: the equivalent recurring
+> wake.
 
 ## Topology: detached driver (default) vs on-compute agent (rare)
 
@@ -205,7 +215,7 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - The controller has no GPU — work runs on the compute; you drive it.
 - Never reimplement deploys — call the `gpu-job` backend.
 - Acquired compute needs profile provisioning, not just the identity bootstrap.
-- **Arm the self-wake before any detached run; run to completion; never park silently.**
+- **Arm the self-wake / idle-cost backstop before any detached run or billable background work; run to completion; never park silently.**
 - **Kill-on-completion is the default.** Tear down once the upload is *verified* (every unique artifact). Keep one unit
   running only for a concrete queued follow-up (expiry-stamped). Log run + teardown.
 - Teardown is **unit-id-scoped** and uses the **deploying account's key** — never blanket-delete idle compute.

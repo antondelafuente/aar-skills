@@ -140,8 +140,16 @@ The contract is substrate-neutral:
 
 The executor MUST start with **fresh context** (no memory of this design conversation) — that property is the whole
 point. *How* you spawn it is the instance's implementation of the contract:
+- **Autonomous detached run requirement:** the executor substrate must be able to arm its **own independent recurring
+  self-wake** and record the waker/backstop id in `CHECKLIST.md`. A controller-held wake, or a monitor used after the
+  executor parks, does not satisfy the autonomous detached-run contract. A blocking watcher that keeps the executor turn
+  alive is controller-supervised, not autonomous detached; pair it with the idle-cost teardown backstop if compute bills.
 - **Claude Code:** a fresh zero-context session in its own dedicated working dir (a launcher script + the session-manager skill).
-- **Codex:** a fresh thread / watcher-driven local execution.
+  A tool-spawned Agent subagent is fine for short controller-supervised probes, but not as the autonomous detached
+  executor: it cannot arm the independent recurring wake this contract requires.
+- **Codex:** a fresh thread / watcher-driven local execution. A blocking watcher is the controller-supervised
+  implementation: it keeps the executor turn alive and, with an idle-teardown backstop for billable compute, satisfies
+  this dispatch contract without claiming autonomous-detached status.
 - **Other substrates:** a CI job, a remote worker, or a hosted queue that reads the brief.
 
 Why fresh-context dispatch is the default:
