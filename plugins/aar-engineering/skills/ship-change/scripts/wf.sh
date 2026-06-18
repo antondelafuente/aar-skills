@@ -234,12 +234,15 @@ count_high(){ sum_line "$1" | sed -E 's/.*high=([0-9]+).*/\1/'; }
 count_all(){ local s; s=$(sum_line "$1"); echo $(( $(sed -E 's/.*high=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*med=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*low=([0-9]+).*/\1/'<<<"$s") )); }
 
 # resolve a fresh token for the REVIEWER identity (opposite family from the author), used to post a NATIVE
-# cross-family review. Missing token config falls back to ambient comments unless WF_REQUIRE_NATIVE_REVIEW=1;
-# configured-but-failing commands always fail closed.
-reviewer_token(){  # reviewer_token <author>
-  local author=$1 reviewer required=0
+# cross-family review. Missing token config falls back to ambient comments unless a caller explicitly requires
+# a native reviewer token (finish's merge gate does this when WF_REQUIRE_NATIVE_REVIEW=1); configured-but-failing
+# commands always fail closed.
+reviewer_token(){  # reviewer_token <author> [required:0|1]
+  local author=$1 reviewer required=${2:-}
   reviewer=$(opposite_family "$author")
-  [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && required=1
+  if [ -z "$required" ]; then
+    [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && required=1 || required=0
+  fi
   engineer_token "$reviewer" "$required"
 }
 
@@ -265,8 +268,11 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   body=$(printf '## %s\n\n_Cross-family `%s` review — author `%s`, reviewer = opposite family._\n\n```\n%s\n```\n' "$heading" "$mode" "$author" "$(cat "$rev")")
   # The reviewer identity attributes its output to the opposite-family engineer — a NATIVE review for --code
   # when configured, a COMMENT for --scaffold. Unconfigured installs fall back to ambient comments unless
-  # WF_REQUIRE_NATIVE_REVIEW=1.
-  local rtok=""; rtok=$(reviewer_token "$author")
+  # WF_REQUIRE_NATIVE_REVIEW=1. Advisory scaffold/classification comments still fall back when no reviewer
+  # identity is configured.
+  local rtok="" require_reviewer=0
+  [ "$mode" = --code ] && [ "$approving" = 1 ] && [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && require_reviewer=1
+  rtok=$(reviewer_token "$author" "$require_reviewer")
   if [ "$mode" = --code ] && [ -n "$rtok" ]; then
     local event sha; sha=$(git -C "$wt" rev-parse HEAD)
     if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then event=APPROVE              # finish gate, clean -> APPROVE
@@ -372,7 +378,7 @@ open)   # wf.sh open <worktree> [author]   — commit the design doc, push, open
     need_ambient_gh
   fi
   # Commit ONLY the doc: the `-- "$DOC"` pathspec on commit means a pre-staged unrelated file can't ride in.
-  if [ -n "$AUTHOR_TOKEN" ] && [ -n "$GIT_AUTHOR" ]; then
+  if [ -n "$GIT_AUTHOR" ]; then
     GIT_NAME=$(git_author_name "$GIT_AUTHOR"); GIT_EMAIL=$(git_author_email "$GIT_AUTHOR")
     ( cd "$WT" && git add -- "$DOC" && \
       GIT_AUTHOR_NAME="$GIT_NAME" GIT_AUTHOR_EMAIL="$GIT_EMAIL" \
@@ -440,7 +446,7 @@ classify)       # wf.sh classify <worktree> [author]   — advisory record (neve
   # or reviewer identity, keep the existing ambient-comment fallback.
   RTOK=""
   if [ -n "$AUTHOR" ]; then
-    RTOK=$(reviewer_token "$AUTHOR")
+    RTOK=$(reviewer_token "$AUTHOR" 0)
   else
     note "WARN: no author passed to classify; posting classification with ambient GitHub auth"
   fi

@@ -46,7 +46,7 @@ declared author family.
    engineer token. Preserve the existing product fallback for unenforced installs: if no reviewer token command is
    configured, review output can still post as an ambient comment and merge only if the repo permits it. If a
    reviewer token command is configured but fails/returns empty, block. Add `WF_REQUIRE_NATIVE_REVIEW=1` for this
-   repo's enforced mode: with it set, missing reviewer identity blocks before posting fallback comments.
+   repo's enforced mode: with it set, the final merge-gate review blocks if the reviewer identity is missing.
 6. **Codex author support.** Remove the hard block in `check_author`. Codex-authored work still needs a
    different-family verifier command (`AUDIT_VERIFIER_CMD`, usually `claude -p ...`) because `audit_experiment.sh`
    enforces model-family independence. The GitHub identity path is independent of that model-reviewer command.
@@ -63,8 +63,8 @@ declared author family.
 The first implementation can be product-complete while instance-config incomplete: on this box today only
 `codex-engineer` is configured. That means a Codex-authored run can open as Codex once
 `WF_ENGINEER_GIT_AUTHOR_CODEX` is configured. With `WF_REQUIRE_ENGINEER_IDENTITY=1` /
-`WF_REQUIRE_NATIVE_REVIEW=1`, missing identity config blocks clearly; without those flags, existing users keep
-the ambient-auth/comment fallback with warnings.
+`WF_REQUIRE_NATIVE_REVIEW=1`, missing identity config blocks clearly at authoring/final-review boundaries;
+without those flags, existing users keep the ambient-auth/comment fallback with warnings.
 
 ## Alternatives considered
 
@@ -97,7 +97,7 @@ SWE pipeline only:
 No research-product behavior changes. No instance secrets are committed. Existing Claude-authored changes remain
 compatible through the ambient fallback and the `WF_REVIEWER_TOKEN_CMD` -> Codex-token alias, while require flags
 let enforced repos block missing identity config instead of silently falling back to Anton. Unenforced outside
-installs keep the comment fallback unless they opt into `WF_REQUIRE_NATIVE_REVIEW=1`.
+installs keep the comment fallback unless they opt into `WF_REQUIRE_NATIVE_REVIEW=1` for the final merge gate.
 
 ## Rollout + rollback
 

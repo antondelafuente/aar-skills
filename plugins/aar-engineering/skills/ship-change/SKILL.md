@@ -46,7 +46,8 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
   ambient GitHub/git identity unless `WF_REQUIRE_ENGINEER_IDENTITY=1`. `WF_REVIEWER_TOKEN_CMD` remains a
   backward-compatible alias for the Codex engineer token when `WF_ENGINEER_TOKEN_CMD_CODEX` is unset.
 - **Native review is configurable.** Missing reviewer identity falls back to comments for unenforced installs.
-  Set `WF_REQUIRE_NATIVE_REVIEW=1` to block instead when the opposite-family reviewer identity is absent.
+  Set `WF_REQUIRE_NATIVE_REVIEW=1` to make the final merge-gate review block when the opposite-family reviewer
+  identity is absent.
 - **Fail-closed.** A crashed or malformed review NEVER reads as "clean" — the verdict is parsed from the
   authoritative `SUMMARY: high=.. med=.. low=..` line; missing/garbled → BLOCK. The merge gate **re-runs
   `--code` on the final diff** so the merged diff is the reviewed diff, and merges **only with zero HIGH**.
