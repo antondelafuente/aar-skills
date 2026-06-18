@@ -183,8 +183,13 @@ markdown_details(){  # markdown_details <summary> <body>
   printf '<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n' "$summary" "$body"
 }
 
-review_summary_text(){  # review_summary_text <heading> <high> <med> <low> <approving:0|1>
-  local heading=$1 high=$2 med=$3 low=$4 approving=${5:-0}
+markdown_code_details(){  # markdown_code_details <summary> <body>
+  local summary=$1 body=${2:-}
+  printf '<details>\n<summary>%s</summary>\n\n````text\n%s\n````\n\n</details>\n' "$summary" "$body"
+}
+
+review_summary_text(){  # review_summary_text <high> <med> <low> <approving:0|1>
+  local high=$1 med=$2 low=$3 approving=${4:-0}
   if [ "$high" -gt 0 ]; then
     printf 'This review found %s serious issue(s). Fix them or clearly explain why they are not real before this PR moves forward.' "$high"
   elif [ "$approving" = 1 ] && [ "$med" -gt 0 ]; then
@@ -260,7 +265,7 @@ wt_pr(){
   fi
 }  # PR# for a worktree's branch
 
-# render_pr_body <worktree> <doc-relpath> <issue> [author] — the PR body as a generated VIEW of the committed
+# render_pr_body <worktree> <doc-relpath> <issue> — the PR body as a generated VIEW of the committed
 # design doc (#24): a self-describing, plain-language PR with zero duplicate authoring. The visible body
 # uses the first paragraphs of Problem + Approach; the full design record stays under details. Re-rendered
 # at finish so the merged record matches the landed doc.
@@ -324,7 +329,7 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   note "$mode verdict: $REVIEW_ALL finding(s), $REVIEW_HIGH HIGH -> $rev"
   [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
   local repo body review_text; repo=$(gh_repo "$wt"); review_text=$(cat "$rev")
-  body=$( { printf '## %s\n\n%s\n\n' "$heading" "$(review_summary_text "$heading" "$REVIEW_HIGH" "$review_med" "$review_low" "$approving")"; markdown_details "Full review details" "$review_text"; } )
+  body=$( { printf '## %s\n\n%s\n\n' "$heading" "$(review_summary_text "$REVIEW_HIGH" "$review_med" "$review_low" "$approving")"; markdown_code_details "Full review details" "$review_text"; } )
   # The reviewer identity attributes its output to the opposite-family engineer — a NATIVE review for --code
   # when configured, a COMMENT for --scaffold. Unconfigured installs fall back to ambient comments unless
   # WF_REQUIRE_NATIVE_REVIEW=1. Advisory scaffold/classification comments still fall back when no reviewer
@@ -450,7 +455,7 @@ Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- 
   # PR body = the design doc RENDERED (#24) — self-describing, plain-language, zero duplicate authoring.
   # render_pr_body re-runs at finish so the merged record matches the landed doc. --body-file - (stdin)
   # so the doc's backticks/code fences/$/# survive untouched.
-  PRURL=$(render_pr_body "$WT" "$DOC" "$ISSUE" "$AUTHOR" | gh_author "$AUTHOR_TOKEN" -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
+  PRURL=$(render_pr_body "$WT" "$DOC" "$ISSUE" | gh_author "$AUTHOR_TOKEN" -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
     --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
     --body-file -) \
     || die "gh pr create failed"
@@ -527,7 +532,7 @@ classify)       # wf.sh classify <worktree> [author]   — advisory record (neve
   PR=$(wt_pr_required "$WT" "$RTOK")
   BODY=$( { echo "## Type of change"; echo;
       classification_summary_text "$CLASS"; echo; echo;
-      markdown_details "Classifier details" "$OUT"; } )
+      markdown_code_details "Classifier details" "$OUT"; } )
   if [ -n "$RTOK" ]; then
     echo "$BODY" | GH_TOKEN="$RTOK" gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
       || die "could not post the classification to PR #$PR as the reviewer identity — failing closed (classification was: $CLASS)"
@@ -584,7 +589,7 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
     BODYTMP=$(mktemp 2>/dev/null) || BODYTMP="${TMPDIR:-/tmp}/wf_prbody_${BR//\//_}.md"
     # Render AND patch inside one if-condition so set -e can't abort finish on a render/write/API failure
     # — the refresh is best-effort and must never block an otherwise-clean merge (#43/F1).
-    if render_pr_body "$WT" "$FDOC" "$FISSUE" "$AUTHOR" > "$BODYTMP" 2>/dev/null \
+    if render_pr_body "$WT" "$FDOC" "$FISSUE" > "$BODYTMP" 2>/dev/null \
        && gh_author "$ATOK" api --method PATCH "repos/$REPO/pulls/$PR" -F body=@"$BODYTMP" >/dev/null 2>&1; then
       note "refreshed PR #$PR body from the final design doc"
     else
