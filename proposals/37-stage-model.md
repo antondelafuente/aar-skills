@@ -24,18 +24,21 @@ from HF per run.
 Two pieces, mirroring the module's existing box-side-script / pod-side-helper split:
 
 **1. `scripts/stage_model.sh <hf-repo>[@rev] <remote-path>` (box-side, run once).** Downloads the model
-from HF (`huggingface-cli download`, ambient `HF_TOKEN` for gated repos) into a temp dir that materializes
-real file bytes, then `rclone copy -L` it to `<remote-path>` (the `-L` is the symlink-loss fix). After the
-data lands, write a completeness manifest **last** — `_STAGED.json` recording `{repo, rev, object_count,
-total_bytes, staged_at}` — so its presence means the upload finished, and it carries the numbers the pull
-side verifies against.
+from HF (`hf download` on modern `huggingface_hub`, falling back to the deprecated `huggingface-cli`;
+ambient `HF_TOKEN` for gated repos) into a temp dir that materializes real file bytes, then `rclone copy -L`
+it to `<remote-path>` (the `-L` is the symlink-loss fix). It **refuses a non-empty remote prefix** unless
+`STAGE_FORCE=1` (which purges first) — a clean-prefix contract so a typo'd/reused path can't blend two
+models and so the aggregate count+bytes check is sound (F2). After the data lands, it writes a completeness
+manifest **last** — `_STAGED.json` recording `{repo, rev, object_count, total_bytes, staged_at}` — so its
+presence means the upload finished, and it carries the numbers the pull side verifies against.
 
-**2. `pull_model <remote-model-path> <local-dir>` (pod-side helper in `job_lib.sh`).** Waits for
-`_STAGED.json` to list (the `wait_r2` idiom), reads the expected `object_count` + `total_bytes`, `rclone
-copy`s the model down, then **verifies the local object count and byte total match the manifest** — dying
-on mismatch rather than feeding the loader a short read. This is what closes the missing-shard race: a pod
-that starts before staging finished, or that gets a partial pull, fails a loud gate instead of a confusing
-mid-load crash.
+**2. `pull_model <remote-model-path> <local-dir> [deadline-min=30]` (pod-side helper in `job_lib.sh`).**
+Waits for `_STAGED.json` to list (the `wait_r2` idiom) **but only up to `deadline-min`**, so a typo'd or
+missing remote path dies loud instead of billing a pod that waits forever (F1). Then reads the expected
+`object_count` + `total_bytes`, `rclone copy`s the model down, and **verifies the local object count and
+byte total match the manifest** — dying on mismatch rather than feeding the loader a short read. This is
+what closes the missing-shard race: a pod that starts before staging finished, or that gets a partial pull,
+fails a loud gate instead of a confusing mid-load crash.
 
 Load-bearing decisions:
 - **Verify bytes + count, not a bare sentinel.** `job_lib.sh`'s own R2-gate comments already encode the
@@ -71,7 +74,11 @@ that doesn't call the new helper is affected. Product (shipped research plugin) 
 ## Rollout + rollback
 
 Lands on main via this PR. Opt-in: a job uses it by calling `stage_model.sh` once and `pull_model` in its
-job script; existing jobs are untouched. **Validation note:** the staging + pull logic is authored and
-cross-family code-reviewed here, but **end-to-end pod validation (real HF download → store → pod pull) is
-pending its first real use** — flagged on the issue so the first consumer confirms it before relying on it.
-Rollback = revert the additive commit; no migration, no consumer depends on it until they opt in.
+job script; existing jobs are untouched. **Validation (F3):** the stage→pull→verify path is **box-validated
+end-to-end against the real R2 store** — a 7/7 smoke with a tiny public HF repo confirmed: stage writes the
+manifest last; a complete pull verifies; a non-empty prefix is refused and `STAGE_FORCE=1` purges+restages;
+a **tampered/incomplete pull fails loud** (the core missing-shard guard); and a missing path times out on
+the deadline instead of hanging. The smoke also caught `huggingface-cli`'s deprecation pre-merge (now `hf`
+with fallback). What remains untested is only the trivial in-a-pod-job integration (`source job_lib.sh` +
+`pull_model`), not the logic. Rollback = revert the additive commit; no migration, no consumer depends on it
+until they opt in.

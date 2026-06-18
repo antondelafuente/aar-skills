@@ -38,6 +38,19 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
 6. **Tear down:** `scripts/teardown.sh <pod-id>`. Default the moment artifacts verify.
    Never use provider "stop" expecting keep-warm — container disk wipes on restart.
 
+## Staging a base model (optional)
+
+Pods re-pulling the same base model from HF every run is the root of a paid gotcha cluster
+(~25-min first-touch network-FS stalls; missing-shard races; rclone symlink loss). Stage it
+in the store **once** and pull from there:
+
+- **Box-side, once:** `scripts/stage_model.sh <hf-repo>[@rev] <remote-path>` downloads from
+  HF, `rclone copy -L`s it to the store, and writes a `_STAGED.json` completeness manifest
+  **last** (object count + bytes). (`HF_TOKEN` for gated repos.)
+- **Pod-side, in the job:** `source job_lib.sh; pull_model <remote-path> <local-dir>` waits
+  for the manifest, pulls, and **verifies count + bytes against it** — a pod that starts
+  before staging finished, or gets a partial pull, dies on a loud gate, never a short read.
+
 ## Rules that are not optional
 
 - **The completion boundary is the whole ballgame:** before verified persistence, DELETE

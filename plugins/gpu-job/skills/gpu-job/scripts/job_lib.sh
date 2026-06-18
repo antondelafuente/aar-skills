@@ -76,6 +76,39 @@ r2_done(){ # r2_done <r2-path-to-final-artifact> <min-bytes> — true iff it exi
   [ -n "$sz" ] && [ "$sz" -ge "$2" ]
 }
 
+# --- model staging --------------------------------------------------------------------
+# Pulls a model staged ONCE by box-side stage_model.sh, so a pod never re-pulls from HF
+# (retires the 25+min / fully-stalled 32B HF base pulls, ~$5 H200 burned on a stuck shard).
+# stage_model.sh writes the _STAGED.json manifest LAST, so waiting for it + verifying its
+# object_count/total_bytes closes the exact incident where a de-risk pod size-thresholded
+# "ready", pulled mid-upload, and missed model-00017-of-00017.safetensors: a pod that starts
+# before staging finished, or gets a partial pull, dies on a loud gate, not a short read.
+
+pull_model(){ # pull_model <remote-model-path> <local-dir> [deadline-min=30] — pull a staged
+              # model + VERIFY it against its _STAGED.json manifest. Blocks until the manifest
+              # lists (safe to call before staging finishes), but only up to deadline-min so a
+              # typo'd/missing remote path dies loud instead of billing a pod that waits forever.
+  local remote=${1%/} dest=$2 deadline=${3:-30} man exp_n exp_b got_n got_b i=0 max
+  max=$(( deadline * 2 ))    # 30s steps
+  mkdir -p "$dest"
+  while ! rclone lsf "$remote/" 2>/dev/null | grep -qx '_STAGED.json'; do
+    i=$((i+1))
+    [ "$i" -gt "$max" ] && { echo "pull_model: no _STAGED.json at $remote/ after ${deadline}min — wrong path, or staging never finished?" >&2; return 1; }
+    say "pull_model: waiting for staging to finish ($remote/_STAGED.json) [${i}/${max}]"; sleep 30
+  done
+  man=$(rclone cat "$remote/_STAGED.json" 2>/dev/null)
+  exp_n=$(printf '%s' "$man" | grep -o '"object_count":[0-9]*' | grep -o '[0-9]*$')
+  exp_b=$(printf '%s' "$man" | grep -o '"total_bytes":[0-9]*' | grep -o '[0-9]*$')
+  [ -n "$exp_n" ] && [ -n "$exp_b" ] || { echo "pull_model: bad/missing manifest at $remote/_STAGED.json" >&2; return 1; }
+  say "pull_model: pulling $remote -> $dest (expect $exp_n files, $exp_b bytes)"
+  rclone copy "$remote/" "$dest/" --transfers=8 --checkers=8
+  got_n=$(find "$dest" -type f ! -name '_STAGED.json' | wc -l | tr -d ' ')
+  got_b=$(find "$dest" -type f ! -name '_STAGED.json' -printf '%s\n' | awk '{s+=$1} END{print s+0}')
+  [ "$got_n" = "$exp_n" ] && [ "$got_b" = "$exp_b" ] || {
+    echo "pull_model: INCOMPLETE — got $got_n files/$got_b bytes, manifest says $exp_n/$exp_b" >&2; return 1; }
+  say "pull_model: verified $got_n files, $got_b bytes"
+}
+
 # --- input gates ----------------------------------------------------------------------
 # Gotcha: process-substitution Python failure sailed past `set -uo pipefail` into torchrun
 # with a missing input file (8xH200 2026-06-08) — gate every generated input explicitly.
