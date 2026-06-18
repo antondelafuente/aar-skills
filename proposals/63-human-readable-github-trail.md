@@ -45,6 +45,10 @@ needed for comments around the existing sections, not to introduce a new require
 It changes GitHub presentation only; it does not change the review gate, merge rule, branch protection behavior, token
 identity logic, or classifier decision.
 
+It drops the unused `WF_ENGINEER_LABEL_CLAUDE` / `WF_ENGINEER_LABEL_CODEX` text-label seam from the current runbook and
+driver because PR bodies no longer spell out the author/reviewer lifecycle line. Proposal #20 still mentions those names
+as historical design context, not current configuration.
+
 ## Rollout + rollback
 
 Roll out through this PR. The visible proof is this PR's own body and comments: they should be easier to skim.

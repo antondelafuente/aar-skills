@@ -201,7 +201,8 @@ markdown_code_details(){  # markdown_code_details <summary> <body>
       if (max < 3) max=3
       print max + 1
     }
-  ' <<<"$body")
+  ' <<<"$body" || true)
+  : "${fence_len:=4}"
   printf -v fence '%*s' "$fence_len" ''
   fence=${fence// /\`}
   printf '<details>\n<summary>%s</summary>\n\n%stext\n%s\n%s\n\n</details>\n' "$summary" "$fence" "$body" "$fence"
