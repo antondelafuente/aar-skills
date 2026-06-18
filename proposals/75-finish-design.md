@@ -29,14 +29,18 @@ A surgical two-part change to `wf.sh`, reusing everything else `finish` already 
 (APPROVE-capable) path is gated on `mode == --code`. Widen it to also fire for `--scaffold` **when
 `approving=1`** (the merge-gate flag). A regular `design-review` call passes `approving=0`, so it still posts
 a comment — unchanged. So `--scaffold` posts a native APPROVE/REQUEST_CHANGES/COMMENT only as the merge gate,
-mirroring `--code` exactly.
+mirroring `--code` exactly. The `WF_REQUIRE_NATIVE_REVIEW=1` requiredness check is re-keyed off `approving=1`
+(not `mode == --code`), so a missing opposite-family reviewer fails early for the design merge gate too, not
+just code (F2).
 
 **2. `finish <wt> <author> [--design]`.** In design mode the merge-gate review is `--scaffold` on the design
 doc instead of `--code` on the diff:
-- `run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Final design review (merge gate)" 1`
-- **Fail-closed guard:** design mode requires the diff to be **design-doc-only** (`proposals/*.md`). If it
-  touches anything else, error and point at plain `finish` — so `--design` can NEVER skip `--code` on real
-  code. This is the one safety-critical line.
+- `run_review --scaffold "$WT" "$AUTHOR" "$WT/$DESIGN_DOC" "$PR" "Final design review (merge gate)" 1`
+- **Fail-closed guard (two parts):** design mode requires the diff to be (1) **design-doc-only**
+  (`proposals/*.md`) — else `--design` could skip `--code` on real code — and (2) **exactly one** design doc,
+  captured as the gate target. Without the exactly-one rule the gate would review only `head -1` of several
+  docs while the rest merged un-design-reviewed (F1). More than one → error, "split into one design PR per
+  doc."
 - Everything else is reused unchanged: base-freshness check, push/sync, PR-body refresh, the deterministic
   `checks.sh` (which no-ops on a doc-only diff), the `--match-head-commit` squash-merge, worktree cleanup.
 
@@ -61,6 +65,14 @@ Load-bearing decisions:
   same as coding PRs — the human steers at authoring time, not merge.
 - **Let `--scaffold` always post a native review (even interim).** Rejected: would change `design-review`'s
   current comment behavior; gating on `approving=1` confines the change to the merge gate.
+- **Mechanically enforce that the `ready` issues exist before `finish --design` succeeds** (a required
+  "follow-up issues" section + a create/verify step). **Explicitly scoped OUT of this minimal change (F3).**
+  Spawning the `ready` issues is a documented *protocol* step (SKILL.md: "then file the spawned `ready`
+  issues"), not something this enabling tool should gate on. The forcing-function — making "design isn't done
+  until its `ready` issues exist" a hard contract — is precisely the kind of decision the **first two-phase
+  design (the disposition system, #74/#50) will specify**; building it speculatively here would pre-empt that
+  design. So this tool just enables the gated design merge; the decomposition contract comes from the design
+  that uses it.
 
 ## Blast radius
 
