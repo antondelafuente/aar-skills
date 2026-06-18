@@ -82,16 +82,23 @@ A session is never in both: it either references source or pulls a copy.
   stale installed copy. Acceptance test must verify the `ship-change → verify-claims` *composition* runs
   current code — not only that a single SKILL.md hot-reloads. (Closes the gap F1 surfaced; without it FU-1
   leaves a stale path.)
-- **FU-2 — Restore + keep Codex skill symlinks.** Replace the copied `~/.codex/skills/*` dirs with symlinks
-  into `~/aar-skills/...`; add an idempotent linker (or provision step) so they stay symlinks and new skills
-  get linked. Confirm whether Codex hot-reloads a symlinked SKILL.md mid-session or only at session start.
+- **FU-2 — Restore + keep Codex skill symlinks, with an explicit ownership boundary.** Replace the copied
+  aar-skills `~/.codex/skills/*` dirs with symlinks into `~/aar-skills/...`. The linker must operate on an
+  **aar-skills-owned manifest, discovered from `plugins/*/skills/*`** (so it includes `ship-change`, which
+  the current README symlink list omits) — and must **leave non-owned `~/.codex/skills` entries untouched**
+  (that dir also holds local/system skills and a `.system/` dir). Idempotent; re-runnable on new skills.
+  Confirm whether Codex hot-reloads a symlinked SKILL.md mid-session or only at session start.
 - **FU-3 — `update-fleet` command.** One shot: `git pull` in `~/aar-skills` → broadcast `/reload-plugins`
   to **all live AAR sessions, discovered — not assumed.** Per AGENTS.md (#39), session names are not
   guaranteed `claude-N`: there are persistent fleet workers, experiment-named sessions, and ephemeral
   `dispatch-claude.sh` executors (`<exp>-exec-<runid>`). Discover targets via tmux command / remote-control
   metadata (a session running `claude`), with explicit handling for **persistent**, **dispatch**, and
-  **in-flight** (mid-turn — queue, don't interrupt) sessions. Makes "propagate to everyone" one action that
-  actually reaches everyone.
+  **in-flight** (mid-turn — queue, don't interrupt) sessions. **Old-way sessions:** a session launched
+  *without* the aar-skills `--plugin-dir` (FU-1) still reads the cache, so a pull+`/reload-plugins` won't
+  refresh it — FU-3 must detect that (inspect the live process's launch flags), then either recycle it via
+  the manage-aar update-restart path or explicitly report it as excluded. "Fleet updated" is only true once
+  every live session is either on `--plugin-dir`+reloaded or knowingly excluded. Makes "propagate to
+  everyone" one action that actually reaches everyone.
 
 **Track 2 (later):**
 - **FU-4 — Plugin-version currency on merge, reconciled with the `finish` contract.** Off-box consumers
