@@ -104,6 +104,26 @@ wf.sh finish <WORKTREE> <author>
 worktree, commit, and re-run `finish`. Never merge around the driver — the re-review-on-the-final-diff is
 the point.
 
+## Two-phase design (`finish --design`)
+
+For work that's too big or fuzzy to implement directly, split it: a **design PR** lands the design doc on
+main first, then implementation happens as a separate set of `ready` issues spawned from it. The design PR is
+**doc-only** and its merge gate is the cross-family **`--scaffold`** review — the opposite-family engineer
+posts a native APPROVE, the same approval model as a code PR (you steer at authoring time, not at merge).
+
+```
+wf.sh start <N> <slug>            # same as always
+#   → write the design doc (the WHOLE deliverable — no implementation)
+wf.sh open <WORKTREE> claude
+wf.sh design-review <WORKTREE> claude     # iterate the doc to agreement
+wf.sh finish <WORKTREE> <author> --design # gate on --scaffold APPROVE (doc-only); merge
+#   → then FILE the spawned `ready` issues — the design's decomposition into implementable units.
+```
+
+`--design` **fails closed** if the diff contains anything but `proposals/*.md` (so it can never skip `--code`
+on real code — use plain `finish` for any PR with code). The spawned `ready` issues are then implemented as
+normal single-phase ship-change runs.
+
 ## Triage discipline (when a review has findings)
 
 Same as the research audits: triage as a **peer**, not a patcher. **ACCEPT** (real → fix in the worktree +

@@ -57,6 +57,7 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh comment <worktree> <author> [file] post an AUTHOR triage comment as the engineer identity (body: file|stdin)
   wf.sh classify      <worktree> [author] classifier on changed paths, post evidence (advisory record)
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
+  wf.sh finish <worktree> <author> --design   two-phase DESIGN merge: gate on --scaffold (doc-only PR), spawn ready issues after
   wf.sh help                              this message
 
 <author> = claude | codex (the OPPOSITE family reviews). If an engineer identity is configured for that author,
@@ -339,7 +340,11 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   local audit rev; audit=$(locate_audit "$wt")
   rev="${TMPDIR:-/tmp}/wf_${mode#--}_$(wt_branch "$wt" | tr '/' '_').md"
   local rtok="" require_reviewer=0
-  [ "$mode" = --code ] && [ "$approving" = 1 ] && [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && require_reviewer=1
+  # The merge gate (approving=1, set by finish for --code AND design-mode --scaffold) must have a real
+  # opposite-family reviewer when WF_REQUIRE_NATIVE_REVIEW=1 — fail early on a missing identity rather than
+  # silently falling back to an ambient comment that can't satisfy branch protection. Keyed on approving=1
+  # (only the merge gate passes it), so it covers both gate modes, not just --code.
+  [ "$approving" = 1 ] && [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && require_reviewer=1
   if [ -n "$pr" ]; then
     rtok=$(reviewer_token "$author" "$require_reviewer")
     [ -n "$rtok" ] || need_ambient_gh
@@ -355,11 +360,13 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
   local repo body review_text; repo=$(gh_repo "$wt"); review_text=$(cat "$rev")
   body=$( { printf '## %s\n\n%s\n\n' "$heading" "$(review_summary_text "$REVIEW_HIGH" "$review_med" "$review_low" "$approving")"; markdown_code_details "Full review details" "$review_text"; } )
-  # The reviewer identity attributes its output to the opposite-family engineer — a NATIVE review for --code
-  # when configured, a COMMENT for --scaffold. Unconfigured installs fall back to ambient comments unless
+  # The reviewer identity attributes its output to the opposite-family engineer — a NATIVE review for --code,
+  # AND for --scaffold WHEN it is the merge gate (approving=1, i.e. `finish --design`) so the design approval
+  # is a real native APPROVE branch protection accepts. An interim --scaffold (design-review, approving=0)
+  # stays a COMMENT via the elif below. Unconfigured installs fall back to ambient comments unless
   # WF_REQUIRE_NATIVE_REVIEW=1. Advisory scaffold/classification comments still fall back when no reviewer
   # identity is configured.
-  if [ "$mode" = --code ] && [ -n "$rtok" ]; then
+  if { [ "$mode" = --code ] || { [ "$mode" = --scaffold ] && [ "$approving" = 1 ]; }; } && [ -n "$rtok" ]; then
     local event sha; sha=$(git -C "$wt" rev-parse HEAD)
     if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then event=APPROVE              # finish gate, clean -> APPROVE
     elif [ "$REVIEW_HIGH" != 0 ]; then event=REQUEST_CHANGES                           # any blocking finding
@@ -570,8 +577,19 @@ classify)       # wf.sh classify <worktree> [author]   — advisory record (neve
   echo "$OUT"
   ;;
 
-finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gate + ready + merge + cleanup
-  need_gh; WT=${1:?usage: wf.sh finish <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
+finish) # wf.sh finish <worktree> <author> [--design]   — checks + fail-closed merge gate + ready + merge + cleanup
+  # Plain finish gates on --code (the diff). `--design` makes it the DESIGN half of two-phase: the merge gate
+  # is --scaffold on the design doc (opposite-family native APPROVE), the same approval model as a code PR —
+  # for a design-doc-only PR whose implementation lands later as spawned `ready` issues.
+  need_gh; WT=${1:?usage: wf.sh finish <worktree> <author> [--design]}; AUTHOR=${2:?author: claude|codex}
+  # Validate the optional 3rd arg explicitly — a typo (e.g. --desgin) must FAIL, not silently run plain finish
+  # (the wrong merge gate). Only "" or exactly --design are valid.
+  DESIGN_MODE=0
+  case "${3:-}" in
+    "") ;;
+    --design) DESIGN_MODE=1 ;;
+    *) die "finish: unknown 3rd argument '${3:-}' — only '--design' is valid (or omit it for a code PR)" ;;
+  esac
   check_author "$AUTHOR"; require_model_reviewer "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
   require_clean "$WT"   # everything must be committed: reviewed == checked == merged, and nothing lost on --force removal
   REPO=$(gh_repo "$WT"); MAIN_CO=$(main_checkout "$WT")
@@ -580,6 +598,26 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   BR=$(wt_branch "$WT"); PR=$(wt_pr_required "$WT" "$ATOK")
   mapfile -t PATHS < <(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD — nothing to merge"
+  # FAIL-CLOSED: --design skips --code, so it must NEVER run on a PR that contains code, and the --scaffold
+  # approval must cover the EXACT doc that lands. Require the diff to be (1) design-doc-only (proposals/*.md)
+  # and (2) EXACTLY ONE design doc — else the gate would review only one of several docs (head -1) while the
+  # rest merged un-design-reviewed. Capture that one doc as the gate target.
+  DESIGN_DOC=""
+  if [ "$DESIGN_MODE" = 1 ]; then
+    # Use a RENAME-STABLE path list (--no-renames): with rename detection, a code->proposals/*.md rename shows
+    # only the NEW doc path, so the old code path could masquerade as doc-only and skip --code. --no-renames
+    # decomposes a rename into delete(old)+add(new), so the old code path surfaces in NONDOC and is rejected.
+    mapfile -t RPATHS < <(cd "$WT" && git diff --no-renames --name-only "$(base_ref "$WT")"...HEAD)
+    NONDOC=$(printf '%s\n' "${RPATHS[@]}" | grep -vE '^proposals/.*\.md$' || true)
+    [ -z "$NONDOC" ] || die "finish --design is for design-doc-only PRs; this diff also touches non-doc paths:
+$NONDOC
+Use plain 'wf.sh finish $WT $AUTHOR' (gates on --code) for any PR with code."
+    mapfile -t DESIGN_DOCS < <(printf '%s\n' "${RPATHS[@]}" | grep -E '^proposals/.*\.md$')
+    [ "${#DESIGN_DOCS[@]}" = 1 ] || die "finish --design expects EXACTLY ONE design doc (the --scaffold approval covers one doc); this diff changes ${#DESIGN_DOCS[@]}:
+$(printf '%s\n' "${DESIGN_DOCS[@]}")
+Split into one design PR per doc."
+    DESIGN_DOC="${DESIGN_DOCS[0]}"
+  fi
   # 0a. BASE FRESHNESS: origin/main may have ADVANCED since `start` (a peer PR merged). The merge would land
   #     on that newer main, but checks/review run against this branch's base — so the integrated tree that
   #     actually lands was never checked. Block unless the branch is rebased onto current origin/main (the
@@ -626,10 +664,16 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
   note "running .aar-ci checks + smoke on branch content…"
   ( cd "$WT" && bash .aar-ci/checks.sh "${PATHS[@]}" ) || die "deterministic checks/behavior-smoke FAILED — fix before merging"
-  # 2. the authoritative merge gate: re-run --code on the FINAL diff, fail-closed, NO HIGH
-  DIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
-  ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
-  run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)" 1   # approving=1: clean -> native APPROVE
+  # 2. the authoritative merge gate, fail-closed, NO HIGH. approving=1 -> clean review posts a native APPROVE.
+  #    --design: gate on --scaffold over the design DOC (the doc IS the deliverable). else: --code over the diff.
+  if [ "$DESIGN_MODE" = 1 ]; then
+    # $DESIGN_DOC was validated above as the single design doc in the diff — review that exact artifact.
+    run_review --scaffold "$WT" "$AUTHOR" "$WT/$DESIGN_DOC" "$PR" "Final design review (merge gate)" 1
+  else
+    DIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
+    ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
+    run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)" 1
+  fi
   [ "$REVIEW_HIGH" = 0 ] || die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
   # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced). On enforced
   #    repos this succeeds only when the required opposite-family approval is present on this SHA.
@@ -641,7 +685,11 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   git -C "$MAIN_CO" pull --ff-only -q origin main 2>/dev/null || note "WARN: could not ff-only pull main ($MAIN_CO) — reconcile manually"
   local_manifest=0; for p in "${PATHS[@]}"; do case "$p" in */plugin.json|*marketplace.json) local_manifest=1;; esac; done
   [ "$local_manifest" = 1 ] && note "a plugin manifest changed — refresh installs: claude plugin marketplace update aar-skills && claude plugin update <name>@aar-skills"
-  echo "SHIPPED: PR #$PR merged (opposite-family review gate + checks). Worktree cleaned."
+  if [ "$DESIGN_MODE" = 1 ]; then
+    echo "SHIPPED: design PR #$PR merged (opposite-family --scaffold approval + checks). Worktree cleaned. Next: file the spawned 'ready' issues."
+  else
+    echo "SHIPPED: PR #$PR merged (opposite-family review gate + checks). Worktree cleaned."
+  fi
   ;;
 
 *) echo "BLOCKED: unknown subcommand '${CMD:-}'." >&2; echo >&2; usage >&2; exit 1 ;;
