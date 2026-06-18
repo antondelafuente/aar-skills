@@ -270,7 +270,7 @@ wt_pr(){
 # uses the first paragraphs of Problem + Approach; the full design record stays under details. Re-rendered
 # at finish so the merged record matches the landed doc.
 render_pr_body(){
-  local wt="$1" doc="$2" issue="$3" body problem approach visible
+  local wt="$1" doc="$2" issue="$3" body problem approach visible fallback_body
   body=$(awk 'f||/^## /{f=1}f' "$wt/$doc")
   [ -n "$body" ] || body=$(sed '1{/^# /d;}' "$wt/$doc")
   problem=$(first_paragraph "$(section_text "$wt/$doc" "Problem")")
@@ -278,7 +278,8 @@ render_pr_body(){
   visible="$problem"
   if [ -n "$problem" ] && [ -n "$approach" ]; then visible=$(printf '%s\n\n%s' "$problem" "$approach")
   elif [ -n "$approach" ]; then visible="$approach"; fi
-  [ -n "$visible" ] || visible=$(first_paragraph "$body")
+  fallback_body=$(sed '1{/^## /d;}' <<<"$body")
+  [ -n "$visible" ] || visible=$(first_paragraph "$fallback_body")
   printf 'Closes #%s.\n\n%s\n\n' "$issue" "$visible"
   markdown_details "Design record" "$body"
   printf '\n\nDesign record: `%s`. It lands in the repo when this PR merges.\n' "$doc"
