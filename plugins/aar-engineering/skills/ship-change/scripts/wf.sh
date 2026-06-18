@@ -18,10 +18,10 @@
 # line; a missing/malformed summary BLOCKS. A reviewer process error BLOCKS. We also re-run --code as the
 # merge gate so the merged diff is the reviewed diff (a HIGH fix earlier this program slipped a re-review).
 #
-# ENFORCED: the cross-family --code review is posted as a NATIVE `codex-engineer[bot]` review, and branch
-# protection on `main` REQUIRES that opposite-family approval (+ no force-push/deletion, include-admins so the
+# ENFORCED: the cross-family --code review can be posted as a NATIVE opposite-family engineer review, and branch
+# protection on `main` can REQUIRE that opposite-family approval (+ no force-push/deletion, include-admins so the
 # admin author token can't bypass) before any merge. wf.sh's own fail-closed gate (checks + final-SHA review,
-# no HIGH) runs first; `gh pr merge` then succeeds only because the required approval is present.
+# no HIGH) runs first; `gh pr merge` then succeeds only when the required approval is present.
 # STILL ADVISORY: the classifier's architectural/mechanical classification is RECORDED on the PR (the human
 # reads it), not yet wired to a required `design-gate` check — so the design/architectural approval is the
 # human's judgment, recorded, not mechanically blocking. See RUNBOOK.md for the as-built config + escape hatches.
@@ -30,6 +30,9 @@
 # (The command list lives in ONE place — the usage() function below — not duplicated here.)
 #
 # Auth: authenticate gh (gh auth login) OR export GH_TOKEN — wf.sh sources NO env file itself.
+#      WF_ENGINEER_TOKEN_CMD_CLAUDE / _CODEX print GitHub tokens for engineer identities.
+#      WF_ENGINEER_GIT_AUTHOR_CLAUDE / _CODEX are "Name <email>" strings for strict open commits.
+#      WF_REVIEWER_TOKEN_CMD remains a legacy alias for WF_ENGINEER_TOKEN_CMD_CODEX.
 #      AUDIT_EXPERIMENT=<path to verify-claims audit_experiment.sh> overrides auto-location.
 #      WF_WORKTREE_ROOT=<dir> (default /tmp) where worktrees are created.
 #      ORIGIN_REPO=<path> the main checkout that owns the worktrees (default: this script's repo root).
@@ -48,14 +51,16 @@ wf.sh — the GitHub-backed scaffold-change workflow driver (SWE pipeline, enfor
 
 Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh start  <issue#> <slug>            worktree + branch + design-doc skeleton   [then: write the doc]
-  wf.sh open   <worktree>                 commit the doc, push, open the DRAFT PR
+  wf.sh open   <worktree> [author]        commit the doc, push, open the DRAFT PR
   wf.sh design-review <worktree> <author> --scaffold on the doc, post to PR (fail-closed)
   wf.sh code-review   <worktree> <author> --code on the diff, post to PR (fail-closed)
-  wf.sh classify      <worktree>          classifier on changed paths, post evidence (advisory record)
+  wf.sh classify      <worktree> [author] classifier on changed paths, post evidence (advisory record)
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh help                              this message
 
-<author> = claude | codex (the OPPOSITE family reviews). Auth: gh auth login OR export GH_TOKEN (wf.sh sources no env file).
+<author> = claude | codex (the OPPOSITE family reviews). If an engineer identity is configured for that author,
+open/push/PR actions use it; otherwise they warn and use ambient auth unless WF_REQUIRE_ENGINEER_IDENTITY=1.
+Auth: gh auth login OR export GH_TOKEN for ambient fallback (wf.sh sources no env file).
 Full runbook: ${d:-<plugin>}/SKILL.md    Phase-2 + rollback: ${d:-<plugin>}/RUNBOOK.md
 EOF
 }
@@ -68,7 +73,8 @@ EOF
 SELF_REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")" && git rev-parse --show-toplevel 2>/dev/null || true)
 ORIGIN_REPO=${ORIGIN_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || echo "$SELF_REPO")}
 
-need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
+need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; }
+need_ambient_gh(){ [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
   || die "no GitHub auth — run 'gh auth login' or export GH_TOKEN before invoking; wf.sh sources no env file"; }
 
 locate_audit(){  # locate_audit [context-repo-dir]
@@ -85,12 +91,109 @@ locate_audit(){  # locate_audit [context-repo-dir]
   echo "$hit"
 }
 
-check_author(){  # cross-family: claude|codex; the Codex->Claude reverse reviewer isn't wired yet
+check_author(){
   case "$1" in
-    claude) ;;
-    codex)  [ -n "${AUDIT_VERIFIER_CMD:-}" ] || die "author=codex needs a Claude reviewer (AUDIT_VERIFIER_CMD); the Codex->Claude reverse path is a tracked follow-up, not yet wired. Ship Claude-authored changes for now." ;;
+    claude|codex) ;;
     *) die "author must be 'claude' or 'codex' (got '$1')" ;;
   esac
+}
+
+require_model_reviewer(){
+  [ "$1" != codex ] || [ -n "${AUDIT_VERIFIER_CMD:-}" ] \
+    || die "author=codex needs a Claude model-family reviewer for --scaffold/--code (set AUDIT_VERIFIER_CMD, e.g. claude -p ... > \"\\$OUT_TMP\")"
+}
+
+family_suffix(){
+  case "$1" in
+    claude) echo CLAUDE ;;
+    codex) echo CODEX ;;
+    *) die "unknown engineer family '$1'" ;;
+  esac
+}
+
+opposite_family(){
+  case "$1" in
+    claude) echo codex ;;
+    codex) echo claude ;;
+    *) die "unknown author family '$1'" ;;
+  esac
+}
+
+engineer_label(){
+  local fam=$1 suffix var
+  suffix=$(family_suffix "$fam"); var="WF_ENGINEER_LABEL_$suffix"
+  echo "${!var:-}"
+}
+
+reviewer_phrase(){
+  local author=${1:-} reviewer label
+  if [ "$author" = claude ] || [ "$author" = codex ]; then
+    reviewer=$(opposite_family "$author"); label=$(engineer_label "$reviewer")
+    [ -n "$label" ] && { echo "$label"; return; }
+  fi
+  echo "the opposite-family reviewer identity"
+}
+
+engineer_token_cmd(){
+  local fam=$1 suffix var cmd
+  suffix=$(family_suffix "$fam"); var="WF_ENGINEER_TOKEN_CMD_$suffix"
+  cmd="${!var:-}"
+  # Back-compat: the original single reviewer seam minted the Codex engineer token.
+  if [ -z "$cmd" ] && [ "$fam" = codex ]; then cmd="${WF_REVIEWER_TOKEN_CMD:-}"; fi
+  echo "$cmd"
+}
+
+engineer_token(){  # engineer_token <family> <required:0|1>
+  local fam=$1 required=${2:-0} cmd t suffix
+  suffix=$(family_suffix "$fam"); cmd=$(engineer_token_cmd "$fam")
+  if [ -z "$cmd" ]; then
+    if [ "$required" = 1 ]; then
+      if [ "$fam" = codex ]; then
+        die "missing WF_ENGINEER_TOKEN_CMD_CODEX (or legacy WF_REVIEWER_TOKEN_CMD)"
+      else
+        die "missing WF_ENGINEER_TOKEN_CMD_$suffix"
+      fi
+    fi
+    echo ""; return 0
+  fi
+  t=$(eval "$cmd") || die "WF_ENGINEER_TOKEN_CMD_$suffix failed — can't get the $fam engineer token (failing closed)"
+  [ -n "$t" ] || die "WF_ENGINEER_TOKEN_CMD_$suffix produced an empty token (failing closed)"
+  echo "$t"
+}
+
+engineer_git_author(){
+  local fam=$1 required=${2:-0} suffix var val
+  suffix=$(family_suffix "$fam"); var="WF_ENGINEER_GIT_AUTHOR_$suffix"; val="${!var:-}"
+  if [ -z "$val" ]; then
+    [ "$required" = 1 ] && die "missing WF_ENGINEER_GIT_AUTHOR_$suffix (expected: Name <email>)"
+    echo ""; return 0
+  fi
+  [ -n "$(git_author_name "$val")" ] && [ -n "$(git_author_email "$val")" ] \
+    || die "WF_ENGINEER_GIT_AUTHOR_$suffix must look like: Name <email>"
+  echo "$val"
+}
+
+git_author_name(){ sed -E 's/[[:space:]]*<[^>]+>[[:space:]]*$//' <<<"$1"; }
+git_author_email(){ sed -nE 's/.*<([^>]+)>.*/\1/p' <<<"$1"; }
+
+author_token_optional(){
+  local author=$1 tok
+  tok=$(engineer_token "$author" 0)
+  if [ -z "$tok" ]; then
+    [ "${WF_REQUIRE_ENGINEER_IDENTITY:-}" = 1 ] && die "missing engineer token for author=$author and WF_REQUIRE_ENGINEER_IDENTITY=1"
+    note "WARN: no engineer token configured for author=$author; using ambient GitHub auth"
+  fi
+  echo "$tok"
+}
+
+gh_author(){  # gh_author <author-token-or-empty> <gh args...>
+  local tok=$1; shift
+  if [ -n "$tok" ]; then GH_TOKEN="$tok" gh "$@"; else gh "$@"; fi
+}
+
+git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args...>
+  local tok=$1 wt=$2; shift 2
+  if [ -n "$tok" ]; then GH_TOKEN="$tok" git -C "$wt" push "$@"; else git -C "$wt" push "$@"; fi
 }
 
 wt_branch(){ git -C "$1" rev-parse --abbrev-ref HEAD; }                       # branch of a worktree
@@ -103,22 +206,30 @@ base_ref(){ git -C "$1" rev-parse --verify -q origin/main >/dev/null 2>&1 && ech
 # then destroy it).
 require_clean(){ [ -z "$(git -C "$1" status --porcelain)" ] || die "worktree $1 has uncommitted/untracked changes — commit or discard them first (reviewed+merged content must be the committed content)"; }
 # every post-open review/finish subcommand REQUIRES a PR (the durable record); a failed lookup is fatal, never silent.
-wt_pr_required(){ local pr; pr=$(wt_pr "$1"); [ -n "$pr" ] || die "no PR found for branch $(wt_branch "$1") — run 'wf.sh open $1' first (or PR lookup/auth failed)"; echo "$pr"; }
+wt_pr_required(){ local pr; pr=$(wt_pr "$1" "${2:-}"); [ -n "$pr" ] || die "no PR found for branch $(wt_branch "$1") — run 'wf.sh open $1' first (or PR lookup/auth failed)"; echo "$pr"; }
 # repo slug + main checkout, derived FROM a worktree dir (any worktree shares origin + the main checkout):
 gh_repo(){      git -C "${1:-$ORIGIN_REPO}" remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##'; }
 main_checkout(){ git -C "$1" worktree list --porcelain | awk '/^worktree /{print $2; exit}'; }   # 1st worktree = main
-wt_pr(){        gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null; }  # PR# for a worktree's branch
+wt_pr(){
+  local tok=${2:-}
+  if [ -n "$tok" ]; then
+    GH_TOKEN="$tok" gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null
+  else
+    gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null
+  fi
+}  # PR# for a worktree's branch
 
-# render_pr_body <worktree> <doc-relpath> <issue> — the PR body as a generated VIEW of the committed
+# render_pr_body <worktree> <doc-relpath> <issue> [author] — the PR body as a generated VIEW of the committed
 # design doc (#24): a self-describing, plain-language PR with zero duplicate authoring. Doc from its first
 # '## ' section (drops the H1 title — already the PR title — and the boilerplate blockquote); falls back to
 # whole-doc-minus-H1 if there's no '## '. Re-rendered at finish so the merged record matches the landed doc.
 render_pr_body(){
-  local wt="$1" doc="$2" issue="$3" body
+  local wt="$1" doc="$2" issue="$3" author=${4:-} body reviewer
+  reviewer=$(reviewer_phrase "$author")
   body=$(awk 'f||/^## /{f=1}f' "$wt/$doc")
   [ -n "$body" ] || body=$(sed '1{/^# /d;}' "$wt/$doc")
-  printf 'Closes #%s.\n\n%s\n\n---\n\n**Design doc:** `%s` (lands on main at merge) · **Issue:** #%s\n\n_Lifecycle: draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. The cross-family review is a native codex-engineer[bot] review; branch protection requires that approval before merge._\n' \
-    "$issue" "$body" "$doc" "$issue"
+  printf 'Closes #%s.\n\n%s\n\n---\n\n**Design doc:** `%s` (lands on main at merge) · **Issue:** #%s\n\n_Lifecycle: draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. The cross-family review can be posted as a native review through %s; branch protection can require that approval before merge._\n' \
+    "$issue" "$body" "$doc" "$issue" "$reviewer"
 }
 
 # --- fail-closed review verdict ------------------------------------------------------------------
@@ -128,17 +239,14 @@ sum_line(){ grep -E '^SUMMARY:' "$1" | tail -1; }
 count_high(){ sum_line "$1" | sed -E 's/.*high=([0-9]+).*/\1/'; }
 count_all(){ local s; s=$(sum_line "$1"); echo $(( $(sed -E 's/.*high=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*med=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*low=([0-9]+).*/\1/'<<<"$s") )); }
 
-# resolve a fresh token for the REVIEWER identity (a different identity than the author's GH_TOKEN), used to
-# post a NATIVE cross-family review. WF_REVIEWER_TOKEN_CMD prints the token (a GitHub App installation token —
-# minted fresh because they expire ~1h — or `echo <PAT>`). Empty when unset -> comment fallback (unenforced). A
-# configured-but-FAILING command is fail-closed (never silently drop to an unsigned comment when enforcement
-# is expected). The reviewer is the opposite family from the author; today only author=claude -> codex is
-# wired (author=codex is blocked upstream), so the single cmd is the codex reviewer identity.
-reviewer_token(){
-  [ -n "${WF_REVIEWER_TOKEN_CMD:-}" ] || { echo ""; return 0; }
-  local t; t=$(eval "$WF_REVIEWER_TOKEN_CMD") || die "WF_REVIEWER_TOKEN_CMD failed — can't get the reviewer-identity token (failing closed)"
-  [ -n "$t" ] || die "WF_REVIEWER_TOKEN_CMD produced an empty token (failing closed)"
-  echo "$t"
+# resolve a fresh token for the REVIEWER identity (opposite family from the author), used to post a NATIVE
+# cross-family review. Missing token config falls back to ambient comments unless a caller explicitly requires
+# a native reviewer token (finish's merge gate does this when WF_REQUIRE_NATIVE_REVIEW=1); configured-but-failing
+# commands always fail closed.
+reviewer_token(){  # reviewer_token <author> [required:0|1]
+  local author=$1 reviewer required=${2:-0}
+  reviewer=$(opposite_family "$author")
+  engineer_token "$reviewer" "$required"
 }
 
 # run a cross-family review (mode = --scaffold|--code) on TARGET, write REV, post it to the PR.
@@ -151,6 +259,12 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   local mode=$1 wt=$2 author=$3 target=$4 pr=$5 heading=$6 approving=${7:-0}
   local audit rev; audit=$(locate_audit "$wt")
   rev="${TMPDIR:-/tmp}/wf_${mode#--}_$(wt_branch "$wt" | tr '/' '_').md"
+  local rtok="" require_reviewer=0
+  [ "$mode" = --code ] && [ "$approving" = 1 ] && [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && require_reviewer=1
+  if [ -n "$pr" ]; then
+    rtok=$(reviewer_token "$author" "$require_reviewer")
+    [ -n "$rtok" ] || need_ambient_gh
+  fi
   note "$mode review (author=$author, reviewer=opposite family)…"
   AAR_SUBSTRATE="$author" AUDIT_CONSTITUTION="${AUDIT_CONSTITUTION:-$wt/AGENTS.md}" \
     bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
@@ -161,10 +275,10 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
   local repo body; repo=$(gh_repo "$wt")
   body=$(printf '## %s\n\n_Cross-family `%s` review — author `%s`, reviewer = opposite family._\n\n```\n%s\n```\n' "$heading" "$mode" "$author" "$(cat "$rev")")
-  # The reviewer identity (the CODEX bot, for claude-authored work) attributes ALL its output to ITSELF — a
-  # NATIVE review for --code (the merge gate), a COMMENT for --scaffold (the design review isn't the gate).
-  # Codex-authored work has no wired Claude reviewer, so author!=claude falls back to the default token.
-  local rtok=""; [ "$author" = claude ] && rtok=$(reviewer_token)
+  # The reviewer identity attributes its output to the opposite-family engineer — a NATIVE review for --code
+  # when configured, a COMMENT for --scaffold. Unconfigured installs fall back to ambient comments unless
+  # WF_REQUIRE_NATIVE_REVIEW=1. Advisory scaffold/classification comments still fall back when no reviewer
+  # identity is configured.
   if [ "$mode" = --code ] && [ -n "$rtok" ]; then
     local event sha; sha=$(git -C "$wt" rev-parse HEAD)
     if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then event=APPROVE              # finish gate, clean -> APPROVE
@@ -247,25 +361,46 @@ EOF
   note "next: write the design doc at $WT/$DOC, then: wf.sh open $WT"
   ;;
 
-open)   # wf.sh open <worktree>   — commit the design doc, push, open the DRAFT PR
-  need_gh; WT=${1:?usage: wf.sh open <worktree>}
+open)   # wf.sh open <worktree> [author]   — commit the design doc, push, open the DRAFT PR
+  need_gh; WT=${1:?usage: wf.sh open <worktree> [author]}; AUTHOR=${2:-}
   [ -d "$WT" ] || die "no such worktree: $WT"
+  if [ -n "$AUTHOR" ]; then check_author "$AUTHOR"; else note "WARN: no author passed to open; using ambient git/GitHub identity. For agent attribution, pass author: wf.sh open $WT <claude|codex>"; fi
   BR=$(wt_branch "$WT")
   DOC=$(cd "$WT" && git status --porcelain proposals/ | sed 's/^...//' | head -1)
   [ -n "$DOC" ] || DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
   [ -n "$DOC" ] || die "no design doc under proposals/ found (write proposals/<issue>-<slug>.md first)"
   ISSUE=$(basename "$DOC" | sed -E 's/^([0-9]+)-.*/\1/')
-  # attribution comes from the committer's git identity + the PR — don't hardcode an author family here
-  # (this is product code; a Codex- or other-authored change must not get a Claude trailer).
+  AUTHOR_TOKEN=""; GIT_AUTHOR=""
+  if [ -n "$AUTHOR" ]; then
+    AUTHOR_TOKEN=$(author_token_optional "$AUTHOR")
+    [ -n "$AUTHOR_TOKEN" ] || need_ambient_gh
+    GIT_AUTHOR=$(engineer_git_author "$AUTHOR" 0)
+    if [ -z "$GIT_AUTHOR" ]; then
+      [ "${WF_REQUIRE_ENGINEER_IDENTITY:-}" = 1 ] && die "missing git author for author=$AUTHOR and WF_REQUIRE_ENGINEER_IDENTITY=1"
+      note "WARN: no engineer git author configured for author=$AUTHOR; using ambient git identity"
+    fi
+  else
+    need_ambient_gh
+  fi
   # Commit ONLY the doc: the `-- "$DOC"` pathspec on commit means a pre-staged unrelated file can't ride in.
-  ( cd "$WT" && git add -- "$DOC" && git commit -q -m "design: $(basename "$DOC" .md) (#${ISSUE})
+  if [ -n "$GIT_AUTHOR" ]; then
+    GIT_NAME=$(git_author_name "$GIT_AUTHOR"); GIT_EMAIL=$(git_author_email "$GIT_AUTHOR")
+    ( cd "$WT" && git add -- "$DOC" && \
+      GIT_AUTHOR_NAME="$GIT_NAME" GIT_AUTHOR_EMAIL="$GIT_EMAIL" \
+      GIT_COMMITTER_NAME="$GIT_NAME" GIT_COMMITTER_EMAIL="$GIT_EMAIL" \
+      git -c user.name="$GIT_NAME" -c user.email="$GIT_EMAIL" commit -q -m "design: $(basename "$DOC" .md) (#${ISSUE})
 
 Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- "$DOC" )
-  ( cd "$WT" && git push -q -u origin "$BR" ) || die "push failed"
+  else
+    ( cd "$WT" && git add -- "$DOC" && git commit -q -m "design: $(basename "$DOC" .md) (#${ISSUE})
+
+Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- "$DOC" )
+  fi
+  git_push_author "$AUTHOR_TOKEN" "$WT" -q -u origin "$BR" || die "push failed"
   # PR body = the design doc RENDERED (#24) — self-describing, plain-language, zero duplicate authoring.
   # render_pr_body re-runs at finish so the merged record matches the landed doc. --body-file - (stdin)
   # so the doc's backticks/code fences/$/# survive untouched.
-  PRURL=$(render_pr_body "$WT" "$DOC" "$ISSUE" | gh -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
+  PRURL=$(render_pr_body "$WT" "$DOC" "$ISSUE" "$AUTHOR" | gh_author "$AUTHOR_TOKEN" -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
     --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
     --body-file -) \
     || die "gh pr create failed"
@@ -275,22 +410,26 @@ Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- 
 
 design-review)  # wf.sh design-review <worktree> <author>
   need_gh; WT=${1:?usage: wf.sh design-review <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
-  check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
-  require_clean "$WT"; PR=$(wt_pr_required "$WT")
+  check_author "$AUTHOR"; require_model_reviewer "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  ATOK=$(author_token_optional "$AUTHOR")
+  [ -n "$ATOK" ] || need_ambient_gh
+  require_clean "$WT"; PR=$(wt_pr_required "$WT" "$ATOK")
   DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
   [ -n "$DOC" ] || die "no committed design doc under proposals/ (run: wf.sh open $WT)"
   # push so the reviewed doc == what the PR shows (consistency with code-review)
-  ( cd "$WT" && git push -q origin HEAD ) || die "push failed — can't review a doc the PR doesn't reflect"
+  git_push_author "$ATOK" "$WT" -q origin HEAD || die "push failed — can't review a doc the PR doesn't reflect"
   run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Design review (\`--scaffold\`)"
   note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings; the PM's design approval is the human gate (recorded, advisory — not a required check). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
   ;;
 
 code-review)    # wf.sh code-review <worktree> <author>
   need_gh; WT=${1:?usage: wf.sh code-review <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
-  check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
-  require_clean "$WT"; PR=$(wt_pr_required "$WT")
+  check_author "$AUTHOR"; require_model_reviewer "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  ATOK=$(author_token_optional "$AUTHOR")
+  [ -n "$ATOK" ] || need_ambient_gh
+  require_clean "$WT"; PR=$(wt_pr_required "$WT" "$ATOK")
   # push first so the PR (what the human + reviewer see) reflects the reviewed commits — no local/remote gap
-  ( cd "$WT" && git push -q origin HEAD ) || die "push failed — can't review a diff the PR doesn't reflect"
+  git_push_author "$ATOK" "$WT" -q origin HEAD || die "push failed — can't review a diff the PR doesn't reflect"
   DIFF="${TMPDIR:-/tmp}/wf_code_$(wt_branch "$WT" | tr '/' '_').diff"
   ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
   [ -s "$DIFF" ] || die "empty diff main...$(wt_branch "$WT") — implement + commit the change first"
@@ -299,7 +438,8 @@ code-review)    # wf.sh code-review <worktree> <author>
   ;;
 
 classify)       # wf.sh classify <worktree> [author]   — advisory record (never blocks)
-  need_gh; WT=${1:?usage: wf.sh classify <worktree> [author]}; AUTHOR=${2:-claude}   # author optional; only claude is wired
+  need_gh; WT=${1:?usage: wf.sh classify <worktree> [author]}; AUTHOR=${2:-}
+  [ -z "$AUTHOR" ] || check_author "$AUTHOR"
   [ -d "$WT" ] || die "no such worktree: $WT"
   [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the aar-skills repo?)"
   require_clean "$WT"
@@ -307,14 +447,19 @@ classify)       # wf.sh classify <worktree> [author]   — advisory record (neve
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD"
   OUT=$( cd "$WT" && .aar-ci/classify.sh "${PATHS[@]}" )
   CLASS=$(echo "$OUT" | sed -nE 's/^CLASSIFICATION: //p' | head -1)
-  PR=$(wt_pr_required "$WT")
+  # Attribute the classification to the opposite-family reviewer identity when configured. Without an author
+  # or reviewer identity, keep the existing ambient-comment fallback.
+  RTOK=""
+  if [ -n "$AUTHOR" ]; then
+    RTOK=$(reviewer_token "$AUTHOR" 0)
+  else
+    note "WARN: no author passed to classify; posting classification with ambient GitHub auth. Pass author to use an opposite-family reviewer identity when configured."
+  fi
+  [ -n "$RTOK" ] || need_ambient_gh
+  PR=$(wt_pr_required "$WT" "$RTOK")
   BODY=$( { echo "## Change classification (recorded; the design-gate is not yet a required check)"; echo;
       echo "**$CLASS** — architectural changes need the PM's design approval; mechanical merge on the cross-family review + checks alone. (Recorded for now; wiring this to a required \`design-gate\` check is a follow-up.)"; echo;
       echo '```'; echo "$OUT"; echo '```'; } )
-  # attribute the classification to the reviewer identity (the bot) when configured AND the change is
-  # claude-authored — it's automated workflow output, not the human's. Falls back to the default token
-  # (also the path for any non-claude-authored direction, matching the rest of the driver).
-  RTOK=""; [ "$AUTHOR" = claude ] && RTOK=$(reviewer_token)
   if [ -n "$RTOK" ]; then
     echo "$BODY" | GH_TOKEN="$RTOK" gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
       || die "could not post the classification to PR #$PR as the reviewer identity — failing closed (classification was: $CLASS)"
@@ -329,10 +474,12 @@ classify)       # wf.sh classify <worktree> [author]   — advisory record (neve
 
 finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gate + ready + merge + cleanup
   need_gh; WT=${1:?usage: wf.sh finish <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
-  check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  check_author "$AUTHOR"; require_model_reviewer "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
   require_clean "$WT"   # everything must be committed: reviewed == checked == merged, and nothing lost on --force removal
   REPO=$(gh_repo "$WT"); MAIN_CO=$(main_checkout "$WT")
-  BR=$(wt_branch "$WT"); PR=$(wt_pr_required "$WT")
+  ATOK=$(author_token_optional "$AUTHOR")
+  [ -n "$ATOK" ] || need_ambient_gh
+  BR=$(wt_branch "$WT"); PR=$(wt_pr_required "$WT" "$ATOK")
   mapfile -t PATHS < <(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD — nothing to merge"
   # 0a. BASE FRESHNESS: origin/main may have ADVANCED since `start` (a peer PR merged). The merge would land
@@ -346,7 +493,7 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   fi
   # 0b. SYNC: push the worktree so the PR head == the LOCAL HEAD we're about to review (F1). Otherwise we'd
   #    review the local diff but merge a different remote head, then delete the reviewed worktree.
-  ( cd "$WT" && git push -q origin HEAD ) || die "push failed — refusing to merge a PR that may not match the reviewed diff"
+  git_push_author "$ATOK" "$WT" -q origin HEAD || die "push failed — refusing to merge a PR that may not match the reviewed diff"
   LOCAL_SHA=$(git -C "$WT" rev-parse HEAD)
   # Verify the pushed state via the remote BRANCH ref (git ls-remote), NOT `gh pr view headRefOid`: the branch
   # ref updates atomically on push, while GitHub's PR-head association LAGS a beat — querying headRefOid right
@@ -369,8 +516,8 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
     BODYTMP=$(mktemp 2>/dev/null) || BODYTMP="${TMPDIR:-/tmp}/wf_prbody_${BR//\//_}.md"
     # Render AND patch inside one if-condition so set -e can't abort finish on a render/write/API failure
     # — the refresh is best-effort and must never block an otherwise-clean merge (#43/F1).
-    if render_pr_body "$WT" "$FDOC" "$FISSUE" > "$BODYTMP" 2>/dev/null \
-       && gh api --method PATCH "repos/$REPO/pulls/$PR" -F body=@"$BODYTMP" >/dev/null 2>&1; then
+    if render_pr_body "$WT" "$FDOC" "$FISSUE" "$AUTHOR" > "$BODYTMP" 2>/dev/null \
+       && gh_author "$ATOK" api --method PATCH "repos/$REPO/pulls/$PR" -F body=@"$BODYTMP" >/dev/null 2>&1; then
       note "refreshed PR #$PR body from the final design doc"
     else
       note "WARN: could not refresh PR #$PR body (cosmetic — proceeding to merge)"
@@ -386,17 +533,17 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
   run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)" 1   # approving=1: clean -> native APPROVE
   [ "$REVIEW_HIGH" = 0 ] || die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
-  # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced). The merge
-  #    succeeds only because the required codex-engineer[bot] approval is present on this SHA (branch protection).
+  # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced). On enforced
+  #    repos this succeeds only when the required opposite-family approval is present on this SHA.
   note "gate clean (no HIGH) + checks passed -> marking ready + merging PR #$PR @ $LOCAL_SHA"
-  gh -R "$REPO" pr ready "$PR" >/dev/null 2>&1 || true
-  gh -R "$REPO" pr merge "$PR" --squash --delete-branch --match-head-commit "$LOCAL_SHA" || die "merge failed (head may have moved since review — re-run finish)"
+  gh_author "$ATOK" -R "$REPO" pr ready "$PR" >/dev/null 2>&1 || true
+  gh_author "$ATOK" -R "$REPO" pr merge "$PR" --squash --delete-branch --match-head-commit "$LOCAL_SHA" || die "merge failed (head may have moved since review — re-run finish)"
   # 4. cleanup: remove the worktree (derive the main checkout FROM the worktree), sync main
   git -C "$MAIN_CO" worktree remove --force "$WT" 2>/dev/null || true
   git -C "$MAIN_CO" pull --ff-only -q origin main 2>/dev/null || note "WARN: could not ff-only pull main ($MAIN_CO) — reconcile manually"
   local_manifest=0; for p in "${PATHS[@]}"; do case "$p" in */plugin.json|*marketplace.json) local_manifest=1;; esac; done
   [ "$local_manifest" = 1 ] && note "a plugin manifest changed — refresh installs: claude plugin marketplace update aar-skills && claude plugin update <name>@aar-skills"
-  echo "SHIPPED: PR #$PR merged (required codex-engineer[bot] approval + checks). Worktree cleaned."
+  echo "SHIPPED: PR #$PR merged (opposite-family review gate + checks). Worktree cleaned."
   ;;
 
 *) echo "BLOCKED: unknown subcommand '${CMD:-}'." >&2; echo >&2; usage >&2; exit 1 ;;
