@@ -31,11 +31,15 @@ and the push steps (`author_token_optional <author>` + `gh_author`):
 wf.sh comment <worktree> <author> [body-file]    # body on stdin if body-file omitted or "-"
 ```
 
-It resolves the **author family's** engineer token (`WF_ENGINEER_TOKEN_CMD_CLAUDE`/`_CODEX`, already
-configured and already used for reviews), posts the PR comment under it, and **falls back to the ambient
-token only when no author engineer identity is configured** — exactly mirroring the reviewer path's
-unenforced-install fallback (and honoring `WF_REQUIRE_ENGINEER_IDENTITY=1`). Then point the `ship-change`
-SKILL.md triage instruction (and the `code-review` next-step note) at it instead of bare `gh pr comment`.
+It resolves the **author family's** engineer token via the existing `author_token_optional` helper
+(`WF_ENGINEER_TOKEN_CMD_CLAUDE`/`_CODEX`, the same seam reviews use), posts the PR comment under it, and
+inherits that helper's policy exactly: **fail closed when `WF_REQUIRE_ENGINEER_IDENTITY=1`** (this box's
+setting — so `comment` here always posts as the bot, never the owner), and on permissive installs warn +
+fall back to ambient — identical to what `open`/`push`/`review` already do. (On this box the Claude engineer
+identity is installed and wired, verified live: it authored issue #62 and reviewed PR #57. The RUNBOOK's
+"claude-engineer not installed yet" line was stale and is corrected in this PR.) Then point the
+`ship-change` SKILL.md triage instruction (and the `code-review` next-step note) at it instead of bare
+`gh pr comment`.
 
 Load-bearing decisions:
 - **Reuse, don't reinvent.** `author_token_optional` already encodes the fail-closed/fallback policy and

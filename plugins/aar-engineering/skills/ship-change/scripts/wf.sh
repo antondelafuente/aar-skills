@@ -54,6 +54,7 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh open   <worktree> [author]        commit the doc, push, open the DRAFT PR
   wf.sh design-review <worktree> <author> --scaffold on the doc, post to PR (fail-closed)
   wf.sh code-review   <worktree> <author> --code on the diff, post to PR (fail-closed)
+  wf.sh comment <worktree> <author> [file] post an AUTHOR triage comment as the engineer identity (body: file|stdin)
   wf.sh classify      <worktree> [author] classifier on changed paths, post evidence (advisory record)
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh help                              this message
@@ -434,7 +435,25 @@ code-review)    # wf.sh code-review <worktree> <author>
   ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
   [ -s "$DIFF" ] || die "empty diff main...$(wt_branch "$WT") — implement + commit the change first"
   run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Code review (\`--code\`)"
-  note "code-review done (HIGH=$REVIEW_HIGH). Triage findings (fix in $WT + commit, or respond on the PR). Then: wf.sh classify $WT ; wf.sh finish $WT $AUTHOR"
+  note "code-review done (HIGH=$REVIEW_HIGH). Triage findings (fix in $WT + commit, or respond via: wf.sh comment $WT $AUTHOR — posts as the engineer identity, NOT your owner token). Then: wf.sh classify $WT ; wf.sh finish $WT $AUTHOR"
+  ;;
+
+comment)        # wf.sh comment <worktree> <author> [body-file]   — post an AUTHOR triage comment
+  # Attributes the comment to the AUTHOR family's engineer identity (claude-code-engineer / codex-engineer),
+  # not the human owner's ambient token — the author-side counterpart to run_review's reviewer-identity posts.
+  # Use it for triage responses to findings (accept/dispute/defer) instead of a bare `gh pr comment`.
+  need_gh; WT=${1:?usage: wf.sh comment <worktree> <author> [body-file] (body on stdin if omitted)}
+  AUTHOR=${2:?author: claude|codex}; BODYFILE=${3:--}
+  check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  ATOK=$(author_token_optional "$AUTHOR")          # author engineer token, or "" with the configured fallback
+  [ -n "$ATOK" ] || need_ambient_gh
+  PR=$(wt_pr_required "$WT" "$ATOK")
+  if [ "$BODYFILE" = - ]; then BODY=$(cat); else [ -f "$BODYFILE" ] || die "no such body file: $BODYFILE"; BODY=$(cat "$BODYFILE"); fi
+  [ -n "$BODY" ] || die "empty comment body (nothing on stdin / empty file)"
+  echo "$BODY" | gh_author "$ATOK" -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
+    || die "could not post the author comment to PR #$PR — failing closed"
+  if [ -n "$ATOK" ]; then note "posted author COMMENT to PR #$PR as the $AUTHOR engineer identity"
+  else note "posted author COMMENT to PR #$PR (ambient token — no engineer identity configured for $AUTHOR)"; fi
   ;;
 
 classify)       # wf.sh classify <worktree> [author]   — advisory record (never blocks)
