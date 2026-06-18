@@ -165,7 +165,11 @@ git_author_email(){ sed -nE 's/.*<([^>]+)>.*/\1/p' <<<"$1"; }
 section_text(){  # section_text <markdown-file> <section-name-without-##>
   local file=$1 name=$2
   awk -v name="$name" '
-    $0 ~ "^## " name "[[:space:]]*$" { found=1; next }
+    {
+      line=$0
+      sub(/[[:space:]]+$/, "", line)
+    }
+    line == "## " name { found=1; next }
     found && /^## / { exit }
     found { print }
   ' "$file" || true
