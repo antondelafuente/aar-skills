@@ -64,17 +64,18 @@ section as you go. Commit `CHECKLIST.md` at close — the cross-family close aud
 training environment (venvs, the model repo). **Provisioning** (next, per your execution profile) is what installs them;
 skip it and every command fails.
 
-## Arm your self-wake FIRST — before any detached work (do not skip)
+## Arm your self-wake / idle-cost backstop FIRST — before detached billable work (do not skip)
 
 A detached run means **you end your turn and wait to be re-invoked.** The silent-failure class that bites an autonomous
-executor is **never-re-invoked** — you sit parked, nothing errored, the compute bills, the research stalls. So **the
-moment you start execution — before launching any compute or detached driver — arm an independent, recurring self-wake**
-as your standing waker (any single in-process waker can die and leave you parked; the independent waker is the mandatory
-backstop). It must, each tick: check each job's **done-marker**, a **liveness** signal (compute busy = alive; idle AND
-not-done = hung), AND a **positive-progress** signal (a stage advancing / bytes growing — liveness alone can't tell
-working from a wedged hot-loop), plus the driver log for BLOCKED/errors; and it must honor a **look-again deadline** —
-a deadline quietly gone past with compute still billing is the signal you parked, so STOP re-waiting, diagnose, and
-notify the human.
+executor is **never-re-invoked** — you sit parked, nothing errored, the compute bills, the research stalls. So **for
+autonomous detached execution, the moment you start execution — before launching any compute or detached driver — arm an
+independent, recurring self-wake** as your standing waker (any single in-process waker can die and leave you parked; the
+independent waker is the mandatory backstop). If any detached work leaves billable compute running, arm the idle-cost
+teardown backstop before you detach. The autonomous self-wake must, each tick: check each job's **done-marker**, a
+**liveness** signal (compute busy = alive; idle AND not-done = hung), AND a **positive-progress** signal (a stage
+advancing / bytes growing — liveness alone can't tell working from a wedged hot-loop), plus the driver log for
+BLOCKED/errors; and it must honor a **look-again deadline** — a deadline quietly gone past with compute still billing is
+the signal you parked, so STOP re-waiting, diagnose, and notify the human.
 
 For an **autonomous detached run**, this is a capability requirement, not a best-effort preference. If your substrate
 cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and proceed. Mark the
