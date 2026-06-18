@@ -86,7 +86,8 @@ wf.sh design-review <WORKTREE> <author>
 # 5. CODE REVIEW — cross-family --code on the diff, posted to the PR
 wf.sh code-review <WORKTREE> <author>
 #   → triage every finding as a PEER: fix HIGH/MED in the worktree + commit, or respond on the PR
-#     (gh pr comment) with accept/defer + reason. Re-run code-review after a HIGH fix.
+#     with accept/defer + reason via `wf.sh comment <WORKTREE> <author>` (posts as the AUTHOR engineer
+#     identity, NOT your owner token — never a bare `gh pr comment`). Re-run code-review after a HIGH fix.
 
 # 6. CLASSIFY — record mechanical|architectural with evidence, posted (advisory)
 wf.sh classify <WORKTREE> [author]
@@ -105,7 +106,8 @@ the point.
 
 Same as the research audits: triage as a **peer**, not a patcher. **ACCEPT** (real → fix in the worktree +
 commit), **DISPUTE** (say why it's wrong / moot — respond on the PR), **DEFER** (real but out of scope →
-reason on the PR). A HIGH must be fixed or genuinely refuted before merge; the driver blocks on any HIGH.
+reason on the PR). Post PR responses via `wf.sh comment <WORKTREE> <author>` so they carry the author
+engineer identity, not the human owner's token. A HIGH must be fixed or genuinely refuted before merge; the driver blocks on any HIGH.
 (The cross-family reviewer is *told* to find the next thing, so it won't self-converge — don't chase it past
 HIGH=0 into endless polish; the merge bar is HIGH=0 + checks green.)
 

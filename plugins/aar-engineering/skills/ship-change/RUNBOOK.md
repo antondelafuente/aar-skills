@@ -30,9 +30,10 @@ check). Wiring either as a GitHub-required status is a tracked follow-up (needs 
 - **`codex-engineer`** — a GitHub App, installed on `aar-skills`. It can author Codex work and review
   Claude-authored changes. This instance currently exposes its token through the legacy `WF_REVIEWER_TOKEN_CMD`
   seam, which `wf.sh` treats as a fallback alias for `WF_ENGINEER_TOKEN_CMD_CODEX`.
-- **`claude-engineer`** — not installed on this box yet. Until it exists, Codex-authored changes can open under
-  the Codex identity when `WF_ENGINEER_GIT_AUTHOR_CODEX` is configured, but an enforced native Claude review
-  must block or branch protection will reject the merge.
+- **`claude-engineer`** — a GitHub App, installed on `aar-skills` (its token seam `WF_ENGINEER_TOKEN_CMD_CLAUDE`
+  + `WF_ENGINEER_GIT_AUTHOR_CLAUDE` are wired on this box). It authors Claude work and reviews Codex-authored
+  changes — verified live: it posted the cross-family reviews on PR #57 and authored issue #62 (both read as
+  `claude-code-engineer[bot]` / `app/claude-code-engineer`).
 - **Permissions: `contents: write` + `pull_requests: write`.** ⚠️ **Gotcha (cost a round-trip):** an App's
   approval only **counts** toward "require approvals" if the App has **`contents: write`**. With
   `pull_requests: write` *alone* it can *post* a review, but it reads as `author_association: NONE` and the
@@ -86,6 +87,5 @@ If a plugin manifest changed, after a revert/merge refresh installed plugins:
 
 ## Follow-ups (not yet built)
 
-- **`claude-engineer` App installation + instance env wiring** — required for the full Codex-authored happy path.
 - **`.aar-ci` checks + `design-gate` as GitHub-required status checks** — a GitHub Action that runs the
   checks and reports a status, so branch protection can require them (today they're driver-side only).
