@@ -6,9 +6,9 @@ description: >-
   implement → cross-family --code review (posted) → classifier (records mechanical vs architectural with
   evidence) → tracked .aar-ci checks + fake-HOME behavior smoke → fail-closed merge-when-clean. Use for any
   change to the product scaffold (skills, plugins, CI, the constitution). The agents ARE the engineers: a
-  change is authored by one family and reviewed by the OTHER. ENFORCED: the --code review is a native
-  codex-engineer[bot] review that branch protection REQUIRES before merge. Worktree-from-the-start — never
-  disturbs the shared main checkout.
+  change is authored by one family and reviewed by the OTHER. ENFORCED repos can require the --code review as
+  a native opposite-family engineer review before merge. Worktree-from-the-start — never disturbs the shared
+  main checkout.
 ---
 
 # ship-change — the GitHub-backed scaffold-change lifecycle
@@ -23,11 +23,11 @@ staff-engineer / PM: sets direction (the Issue), gates the **architectural desig
 GitHub trail — but is not a gate on routine merges. This mirrors the research split: design *with* the
 human, execution *by* the agents.
 
-**ENFORCED.** The cross-family `--code` review is posted as a **native `codex-engineer[bot]` review**, and
-branch protection on `main` **requires** that opposite-family approval (plus no force-push/deletion, and
-*include administrators* so even the admin author token can't bypass) before any merge. `wf.sh`'s own
-fail-closed gate (checks + a final-SHA `--code` review, no HIGH) runs first; `gh pr merge` then succeeds only
-because the required approval is present. **Still advisory:** the classifier's architectural/mechanical
+**ENFORCED where configured.** The cross-family `--code` review can be posted as a **native opposite-family
+engineer review**, and branch protection on `main` can **require** that approval (plus no force-push/deletion,
+and *include administrators* so even an admin author token can't bypass) before any merge. `wf.sh`'s own
+fail-closed gate (checks + a final-SHA `--code` review, no HIGH) runs first; on enforced repos, `gh pr merge`
+then succeeds only because the required approval is present. **Still advisory:** the classifier's architectural/mechanical
 classification is recorded on the PR, not yet wired to a required `design-gate` check — so the design
 approval is the human's judgment, recorded, not mechanically blocking. As-built config + escape hatches:
 `RUNBOOK.md`.
@@ -38,8 +38,15 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
   shared `main` checkout. This dissolves the three shared-checkout races a prior design kept hitting
   (reviewing stale files; a commit-failure stranding the checkout off main; a remote-vs-local SHA gap).
 - **Cross-family review, both gates.** The design (`--scaffold`) and the code (`--code`) are reviewed by the
-  OPPOSITE family from the author. You MUST pass the author family. (The Codex→Claude reverse reviewer is a
-  tracked follow-up; today author=`claude` works end-to-end, author=`codex` blocks with a clear message.)
+  OPPOSITE family from the author. Pass the author family to review/finish commands. Codex-authored reviews also
+  need `AUDIT_VERIFIER_CMD` to point at a Claude-family CLI so the model review is genuinely cross-family.
+- **Engineer identities auto-upgrade when configured.** `WF_ENGINEER_TOKEN_CMD_CLAUDE` /
+  `WF_ENGINEER_TOKEN_CMD_CODEX` mint GitHub tokens for the family bot identities; `WF_ENGINEER_GIT_AUTHOR_*`
+  gives `Name <email>` for strict `open` commits. If identity config is absent, the driver warns and uses
+  ambient GitHub/git identity unless `WF_REQUIRE_ENGINEER_IDENTITY=1`. `WF_REVIEWER_TOKEN_CMD` remains a
+  backward-compatible alias for the Codex engineer token when `WF_ENGINEER_TOKEN_CMD_CODEX` is unset.
+- **Native review is configurable.** Missing reviewer identity falls back to comments for unenforced installs.
+  Set `WF_REQUIRE_NATIVE_REVIEW=1` to block instead when the opposite-family reviewer identity is absent.
 - **Fail-closed.** A crashed or malformed review NEVER reads as "clean" — the verdict is parsed from the
   authoritative `SUMMARY: high=.. med=.. low=..` line; missing/garbled → BLOCK. The merge gate **re-runs
   `--code` on the final diff** so the merged diff is the reviewed diff, and merges **only with zero HIGH**.
@@ -54,7 +61,8 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
 ## The lifecycle (the agent drives; `wf.sh` is the mechanical glue)
 
 You do the JUDGMENT steps (write the design doc, implement, triage findings) BETWEEN these subcommands.
-Authenticate `gh` first — `gh auth login`, or export `GH_TOKEN`. `wf.sh` is `scripts/wf.sh` in this skill.
+Authenticate `gh` first for ambient fallback — `gh auth login`, or export `GH_TOKEN`. Bot-token paths use the
+configured `WF_ENGINEER_TOKEN_CMD_*` commands. `wf.sh` is `scripts/wf.sh` in this skill.
 
 ```
 # 0. An Issue exists (the backlog item). Create it if not: gh issue create …  → note its number <N>.
@@ -65,7 +73,7 @@ wf.sh start <N> <slug>            # prints WORKTREE=… BRANCH=… DOC=proposals
 #     blast radius, rollout). This is the ADR; it lands on main and survives branch deletion.
 
 # 2. OPEN — commit the doc, push, open the DRAFT PR (links the Issue)
-wf.sh open <WORKTREE>             # prints PR=<n>
+wf.sh open <WORKTREE> [author]    # prints PR=<n>; author=claude|codex enables bot identity when configured
 
 # 3. DESIGN REVIEW — cross-family --scaffold on the doc, posted to the PR
 wf.sh design-review <WORKTREE> <author>
@@ -80,7 +88,7 @@ wf.sh code-review <WORKTREE> <author>
 #     (gh pr comment) with accept/defer + reason. Re-run code-review after a HIGH fix.
 
 # 6. CLASSIFY — record mechanical|architectural with evidence, posted (advisory)
-wf.sh classify <WORKTREE>
+wf.sh classify <WORKTREE> [author]
 
 # 7. FINISH — checks + smoke + fail-closed --code merge-gate + mark ready + merge + cleanup worktree
 wf.sh finish <WORKTREE> <author>

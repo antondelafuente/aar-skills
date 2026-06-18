@@ -10,35 +10,41 @@ can block EVERY merge — so the escape hatches matter as much as the config.
 The repo is **public**, and branch protection on `main` is **active** with:
 
 - **Require a pull request before merging.**
-- **Require 1 approving review** — satisfied by the cross-family **`codex-engineer[bot]`** native review
-  (author ≠ reviewer identity, so GitHub allows it). The driver posts `--code` as an Approve (clean) /
-  Request-changes (findings); only `finish`'s final-SHA review approves.
+- **Require 1 approving review** — satisfied by a cross-family native engineer review (author identity ≠
+  reviewer identity, so GitHub allows it). The driver posts `--code` as an Approve (clean) / Request-changes
+  (findings); only `finish`'s final-SHA review approves.
 - **Dismiss stale approvals when new commits are pushed** — an approval is bound to its reviewed SHA.
 - **Require conversation resolution** — our reviews post as review *bodies* (not line threads), so nothing
   to resolve in practice; if it ever blocks a clean merge, drop just this rule (see escape hatches).
 - **Block force pushes + block deletions** on `main`.
-- **Include administrators (`enforce_admins`)** — **ON**. This is load-bearing: the agent *authors* under the
-  PM's `GH_TOKEN`, which is a repo admin; without this the admin token would bypass the whole gate. With it
-  on, even the admin must have the bot's approval to merge.
+- **Include administrators (`enforce_admins`)** — **ON**. This is load-bearing: any ambient admin token used by
+  the driver must still have an opposite-family approval to merge.
 
 NOT enabled (deliberately): **required status checks**. The `.aar-ci` checks + behavior smoke run *driver-side*
 in `finish` (before the approval), not as GitHub-reported statuses — so there's nothing for branch protection
 to require yet. The classifier's `design-gate` is likewise **advisory** (recorded on the PR, not a required
 check). Wiring either as a GitHub-required status is a tracked follow-up (needs a small GitHub Action).
 
-## The reviewer identity (as-built)
+## Engineer identities (as-built)
 
-- **`codex-engineer`** — a GitHub App, installed on `aar-skills`. It reviews **Claude-authored** changes
-  (the only wired direction; `author=codex` is blocked upstream until a `claude-engineer` reviewer + the
-  reverse review path are built).
+- **`codex-engineer`** — a GitHub App, installed on `aar-skills`. It can author Codex work and review
+  Claude-authored changes. This instance currently exposes its token through the legacy `WF_REVIEWER_TOKEN_CMD`
+  seam, which `wf.sh` treats as a fallback alias for `WF_ENGINEER_TOKEN_CMD_CODEX`.
+- **`claude-engineer`** — not installed on this box yet. Until it exists, Codex-authored changes can open under
+  the Codex identity when `WF_ENGINEER_GIT_AUTHOR_CODEX` is configured, but an enforced native Claude review
+  must block or branch protection will reject the merge.
 - **Permissions: `contents: write` + `pull_requests: write`.** ⚠️ **Gotcha (cost a round-trip):** an App's
   approval only **counts** toward "require approvals" if the App has **`contents: write`**. With
   `pull_requests: write` *alone* it can *post* a review, but it reads as `author_association: NONE` and the
   approval does **not** satisfy the gate (`reviewDecision: REVIEW_REQUIRED`). Grant `contents: write` and
   re-accept the installation's permission request.
-- **Instance wiring (not product):** the App's id + private key live on the instance under
-  `~/.config/codex-engineer/`; `WF_REVIEWER_TOKEN_CMD` (in the instance env) mints a fresh installation token
-  per use (they expire ~1h). `wf.sh` consumes only that seam — no App specifics in product code.
+- **Instance wiring (not product):** each App's id + private key live on the instance under e.g.
+  `~/.config/<family>-engineer/`. `WF_ENGINEER_TOKEN_CMD_CLAUDE` / `WF_ENGINEER_TOKEN_CMD_CODEX` mint fresh
+  installation tokens per use (they expire ~1h); `WF_ENGINEER_GIT_AUTHOR_CLAUDE` /
+  `WF_ENGINEER_GIT_AUTHOR_CODEX` provide `Name <email>` for strict commit attribution. Optional
+  `WF_ENGINEER_LABEL_CLAUDE` / `WF_ENGINEER_LABEL_CODEX` label PR text. `wf.sh` consumes only these seams — no
+  App specifics in product code. `WF_REQUIRE_ENGINEER_IDENTITY=1` and `WF_REQUIRE_NATIVE_REVIEW=1` make missing
+  identity config block instead of falling back to ambient auth/comments.
 
 ## Escape hatches (when the automation wedges)
 
@@ -52,17 +58,17 @@ shouldn't be able to bypass its own gate). Instead the owner edits the rule:
   `enforce_admins` ON — that only gates push/merge to the branch, not the settings API.)
 - **Remove branch protection entirely (nuclear).** `gh api -X DELETE repos/<owner>/<repo>/branches/main/protection`.
   The repo reverts to driver-side-gate-only behavior. Fully reversible — re-PUT the rule to restore.
-- **Revoke the reviewer App.** Uninstalling / revoking `codex-engineer` immediately stops it approving — the
-  clean unwind for a compromised reviewer identity (combined with relaxing require-approvals so merges aren't
-  trapped).
+- **Revoke an engineer App.** Uninstalling / revoking an engineer App immediately stops it authoring/reviewing —
+  the clean unwind for a compromised identity (combined with relaxing require-approvals so merges aren't trapped).
 
 ## Token / identity rotation
 
 - **`GH_TOKEN`** (author/driver auth). Rotate: mint a new fine-grained PAT (repo: contents + pull_requests),
   replace it wherever your environment provides `GH_TOKEN` *(this instance: `~/.env`, re-`source`)*. `wf.sh`
   sources no env file itself. NEVER print it; scrub from captured output (`sed "s/${GH_TOKEN}/***/g"`).
-- **`codex-engineer` App** (reviewer identity). Rotate the App's private key in the App settings and replace
-  `~/.config/codex-engineer/key.pem`; the minter picks it up. Revoking the App stops approvals immediately.
+- **Engineer Apps** (author/reviewer identities). Rotate the App's private key in the App settings and replace
+  the matching `~/.config/<family>-engineer/key.pem`; the minter picks it up. Revoking an App stops that
+  identity immediately.
 
 ## One-command revert of a merged change
 
@@ -79,6 +85,6 @@ If a plugin manifest changed, after a revert/merge refresh installed plugins:
 
 ## Follow-ups (not yet built)
 
-- **`claude-engineer` App + reverse review path** — to let Codex *author* changes that Claude reviews.
+- **`claude-engineer` App installation + instance env wiring** — required for the full Codex-authored happy path.
 - **`.aar-ci` checks + `design-gate` as GitHub-required status checks** — a GitHub Action that runs the
   checks and reports a status, so branch protection can require them (today they're driver-side only).
