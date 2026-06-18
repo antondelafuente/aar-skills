@@ -28,7 +28,8 @@
 - ☐ [BLOCK] Read DESIGN.md + START.md; design is locked (no redesign).                          ev:
 - ☐ [BLOCK] Self-wake / idle-cost backstop armed PER SUBSTRATE before autonomous detached runs or detached billable work.
       Autonomous detached runs MUST name the independent waker id/handle; any detached compute MUST name the
-      idle-cost teardown backstop. An in-process monitor alone is FAIL for autonomous detached runs.
+      idle-cost teardown backstop. Parking with only an in-process monitor is FAIL for autonomous detached runs;
+      a blocking watcher that keeps the executor turn alive is controller-supervised, not autonomous detached.
       (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + box-side idle-teardown watchdog).  ev:
 - ☐ Read experiment_gotchas.md tail (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample

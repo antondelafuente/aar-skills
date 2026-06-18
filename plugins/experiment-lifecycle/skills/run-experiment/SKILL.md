@@ -78,11 +78,11 @@ BLOCKED/errors; and it must honor a **look-again deadline** — a deadline quiet
 the signal you parked, so STOP re-waiting, diagnose, and notify the human.
 
 For an **autonomous detached run**, this is a capability requirement, not a best-effort preference. If your substrate
-cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and proceed. Mark the
+cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and then park. Mark the
 `CHECKLIST.md` self-wake gate **FAIL**, notify/escalate before GPU/API spend, and either relaunch in a substrate that
-can own its wake or keep the work explicitly controller-supervised. Short controller-supervised probes may use weaker
-watching, but then they are not autonomous detached runs; if they leave billable compute detached, still arm the
-idle-cost teardown backstop.
+can own its wake or keep the work explicitly controller-supervised. A blocking watcher that keeps the executor turn
+alive is controller-supervised, not autonomous detached; if it leaves billable compute detached, still arm the idle-cost
+teardown backstop.
 
 > **Claude Code implementation:** a non-durable recurring `CronCreate` (~every 12 min) whose prompt re-checks the pods
 > and honors a `LOOK_AGAIN.md` marker (`last_looked` / `look_again_by`, generous). Session-scoped (wakes only its
