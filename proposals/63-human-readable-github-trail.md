@@ -2,13 +2,6 @@
 
 > Internal design record. GitHub should show a shorter reader view.
 
-## PR summary
-
-This PR makes the GitHub trail easier to read. A person opening a ship-change PR should see the outcome and the
-needed action before any audit transcript or workflow detail.
-
-The full audit record stays available for agents, but dense details move under collapsible sections.
-
 ## Problem
 
 `ship-change` already gives PRs good titles, but its generated bodies and comments are still too dense. The PR body
@@ -20,17 +13,21 @@ attention.
 
 ## Approach
 
-Add a reader-facing layer to the workflow output.
+Add a reader-facing layer to the workflow output, without adding a second authored summary to the proposal.
 
-- PR bodies should render a short `## PR summary` section when the proposal has one. If a proposal does not have that
-  section, the workflow falls back to a compact excerpt instead of dumping the whole design document.
+- PR bodies should show the first paragraph of `## Problem` and the first paragraph of `## Approach`, then put the full
+  design record under a collapsible section. This keeps the old zero-duplicate-authoring rule from #24: authors still
+  write one design doc, and the PR body is a view of it.
 - Review comments should start with a plain-language result: no problems, minor notes, moderate issues to fix/respond
   to, or serious issues blocking progress.
 - Full review output remains in a collapsible details block so agents keep the exact audit record.
 - Classification comments should say what the classification means in one sentence and hide the raw classifier evidence
   behind details.
-- Author triage comments should get a simple wrapper that makes the first paragraph the visible summary and places the
-  full response under details.
+- Author triage comments should be left alone when they are short. Longer author comments should show the first
+  paragraph as the visible summary and put the full response under details.
+
+Use shared formatting helpers in `wf.sh` so PR bodies, reviews, classification comments, and long author comments do
+not grow four separate Markdown implementations.
 
 ## Alternatives considered
 
@@ -41,8 +38,11 @@ Add a reader-facing layer to the workflow output.
 
 ## Blast radius
 
-This touches `aar-engineering`'s `ship-change` workflow and documentation. It changes GitHub presentation only; it does
-not change the review gate, merge rule, branch protection behavior, token identity logic, or classifier decision.
+This touches `aar-engineering`'s `ship-change` workflow and documentation. It also updates the `start` skeleton only if
+needed for comments around the existing sections, not to introduce a new required section.
+
+It changes GitHub presentation only; it does not change the review gate, merge rule, branch protection behavior, token
+identity logic, or classifier decision.
 
 ## Rollout + rollback
 
