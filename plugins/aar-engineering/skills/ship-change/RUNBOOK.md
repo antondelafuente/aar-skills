@@ -80,7 +80,8 @@ as-built operating policy, not a provider SLA.
 
 At 5 minutes, inspect state once without interrupting the reviewer. For the default Claude verifier, check that
 the verifier process is still alive; do not treat an empty log as a hang signal. For streaming verifier commands,
-also check the run log. At 10 minutes, treat the run as suspicious unless there is concrete evidence of progress.
+also check the run log, remembering that it is a shared driver/verifier log. At 10 minutes, treat the run as
+suspicious unless there is concrete evidence of progress.
 
 The underlying `verify-claims` engine writes through an internal temp file and atomically moves it to the final
 findings path only after the verifier exits successfully. In `wf.sh`, that means the final review file
