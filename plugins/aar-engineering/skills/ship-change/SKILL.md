@@ -169,8 +169,14 @@ GitHub is the durable coordination record, but it should read like a handoff to 
 
 ## Composes
 
-- **verify-claims `--scaffold` / `--code`** — the cross-family design + code reviewers (located from the
-  installed plugin, or `AUDIT_EXPERIMENT=<path>`). Same engine the research audits use.
+- **verify-claims `--scaffold` / `--code`** — the cross-family design + code reviewers. Same engine the
+  research audits use. **Reviewer resolution (`locate_audit`), in order:** (1) `AUDIT_EXPERIMENT=<path>`
+  manual override; (2) **trusted-but-current** — the context repo's verify-claims materialized from its
+  *base* ref (`origin/main`, then `main`), so the reviewer matches what merges (not a stale install cache)
+  yet is never supplied by the branch under review (a PR that edits the reviewer cannot run its own modified
+  reviewer as the merge gate; such a change is exercised only after it lands); (3) the installed plugin
+  (Claude plugin cache / Claude/Codex skill installs) for a repo-less invocation or a repo with no
+  verify-claims in-tree. The base-ref copy is cached under the repo's git-common-dir keyed by the base commit.
 - **gh** — Issues, draft PR, PR comments, merge (authenticate `gh`: `gh auth login`, or export `GH_TOKEN`).
 - **`RUNBOOK.md`** (this dir) — the as-built branch-protection config + the rollback/escape-hatch + token rotation.
 

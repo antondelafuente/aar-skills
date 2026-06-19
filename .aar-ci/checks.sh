@@ -79,4 +79,17 @@ for plug in $(printf '%s\n' "$SMOKE_PLUGS" | grep -v '^$' | sort -u); do
   fi
 done
 
+# 7. composition smoke for wf.sh's verify-claims reviewer resolution (trusted-but-current, #69): a unit-style
+#    check the fake-HOME discovery smoke can't cover (it asserts WHICH reviewer copy runs, not just that skills
+#    install). Runs only when the ship-change driver itself changed.
+if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-change/scripts/wf.sh$'; then
+  LA_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/locate_audit_smoke.sh"
+  if [ -f "$LA_SMOKE" ]; then
+    echo "[checks] locate_audit resolution smoke" >&2
+    bash "$LA_SMOKE" >&2 && ok "locate_audit smoke" || err "locate_audit resolution smoke FAILED"
+  else
+    err "wf.sh changed but locate_audit_smoke.sh missing — cannot verify reviewer resolution"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }

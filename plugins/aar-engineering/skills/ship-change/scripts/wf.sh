@@ -59,6 +59,7 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh classify      <worktree> [author] classifier on changed paths, post evidence (advisory record)
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh finish <worktree> <author> --design   two-phase DESIGN merge: gate on --scaffold (doc-only PR), spawn ready issues after
+  wf.sh locate-audit [repo]               print the verify-claims reviewer that would run (introspection/test)
   wf.sh help                              this message
 
 <author> = claude | codex (the OPPOSITE family reviews). If an engineer identity is configured for that author,
@@ -80,17 +81,74 @@ need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; }
 need_ambient_gh(){ [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
   || die "no GitHub auth — run 'gh auth login' or export GH_TOKEN before invoking; wf.sh sources no env file"; }
 
+# Materialize a repo's verify-claims reviewer from its BASE ref into a content cache; echo the cached
+# audit_experiment.sh path on success. "Trusted-but-current": read from the repo's own main (origin/main, then
+# local main) — CURRENT (matches what merges, not a stale version-keyed install cache) yet TRUSTED (the base,
+# never the branch under review, so a PR that edits verify-claims' own reviewer can't run that modified reviewer
+# as its merge gate). For any PR that does NOT touch verify-claims, base content == the worktree's, so this only
+# ever differs by being safe. The WHOLE skill dir is materialized (SKILL.md + scripts/ + references/…), the
+# canonical Agent Skill unit, so a reviewer that reads a relative resource still finds it. Cached under the
+# repo's git-common-dir (shared across worktrees, never in the worktree's tracked state) keyed by the base
+# commit, so repeated calls + review phases reuse one extraction.
+#   rc 0 + path  = resolved;  rc 0 + no output = no verify-claims at this base (legitimate fall-through);
+#   rc 2         = verify-claims IS present at base but could not be extracted -> caller FAILS CLOSED (never
+#                  silently downgrade a merge-gate reviewer to a stale installed copy).
+audit_from_base_ref(){  # audit_from_base_ref <repo>
+  local repo=$1 base relp skilldir cdir tgt tmp
+  [ -n "$repo" ] || return 0
+  command -v git >/dev/null 2>&1 || return 0                 # no git -> can't determine a base ref at all -> fall through
+  base=$(git -C "$repo" rev-parse --verify -q refs/remotes/origin/main \
+      || git -C "$repo" rev-parse --verify -q refs/heads/main || true)
+  [ -n "$base" ] || return 0
+  relp=$(git -C "$repo" ls-tree -r --name-only "$base" 2>/dev/null \
+      | grep -m1 -E 'verify-claims.*/scripts/audit_experiment\.sh$' || true)
+  [ -n "$relp" ] || return 0                                 # no verify-claims at this base -> legitimate fall-through
+  # verify-claims IS present at base from here on -> any inability to extract is fail-closed (rc 2), never a
+  # silent fall-through to a stale installed reviewer. tar is checked here (not up top) so a missing tar with
+  # verify-claims present fails closed rather than masquerading as "not found".
+  command -v tar >/dev/null 2>&1 || return 2
+  skilldir=${relp%/scripts/audit_experiment.sh}             # the verify-claims SKILL dir, in-tree path
+  cdir=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null) || return 2
+  case "$cdir" in /*) ;; *) cdir="$repo/$cdir" ;; esac       # --git-common-dir may be relative to repo
+  tgt="$cdir/aar-ship-verify/$base"
+  if [ ! -f "$tgt/$skilldir/scripts/audit_experiment.sh" ]; then
+    tmp=$(mktemp -d "$cdir/aar-ship-verify.XXXXXX" 2>/dev/null) || return 2
+    if git -C "$repo" archive "$base" -- "$skilldir" 2>/dev/null | tar -x -C "$tmp" 2>/dev/null; then
+      mkdir -p "$(dirname "$tgt")" 2>/dev/null || true
+      mv -T "$tmp" "$tgt" 2>/dev/null || rm -rf "$tmp"       # lost a concurrent race / already built: drop ours
+    else
+      rm -rf "$tmp"; return 2                                # present at base but archive/tar failed -> fail closed
+    fi
+  fi
+  [ -f "$tgt/$skilldir/scripts/audit_experiment.sh" ] || return 2
+  echo "$tgt/$skilldir/scripts/audit_experiment.sh"
+}
+
 locate_audit(){  # locate_audit [context-repo-dir]
   if [ -n "${AUDIT_EXPERIMENT:-}" ] && [ -f "$AUDIT_EXPERIMENT" ]; then echo "$AUDIT_EXPERIMENT"; return; fi
-  local repo=${1:-} hit=""
-  # 1. installed reviewer, highest version — Claude plugin cache AND Claude/Codex skill installs (symlink or copy).
-  #    `|| true` is load-bearing under `set -euo pipefail`: a MISSING search dir makes find exit non-zero and
-  #    (with pipefail) would abort the assignment BEFORE the in-tree fallback below — swallow it so we continue.
-  hit=$(find "$HOME/.claude/plugins/cache" "$HOME/.claude/skills" "$HOME/.codex/skills" \
+  local repo=${1:-} hit="" src out rc tried=""
+  # 1. TRUSTED-BUT-CURRENT (#69, see audit_from_base_ref): verify-claims at the BASE ref of the context repo,
+  #    then of wf.sh's OWN source repo when the context repo carries none in-tree (so a cross-repo ship-change
+  #    still reviews against current product source, not a stale install). Current source, never the reviewed
+  #    branch. FAILS CLOSED (rc 2) if a base ref HAS verify-claims but it can't be extracted — never a silent
+  #    downgrade to the stale installed copy.
+  for src in "$repo" "$SELF_REPO"; do
+    [ -n "$hit" ] && break
+    [ -n "$src" ] || continue
+    case " $tried " in *" $src "*) continue ;; esac; tried="$tried $src"
+    if out=$(audit_from_base_ref "$src"); then rc=0; else rc=$?; fi
+    case "$rc" in
+      0) [ -n "$out" ] && hit="$out" ;;
+      *) die "verify-claims is present at $src's base ref but could not be extracted (rc=$rc) — failing closed rather than silently using a stale installed reviewer; set AUDIT_EXPERIMENT to override" ;;
+    esac
+  done
+  # 2. fallback: installed reviewer, highest version — Claude plugin cache AND Claude/Codex skill installs
+  #    (symlink or copy). Only reached when NO trusted base-ref source carries verify-claims (a repo-less
+  #    invocation with no source repo, or repos with none in-tree). `|| true` is load-bearing under
+  #    `set -euo pipefail`: a missing search dir makes find exit non-zero and would abort the assignment.
+  [ -n "$hit" ] || hit=$(find "$HOME/.claude/plugins/cache" "$HOME/.claude/skills" "$HOME/.codex/skills" \
         -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1 || true)
-  # 2. fallback: the context repo's OWN in-tree copy (a repo-only checkout with no install still works)
-  [ -n "$hit" ] || { [ -n "$repo" ] && hit=$(find "$repo/plugins" -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1 || true); }
-  [ -n "$hit" ] || die "cannot locate verify-claims audit_experiment.sh (searched the plugin cache, Claude/Codex skills, and ${repo:-the repo}/plugins; install verify-claims or set AUDIT_EXPERIMENT)"
+  [ -n "$hit" ] || die "cannot locate verify-claims audit_experiment.sh (searched the base refs of ${repo:+the context repo and }wf.sh's source repo, the plugin cache, and Claude/Codex skills; install verify-claims or set AUDIT_EXPERIMENT)"
   echo "$hit"
 }
 
@@ -464,6 +522,9 @@ CMD=${1:-}; shift || true
 case "$CMD" in
 
 help|-h|--help|"")  usage; exit 0 ;;
+
+locate-audit)  # wf.sh locate-audit [context-repo] — print the verify-claims reviewer wf.sh would run (introspection/test)
+  locate_audit "${1:-}" ;;
 
 start)  # wf.sh start <issue#> <slug>
   ISSUE=${1:?usage: wf.sh start <issue#> <slug>}; SLUG=${2:?slug (kebab-case)}
