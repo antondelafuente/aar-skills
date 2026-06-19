@@ -419,8 +419,9 @@ disposition_gate(){
   [ "$design" = 1 ] && expect=needs-design || expect=ready
   # Query the first page (100, GitHub's max) + hasNextPage + each ref's repo. The --jq emits "MORE:<bool>"
   # then "<number> <owner/repo>" per closing ref, so we (a) never silently skip refs beyond the page (fail
-  # closed if more exist) and (b) can ignore cross-repo refs (a close in another repo isn't subject to THIS
-  # tracker's disposition contract). The MORE: marker is skipped in-loop (no fragile grep that fails on zero).
+  # closed if more exist) and (b) detect cross-repo refs. The MORE: marker is skipped in-loop (no fragile grep
+  # that fails on zero).
+  local repo_lc; repo_lc=$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')   # case-insensitive slug compare
   closing=$(gh_author "$tok" api graphql \
       -f query='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){closingIssuesReferences(first:100){pageInfo{hasNextPage} nodes{number repository{nameWithOwner}}}}}}' \
       -F o="$owner" -F n="$name" -F p="$pr" \
@@ -428,9 +429,13 @@ disposition_gate(){
     || die "design-gate: could not resolve PR #$pr closing issues (lookup failed) — failing closed"
   printf '%s\n' "$closing" | head -1 | grep -qx 'MORE:false' \
     || die "design-gate: PR #$pr closes more than 100 issues — refusing to merge without checking all of them (split the PR, or WF_ALLOW_NONREADY_CLOSE=1)."
+  local nrepo_lc
   while read -r n nrepo; do
     case "$n" in ''|MORE:*) continue;; esac          # skip blank + the MORE: marker line
-    [ "$nrepo" = "$repo" ] || continue                # cross-repo close: not subject to THIS repo's contract
+    # A CROSS-REPO closing ref must fail closed (not be silently ignored): a PR here must not close an issue in
+    # another repo as an unchecked side effect. Use a non-closing mention (drop Closes/Fixes) for cross-repo refs.
+    nrepo_lc=$(printf '%s' "$nrepo" | tr '[:upper:]' '[:lower:]')
+    [ "$nrepo_lc" = "$repo_lc" ] || die "design-gate: PR #$pr has a CROSS-REPO closing reference ($nrepo#$n) — a PR here must not close an issue in another repo. Drop the Closes/Fixes keyword for cross-repo refs (a plain mention is fine), or WF_ALLOW_NONREADY_CLOSE=1."
     count=$((count+1))
     labels=$(gh_author "$tok" api "repos/$repo/issues/$n" \
         --jq "[.labels[].name]|map(select(test(\"$DISPO_RE\")))|sort|join(\",\")" 2>/dev/null) \

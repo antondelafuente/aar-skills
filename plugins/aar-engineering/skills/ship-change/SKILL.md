@@ -129,6 +129,8 @@ normal single-phase ship-change runs.
 `finish` enforces the two-phase **close contract** on the issues a PR closes (before the merge approval):
 - **code `finish`:** must close **≥1** issue, and **every** closing issue's disposition is `ready`.
 - **`finish --design`:** must close **exactly one** issue, disposition `needs-design`.
+- A **cross-repo** closing ref (a `Closes` of an issue in another repo) fails closed — drop the keyword to a
+  plain mention for cross-repo refs.
 
 So you can't merge code that closes a `needs-design` (or untriaged/mislabelled) issue — a `needs-design` issue
 is closed only by its *design* landing, which spawns the `ready` children you actually implement. Violations
