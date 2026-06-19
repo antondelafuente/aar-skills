@@ -417,11 +417,16 @@ disposition_gate(){
     return 0
   fi
   [ "$design" = 1 ] && expect=needs-design || expect=ready
+  # Query the first page (100, GitHub's max) + hasNextPage. The --jq emits "MORE:<bool>" then one issue# per
+  # line, so we never silently skip closing issues beyond the page (fail closed if more exist).
   closing=$(gh_author "$tok" api graphql \
-      -f query='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){closingIssuesReferences(first:50){nodes{number}}}}}' \
+      -f query='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){closingIssuesReferences(first:100){pageInfo{hasNextPage} nodes{number}}}}}' \
       -F o="$owner" -F n="$name" -F p="$pr" \
-      --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].number' 2>/dev/null) \
+      --jq '.data.repository.pullRequest.closingIssuesReferences | "MORE:\(.pageInfo.hasNextPage)", (.nodes[].number)' 2>/dev/null) \
     || die "design-gate: could not resolve PR #$pr closing issues (lookup failed) — failing closed"
+  printf '%s\n' "$closing" | head -1 | grep -qx 'MORE:false' \
+    || die "design-gate: PR #$pr closes more than 100 issues — refusing to merge without checking all of them (split the PR, or WF_ALLOW_NONREADY_CLOSE=1)."
+  closing=$(printf '%s\n' "$closing" | grep -v '^MORE:')
   while read -r n; do
     [ -n "$n" ] || continue
     count=$((count+1))
