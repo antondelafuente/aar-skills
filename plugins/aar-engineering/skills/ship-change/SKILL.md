@@ -66,7 +66,8 @@ Authenticate `gh` first for ambient fallback — `gh auth login`, or export `GH_
 configured `WF_ENGINEER_TOKEN_CMD_*` commands. `wf.sh` is `scripts/wf.sh` in this skill.
 
 ```
-# 0. An Issue exists (the backlog item). Create it if not: gh issue create …  → note its number <N>.
+# 0. An Issue exists (the backlog item). Create it if not — author it as the ENGINEER identity, not the
+#    human owner: wf.sh issue <claude|codex> create -R <owner/repo> -t "..." -b "..."  → note its number <N>.
 
 # 1. START — worktree + branch + design-doc skeleton
 wf.sh start <N> <slug>            # prints WORKTREE=… BRANCH=… DOC=proposals/<N>-<slug>.md

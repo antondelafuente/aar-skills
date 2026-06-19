@@ -49,6 +49,14 @@ layer that builds them).
   `skills/<name>/SKILL.md` + `skills/<name>/scripts/` (scripts INSIDE the skill dir — the
   Agent Skills layout; it makes relative references work for plugin installs AND symlink
   installs identically).
+- **Agent-filed Issues use the engineer identity, not the human's.** When an agent opens a GitHub Issue
+  (or comments on one), author it as the `*-engineer[bot]` identity, never the ambient/human `gh` auth
+  (raw `gh issue create` falls back to the human owner). The canonical interface is **`wf.sh issue
+  <claude|codex> create|comment …`** — the Issue-side counterpart to `wf.sh comment`, reusing the SWE
+  pipeline's one engineer-token path (`WF_ENGINEER_TOKEN_CMD_*`). An instance may keep a thin
+  `gh-as-engineer` alias that delegates to it, but there's a single token implementation. The rule covers
+  *every* Issue an agent opens (ad-hoc backlog, decompositions, follow-ups). Backfilling existing
+  human-authored Issues is not possible (GitHub can't reauthor) and not attempted.
 - **Every script header cites the real incidents it encodes.** No best-practice guesses.
 - **Version bump on every behavior change** (plugin.json), one CHANGELOG-style line in the
   commit message; tag releases when someone depends on stability.

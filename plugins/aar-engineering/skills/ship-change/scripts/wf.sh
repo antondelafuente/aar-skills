@@ -55,6 +55,7 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh design-review <worktree> <author> --scaffold on the doc, post to PR (fail-closed)
   wf.sh code-review   <worktree> <author> --code on the diff, post to PR (fail-closed)
   wf.sh comment <worktree> <author> [file] post an AUTHOR triage comment as the engineer identity (body: file|stdin)
+  wf.sh issue   <author> <gh issue args…>  file/comment a GitHub Issue AS the engineer identity (no worktree)
   wf.sh classify      <worktree> [author] classifier on changed paths, post evidence (advisory record)
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh finish <worktree> <author> --design   two-phase DESIGN merge: gate on --scaffold (doc-only PR), spawn ready issues after
@@ -606,6 +607,27 @@ comment)        # wf.sh comment <worktree> <author> [body-file]   — post an AU
     || die "could not post the author comment to PR #$PR — failing closed"
   if [ -n "$ATOK" ]; then note "posted author COMMENT to PR #$PR as the $AUTHOR engineer identity"
   else note "posted author COMMENT to PR #$PR (ambient token — no engineer identity configured for $AUTHOR)"; fi
+  ;;
+
+issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comment on a GitHub Issue AS the engineer identity
+  # The Issue-side counterpart to `wf.sh comment` (which does PR triage comments): authors Issues and
+  # issue-comments as the family engineer identity (claude-code-engineer / codex-engineer), never the human
+  # owner's ambient token, so agent-filed Issues read as the bot. ONE engineer-token path for every agent
+  # GitHub authorship (#89). No worktree needed — pass full `gh issue` args. Examples:
+  #   wf.sh issue claude create -R owner/repo -t "<title>" -b "<body>" -l <label>
+  #   wf.sh issue codex  comment <N> -R owner/repo -b "<body>"
+  need_gh; AUTHOR=${1:?usage: wf.sh issue <claude|codex> <gh issue args…> (e.g. issue claude create -R owner/repo -t … -b …)}; shift
+  check_author "$AUTHOR"
+  [ $# -gt 0 ] || die "no gh issue args given (e.g. create -R owner/repo -t '…' -b '…' -l <label>)"
+  GHSUB=$1
+  # Allowlist: this is the engineer-AUTHORING path (#89), not general issue admin. Refuse anything but
+  # create/comment so a typo or a broad call can't run close/edit/delete/lock under the engineer token.
+  case "$GHSUB" in create|comment) ;; *) die "wf.sh issue: only 'create' and 'comment' are allowed (got '$GHSUB'); this is the engineer-authoring path, not general issue ops" ;; esac
+  ATOK=$(author_token_optional "$AUTHOR")          # engineer token, or "" with the configured fallback
+  [ -n "$ATOK" ] || need_ambient_gh
+  gh_author "$ATOK" issue "$@" || die "wf.sh issue: 'gh issue $GHSUB' failed — failing closed"
+  if [ -n "$ATOK" ]; then note "ran 'gh issue $GHSUB' as the $AUTHOR engineer identity"
+  else note "ran 'gh issue $GHSUB' (ambient token — no engineer identity configured for $AUTHOR)"; fi
   ;;
 
 classify)       # wf.sh classify <worktree> [author]   — advisory record (never blocks)
