@@ -70,6 +70,11 @@ material was found. "No material finding" is allowed and common — it does NOT 
 calibration discipline as the claim checker; the close mode validated 2026-06-12 catching a repro gap
 + in-sample steering + overclaim from a cold read, zero false findings).
 
+Verifier output is atomic: `audit_experiment.sh` writes the model response to a temp file and moves it to the
+final findings path only after the verifier exits successfully. While the verifier is still running, an
+absent or empty final findings file is not evidence of a hang; inspect the process/log state instead of killing
+or retrying solely because the findings file has not appeared.
+
 ## SWE-pipeline review: `--scaffold` (design) + `--code` (implementation)
 
 The four modes above audit EXPERIMENTS (product QA). `--scaffold` and `--code` reuse the SAME cross-family

@@ -13,10 +13,9 @@ The missing product behavior is not a timeout mechanism; it is a clear norm at t
 Split the fix by canonical home:
 
 - `plugins/verify-claims/skills/verify-claims/SKILL.md`: add the canonical model-independent rule for `audit_experiment.sh`: verifier output is written to a temp file and atomically moved into the final findings file only on success, so an empty final findings file while the verifier is running is not evidence of a hang.
-- `plugins/verify-claims/skills/verify-claims/scripts/audit_experiment.sh`: print a short stderr note before invoking the verifier with the same mechanism, so direct research-audit users see it too.
 - `plugins/aar-engineering/skills/ship-change/SKILL.md`: add the ship-change operator norm in generic terms: Claude-family reviews may be quiet for several minutes; do not kill/retry purely because the findings file is still absent/empty; use the runbook for local debug thresholds.
-- `plugins/aar-engineering/skills/ship-change/RUNBOOK.md`: add the as-built thresholds from issue #96: 0-5 minutes is normal on this fleet, at 5 minutes inspect process/log state once without interrupting, and at 10 minutes treat the run as suspicious unless there is evidence of progress.
-- `plugins/aar-engineering/skills/ship-change/scripts/wf.sh`: print a concise generic note immediately before invoking a review, so the expectation appears in terminal output when the author is waiting. Do not hardcode minute thresholds in the script.
+- `plugins/aar-engineering/skills/ship-change/RUNBOOK.md`: add the as-built thresholds from issue #96: 0-5 minutes is normal on this fleet, at 5 minutes inspect state once without interrupting, and at 10 minutes treat the run as suspicious unless there is evidence of progress. Include the concrete check: for Claude, verify that the process is alive; do not treat empty logs as a hang signal.
+- `plugins/aar-engineering/skills/ship-change/scripts/wf.sh`: extend the existing pre-review note with a concise generic cue, so the expectation appears in terminal output when the author is waiting. Do not hardcode minute thresholds in the script.
 - Plugin manifests: bump `aar-engineering` from `0.3.17` to `0.3.18` and `verify-claims` from `0.7.0` to `0.7.1` because both shipped plugins change.
 
 Keep this as guidance. Do not add a hard timeout in `wf.sh` or `audit_experiment.sh`: timeout policy would need a separate design because review duration depends on prompt size, model state, and provider latency. This issue is specifically about preventing premature human-agent reactions during the normal quiet window.
@@ -31,16 +30,21 @@ Keep this as guidance. Do not add a hard timeout in `wf.sh` or `audit_experiment
 
 ## Blast radius
 
-This touches `aar-engineering` docs/output, `verify-claims` docs/output, and both plugin versions. It does not change review execution, PR posting, merge gates, branch protection, verifier selection, or timeout behavior.
+This touches `aar-engineering` docs/output, `verify-claims` docs, and both plugin versions. It does not change review execution, PR posting, merge gates, branch protection, verifier selection, or timeout behavior.
 
-The runtime blast radius is low: every ship-change review prints one extra expectation line before the potentially quiet reviewer call, and every direct `audit_experiment.sh` invocation prints one extra mechanism line before invoking the verifier. Both lines should be concise so they reduce chatter rather than add a new source of noise.
+The runtime blast radius is low: every ship-change review extends an existing expectation line before the potentially quiet reviewer call. Direct `audit_experiment.sh` behavior is unchanged.
 
 ## Design review response
 
 Claude design review found two HIGH issues in the first proposal:
 
 - Threshold values are instance-tuned and should not be hardcoded into generic product surfaces. Accepted: `SKILL.md` and `wf.sh` get the generic quiet-review rule; concrete 0-5 / 5 / 10 minute thresholds live only in `ship-change/RUNBOOK.md`.
-- The empty-output behavior belongs to `verify-claims/audit_experiment.sh`, not `ship-change`. Accepted: the canonical mechanism note and direct stderr cue are added in `verify-claims`, with `ship-change` referencing that behavior.
+- The empty-output behavior belongs to `verify-claims/audit_experiment.sh`, not `ship-change`. Accepted: the canonical mechanism note is added in `verify-claims`, with `ship-change` referencing that behavior.
+
+Claude design re-review found no HIGH issues and raised two MED issues:
+
+- A new `audit_experiment.sh` stderr line would not reach the ship-change authors who hit #96 and would affect direct research-audit users without an incident. Accepted: keep the canonical mechanism note in `verify-claims/SKILL.md`, but do not change audit script runtime output.
+- `wf.sh` already has a pre-review note. Accepted: extend that line instead of adding a parallel one, and make the RUNBOOK's five-minute inspection step say to check the process first because Claude logs can be empty until completion.
 
 ## Rollout + rollback
 

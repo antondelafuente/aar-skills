@@ -71,6 +71,22 @@ shouldn't be able to bypass its own gate). Instead the owner edits the rule:
 - **Revoke an engineer App.** Uninstalling / revoking an engineer App immediately stops it authoring/reviewing —
   the clean unwind for a compromised identity (combined with relaxing require-approvals so merges aren't trapped).
 
+## Reviewer latency / debug policy
+
+Claude-family reviews can be quiet while the model is working. On this fleet, treat 0-5 minutes as normal for
+`wf.sh design-review`, `wf.sh code-review`, and the final review inside `wf.sh finish`: do not kill, retry, or
+narrate concern during that window. Re-measure these thresholds for other installs; they are this fleet's
+as-built operating policy, not a provider SLA.
+
+At 5 minutes, inspect state once without interrupting the reviewer. For the default Claude verifier, check that
+the verifier process is still alive; do not treat an empty log as a hang signal. For streaming verifier commands,
+also check the run log. At 10 minutes, treat the run as suspicious unless there is concrete evidence of progress.
+
+The underlying `verify-claims` engine writes through an internal temp file and atomically moves it to the final
+findings path only after the verifier exits successfully. In `wf.sh`, that means the final review file
+(`/tmp/wf_*.md`) can remain missing or empty until the full response completes; that alone is not evidence of a
+hang.
+
 ## Token / identity rotation
 
 - **`GH_TOKEN`** (author/driver auth). Rotate: mint a new fine-grained PAT (repo: contents + pull_requests),

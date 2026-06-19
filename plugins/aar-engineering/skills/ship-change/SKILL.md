@@ -40,6 +40,9 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
 - **Cross-family review, both gates.** The design (`--scaffold`) and the code (`--code`) are reviewed by the
   OPPOSITE family from the author. Pass the author family to review/finish commands. Codex-authored reviews also
   need `AUDIT_VERIFIER_CMD` to point at a Claude-family CLI so the model review is genuinely cross-family.
+- **Quiet review is normal.** Claude-family reviews can be quiet for several minutes. The underlying verifier
+  writes findings atomically only after completion, so an absent or empty findings file is not by itself a hang
+  signal; use the runbook's local thresholds before inspecting or retrying.
 - **Engineer identities auto-upgrade when configured.** `WF_ENGINEER_TOKEN_CMD_CLAUDE` /
   `WF_ENGINEER_TOKEN_CMD_CODEX` mint GitHub tokens for the family bot identities; `WF_ENGINEER_GIT_AUTHOR_*`
   gives `Name <email>` for strict `open` commits. If identity config is absent, the driver warns and uses
