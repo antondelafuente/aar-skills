@@ -41,10 +41,13 @@ open/closed lifecycle:
 - **`other`** — catch-all / taxonomy-gap signal: this issue's disposition doesn't fit the five above. A
   recurring `other` is the trigger to evolve the vocabulary (the escape hatch that keeps the scheme honest).
 
-Disposition is **mandatory and exactly-one** per open issue — an issue with zero (or two) is what enforcement
-flags. **Default for an un-triaged new issue:** no disposition label = "not yet triaged" (visibly distinct
-from `needs-shaping`, which is a *judged* "too vague"). Triage's job is to give every un-triaged issue exactly
-one disposition.
+**The invariant (F2 — decided: option A):** every open issue is EITHER **unlabeled** (untriaged — awaiting
+triage) OR carries **exactly one** disposition. No-label is the explicit default for a brand-new issue and IS
+the untriaged state — there is **no** `needs-triage` label; the *absence* of a disposition is "untriaged."
+This is deliberately distinct from `needs-shaping` (a *judged* "too vague"): no-label = "nobody has judged
+this yet," `needs-shaping` = "judged, and it's not yet actionable." Enforcement flags only an issue carrying
+**two or more** dispositions; triage's job is to move every unlabeled issue to exactly one. (So "exactly-one"
+holds for every *triaged* issue, with no-label as the single defined exception.)
 
 **Size is a separate axis, not a disposition** — a `needs-design` item can be an afternoon or a multi-week
 program. If routing ever needs quick-win-vs-epic, that's a future `large`/`epic` label, out of scope here.
@@ -65,11 +68,13 @@ Implementation = picking off those `ready` issues as normal single-phase ship-ch
 leaned to *one* PR with a design-gate blocking the implementation commit, architectural-only); #50 gets
 rewritten around this two-phase shape.
 
-**The decomposition contract:** a design doc carries a `## Spawned issues` section listing the `ready` issues
-its design implies; the design author files them after the design PR merges. Mechanical enforcement (refuse to
-call a design "done" until its `ready` issues exist) is **deferred** — it's a forcing-function decision for a
-later iteration, recorded here as a known follow-up, not built now (keep this first design's footprint
-process-level).
+**The decomposition contract (F3 — the machine-readable link):** a design doc carries a `## Spawned issues`
+section listing the `ready` issues its design implies, and **each spawned `ready` issue carries a
+`design: #<design-issue>` pointer** in its body back to its origin. That pointer is the explicit link between a
+landed design and its implementation issues (what the Phase-2 gate keys off). The design author files the
+issues after the design PR merges. Mechanical enforcement (refuse to call a design "done" until its `ready`
+issues exist) is **deferred** — a forcing-function decision for a later iteration, recorded as a known
+follow-up, not built now (keep this first design's footprint process-level).
 
 ### 3. Enforcement — staged (no new CI infra to start)
 
@@ -78,31 +83,44 @@ cross-family review) + the driver-side `wf.sh` gates + process discipline. The c
 deliberately *recorded, not blocking*. Match that trajectory:
 
 - **Phase 1 (now) — process / advisory.** `file-feedback` assigns a disposition at filing; `triage-feedback`
-  maintains it (backfill, the `blocked → ready` transition when a blocker closes, re-disposition). Recorded,
-  not mechanically blocking — matches how the classifier already works, zero new infra, immediately useful.
-- **Phase 2 (next) — driver-side teeth, reusing `wf.sh`.** (a) `ship-change finish` refuses to merge a PR
-  that closes a `needs-design` issue unless its design landed (**this advances #50**); (b) #49's auto-handler
-  acts on `ready` only; `blocked`/`needs-shaping`/`parked`/`other` are never auto-handled. No GitHub Actions
-  needed — driver-side, like the rest of the pipeline.
-- **Phase 3 (later, only if process slips) — a GitHub Action** for the exactly-one-disposition invariant +
-  `blocked → needs-triage` auto-flip. Pairs with the already-planned RUNBOOK follow-up to make `.aar-ci` /
-  `design-gate` *required status checks*. Explicitly out of scope until earned.
+  maintains it (backfill, the `blocked → untriaged` transition when a blocker closes — clear the label so
+  triage re-dispositions it, usually to `ready` — and general re-disposition). Recorded, not mechanically
+  blocking — matches how the classifier already works, zero new infra, immediately useful.
+- **Phase 2 (next) — driver-side teeth, reusing `wf.sh`.** (a) **code PRs close `ready` issues, never a
+  `needs-design` issue directly** — a `needs-design` issue is closed when its *design* lands; its spawned
+  `ready` children (linked via the `design: #<n>` pointer) are what implementation PRs close. `ship-change
+  finish` enforces this: it refuses to merge a code PR that closes a `needs-design`-labelled issue and points
+  the author at that issue's `ready` children instead (**this advances #50**). (b) #49's auto-handler acts on
+  `ready` only; `needs-design`/`needs-shaping`/`blocked`/`parked`/`other` are never auto-handled. No GitHub
+  Actions needed — driver-side, like the rest of the pipeline.
+- **Phase 3 (later, only if process slips) — a GitHub Action** for the invariant (≤ one disposition; flag any
+  issue carrying two or more) + a `blocked → untriaged` auto-flip when a blocker closes. Pairs with the
+  already-planned RUNBOOK follow-up to make `.aar-ci` / `design-gate` *required status checks*. Explicitly out
+  of scope until earned.
 
-### 4. Canonical home for the rules
+### 4. Canonical home — product-owned (F1)
 
-The disposition vocabulary + the assign/maintain/enforce rules live in **one** canonical place — a short
-section in `AGENTS.md` (the agent-neutral constitution) — referenced by `file-feedback` (assigns) and
-`triage-feedback` (maintains). One home per fact; the skills point at it.
+The public tracker is a **product surface**, so its disposition machinery is **product-owned**, not instance
+state. The disposition vocabulary, the **label set** (names + colors — so every install of the product
+creates the same labels), and the assign/maintain/enforce **transition procedure** are defined once in
+`AGENTS.md` (the agent-neutral constitution). The instance `file-feedback` (assigns) and `triage-feedback`
+(maintains) skills only **point at / invoke** that product definition — they never redefine the vocabulary,
+the label set, or the rules. One home per fact. (Fully productizing those two skills is a separate, larger
+move; this design only fixes the *ownership* of the definition they consume.)
 
 ## Spawned issues (this design's `ready` decomposition)
 
 On merge, this design spawns these `ready` issues (each a normal single-phase ship-change run):
 
-1. **Create the six disposition labels** (+ colors) via `gh label create`. (Instance/mechanical.)
-2. **Document the vocabulary + rules in `AGENTS.md`** (the canonical home) — product.
-3. **Wire `file-feedback`** to assign a disposition at filing (instance skill).
-4. **Wire `triage-feedback`** to maintain dispositions: backfill, `blocked → ready` transitions, re-disposition
-   (instance skill).
+1. **Define the disposition system in `AGENTS.md`** (the product-owned canonical home): the six labels +
+   colors (the label set), the untriaged invariant, the `design: #<n>` pointer convention, and the
+   assign/maintain/enforce procedure. (Product — lands first; everything else points at it.)
+2. **Create the six labels on the tracker** per that product-defined set via `gh label create`. (Mechanical
+   application of the product definition, not a redefinition.)
+3. **Wire `file-feedback`** to assign a disposition at filing by *pointing at* the AGENTS.md definition
+   (instance skill → product rules).
+4. **Wire `triage-feedback`** to maintain dispositions per the AGENTS.md procedure: backfill, the
+   `blocked → untriaged` transition, re-disposition (instance skill → product rules).
 5. **Backfill the ~20 open issues** with dispositions (one-time triage) — folds into / coordinates with #28.
 6. **#49**: auto-handler acts on `ready` only — update #49's scope to key off this label.
 7. **#50**: rewrite around the two-phase engine (this design supersedes its one-phase lean); wire the Phase-2
