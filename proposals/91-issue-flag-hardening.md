@@ -12,12 +12,14 @@ wrapper claims to block: `gh issue comment <N> --delete-last --yes` (deletes a c
 
 ## Approach
 
-Add a **flag denylist** to the `issue` arm, applied to the full arg vector after the subcommand allowlist:
-reject `--delete-last`, `--edit-last`, and `--web` anywhere in the args, failing closed with a clear
-message. These are the interactive/destructive flags `gh issue create|comment` expose; the authoring path
-only needs non-interactive body/title/label flags, so denying these costs nothing legitimate. Keeping it a
-targeted denylist (not a full positive parse of every allowed flag) matches the actual risk without making
-the wrapper brittle to benign `gh` flag additions.
+**Contract:** the authoring path accepts only non-interactive title/body/label inputs; it rejects every
+INTERACTIVE form (`--web`/`-w` browser, `--editor`/`-e` editor) and DESTRUCTIVE form (`--delete-last`,
+`--edit-last`) that `gh issue create|comment` expose — **both long and short spellings**. A flag denylist
+on the full arg vector (after the subcommand allowlist) enforces this, failing closed with a clear message.
+A *missing* `-b/-t` makes `gh` prompt interactively, which fails closed on this no-tty exec path — a usage
+error, not an action, so it needs no separate guard. Keeping it a targeted denylist (not a full positive
+parse of every benign flag) matches the actual risk without making the wrapper brittle to `gh` flag
+additions like `-a/--assignee` or `-m/--milestone`.
 
 ## Alternatives considered
 
