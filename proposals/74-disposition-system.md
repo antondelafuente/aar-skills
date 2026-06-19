@@ -68,13 +68,15 @@ Implementation = picking off those `ready` issues as normal single-phase ship-ch
 leaned to *one* PR with a design-gate blocking the implementation commit, architectural-only); #50 gets
 rewritten around this two-phase shape.
 
-**The decomposition contract (F3 — the machine-readable link):** a design doc carries a `## Spawned issues`
-section listing the `ready` issues its design implies, and **each spawned `ready` issue carries a
-`design: #<design-issue>` pointer** in its body back to its origin. That pointer is the explicit link between a
-landed design and its implementation issues (what the Phase-2 gate keys off). The design author files the
-issues after the design PR merges. Mechanical enforcement (refuse to call a design "done" until its `ready`
-issues exist) is **deferred** — a forcing-function decision for a later iteration, recorded as a known
-follow-up, not built now (keep this first design's footprint process-level).
+**The decomposition contract (F2/F3 — the machine-readable link):** the **canonical link is the child
+issue's `design: #<design-issue>` pointer**. The design issue number is stable *before* merge, so each
+spawned `ready` issue can reference it; the link lives on the children, where it's authoritative. The design
+doc's `## Spawned issues` section is a **human-readable intent list** (the units the design implies, by
+title/scope), authored before merge — it deliberately does **not** carry issue numbers, since the issues are
+filed *after* the design PR merges (F2: a pre-merge doc can't hold post-merge issue links). So the Phase-2
+gate keys off the children's `design:` pointer, not the doc section. Mechanical enforcement (refuse to call a
+design "done" until its `ready` issues exist) is **deferred** — a forcing-function decision for a later
+iteration, recorded as a known follow-up, not built now (keep this first design's footprint process-level).
 
 ### 3. Enforcement — staged (no new CI infra to start)
 
@@ -98,29 +100,40 @@ deliberately *recorded, not blocking*. Match that trajectory:
   already-planned RUNBOOK follow-up to make `.aar-ci` / `design-gate` *required status checks*. Explicitly out
   of scope until earned.
 
-### 4. Canonical home — product-owned (F1)
+### 4. Canonical home + the product/instance boundary (F1, F4)
 
-The public tracker is a **product surface**, so its disposition machinery is **product-owned**, not instance
-state. The disposition vocabulary, the **label set** (names + colors — so every install of the product
-creates the same labels), and the assign/maintain/enforce **transition procedure** are defined once in
-`AGENTS.md` (the agent-neutral constitution). The instance `file-feedback` (assigns) and `triage-feedback`
-(maintains) skills only **point at / invoke** that product definition — they never redefine the vocabulary,
-the label set, or the rules. One home per fact. (Fully productizing those two skills is a separate, larger
-move; this design only fixes the *ownership* of the definition they consume.)
+Two layers, honestly separated — the earlier "product-owned, install-wide" framing over-claimed, since the
+filing/triage mechanism is still instance-bound:
+
+- **The definition (constitutional, lightweight).** `AGENTS.md` carries ONLY the *invariant*
+  (untriaged-XOR-exactly-one), the disposition *label names*, and the `design: #<n>` pointer convention —
+  plus a pointer to the operational home. Just enough that the scheme is versioned and an adopter can see
+  what the labels mean; **not** the full procedure (dumping the whole vocabulary+labelset+transitions into
+  the constitution would overload it — F4).
+- **The mechanism (instance, this tracker).** The operational assign/maintain procedure — how `file-feedback`
+  assigns at filing, the `gh`/`gh-as-engineer` commands, the transition steps — lives in the instance
+  `file-feedback`/`triage-feedback` skills, which target *this* tracker (`antondelafuente/aar-skills`).
+
+**Scope, stated honestly (F1):** this builds the disposition system for **this tracker** (the upstream program
+repo), not an install-wide product feature. The *definition* is documented in the product so it's versioned
+and adopter-visible; the *filing/triage mechanism* is instance-bound for now (Anton-specific repo + paths).
+Productizing that mechanism — a shipped `aar-engineering` tracker/triage surface with repo + config seams so a
+fresh install works without instance wiring — is **explicit future work**, tracked separately, not claimed
+here.
 
 ## Spawned issues (this design's `ready` decomposition)
 
 On merge, this design spawns these `ready` issues (each a normal single-phase ship-change run):
 
-1. **Define the disposition system in `AGENTS.md`** (the product-owned canonical home): the six labels +
-   colors (the label set), the untriaged invariant, the `design: #<n>` pointer convention, and the
-   assign/maintain/enforce procedure. (Product — lands first; everything else points at it.)
-2. **Create the six labels on the tracker** per that product-defined set via `gh label create`. (Mechanical
-   application of the product definition, not a redefinition.)
-3. **Wire `file-feedback`** to assign a disposition at filing by *pointing at* the AGENTS.md definition
-   (instance skill → product rules).
-4. **Wire `triage-feedback`** to maintain dispositions per the AGENTS.md procedure: backfill, the
-   `blocked → untriaged` transition, re-disposition (instance skill → product rules).
+1. **Add the definition to `AGENTS.md`** (lightweight, per §4/F4): the disposition label *names*, the
+   untriaged-XOR-exactly-one invariant, the `design: #<n>` pointer convention, and a pointer to the
+   operational home. NOT the full procedure. (Product — lands first; everything else points at it.)
+2. **Create the six labels on the tracker** (+ colors) via `gh label create`, per the names in AGENTS.md.
+   (Mechanical.)
+3. **Wire `file-feedback`** to assign a disposition at filing — the operational *how* (commands, when) lives
+   here in the instance skill, referencing the AGENTS.md invariant/names.
+4. **Wire `triage-feedback`** to maintain dispositions — the operational procedure (backfill, the
+   `blocked → untriaged` transition, re-disposition) lives here in the instance skill.
 5. **Backfill the ~20 open issues** with dispositions (one-time triage) — folds into / coordinates with #28.
 6. **#49**: auto-handler acts on `ready` only — update #49's scope to key off this label.
 7. **#50**: rewrite around the two-phase engine (this design supersedes its one-phase lean); wire the Phase-2
@@ -152,6 +165,12 @@ amendments to #28/#49/#50. No code changes in this PR itself. SWE-pipeline + tra
 
 This is the **first two-phase design** — it dogfoods `finish --design` (#75) end-to-end: doc-only PR, gated on
 the cross-family `--scaffold` approval, merged, then the `ready` issues filed. Each spawned issue rolls out
-independently via its own ship-change run; Phase 1 (process) is reversible by dropping the labels and the
-skill instructions; Phases 2/3 are gated behind their own issues. Rollback of this design = revert the doc and
-close the spawned issues.
+independently via its own ship-change run; Phases 2/3 are gated behind their own issues.
+
+**Rollback (F3 — non-destructive):** rollback is *disabling the automation + deprecating the labels in place*,
+NOT deleting them — deleting a GitHub label removes its assignments from every issue/PR, which is
+irreversible. So: (1) revert the skill instructions (stop assigning/acting on dispositions); (2) leave the
+labels in place but mark them deprecated (a renamed prefix or a description note), so the historical
+issue↔disposition mapping survives. If labels ever must be deleted, export the issue→label mapping first. The
+design doc itself reverts cleanly (it's just a doc); the labels are the only stateful, not-freely-deletable
+artifact.
