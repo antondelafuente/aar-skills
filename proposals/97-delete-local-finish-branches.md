@@ -10,15 +10,17 @@ This just happened in `research-lab`: three finished workflow branches remained 
 
 ## Approach
 
-After `gh pr merge` succeeds and `git worktree remove --force "$WT"` runs, have `wf.sh finish` attempt to delete the local branch it just finished.
+`wf.sh` already passes `gh pr merge --delete-branch`, which deletes the remote PR branch and can also try to delete a local branch. In this workflow that local deletion cannot do the whole job because the branch is still checked out in the temporary worktree when `gh pr merge` runs. The explicit cleanup should therefore happen after `git worktree remove --force "$WT"` closes that ordering gap.
+
+After `gh pr merge` succeeds and `git worktree remove --force "$WT"` runs, have `wf.sh finish` attempt to delete exactly the local branch it just finished (`$BR`).
 
 Safety rules:
 
-- Only consider branches matching `change/*`; never auto-delete arbitrary branch names.
+- Delete exactly `$BR`, guarded by an assertion that `$BR` matches `change/*`; never scan or bulk-delete branches.
 - Only delete after a successful merge. A blocked or failed `finish` must leave the branch and worktree alone for repair.
 - Verify no worktree is still using the branch before deleting it.
 - Use `git branch -D "$BR"` because the PR is squash-merged, so `git branch -d` can refuse even though GitHub already merged the reviewed diff.
-- Treat cleanup as best-effort. If local branch deletion fails, log a warning but still report the PR as shipped.
+- Treat cleanup as best-effort and follow the existing cleanup pattern: deletion failures log `WARN` and never short-circuit the final `SHIPPED` line under `set -euo pipefail`.
 
 Keep cleanup in `wf.sh`, not in GitHub settings. GitHub can delete the remote PR branch, but only the local workflow driver can remove local branches on the controller.
 

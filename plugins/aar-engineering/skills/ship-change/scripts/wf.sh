@@ -789,8 +789,25 @@ Split into one design PR per doc."
   note "gate clean (no HIGH) + checks passed -> marking ready + merging PR #$PR @ $LOCAL_SHA"
   gh_author "$ATOK" -R "$REPO" pr ready "$PR" >/dev/null 2>&1 || true
   gh_author "$ATOK" -R "$REPO" pr merge "$PR" --squash --delete-branch --match-head-commit "$LOCAL_SHA" || die "merge failed (head may have moved since review — re-run finish)"
-  # 4. cleanup: remove the worktree (derive the main checkout FROM the worktree), sync main
+  # 4. cleanup: remove the worktree (derive the main checkout FROM the worktree), delete the local workflow
+  #    branch if it is no longer checked out anywhere, then sync main. `gh pr merge --delete-branch` deletes
+  #    the remote PR branch, but the local branch is still checked out in $WT at merge time, so local cleanup
+  #    has to happen after the worktree is removed. Best-effort only: a cleanup failure must not turn an
+  #    already-merged PR into a failed run.
   git -C "$MAIN_CO" worktree remove --force "$WT" 2>/dev/null || true
+  if [[ "$BR" == change/* ]]; then
+    if git -C "$MAIN_CO" show-ref --verify --quiet "refs/heads/$BR"; then
+      if git -C "$MAIN_CO" worktree list --porcelain | grep -Fxq "branch refs/heads/$BR"; then
+        note "WARN: local workflow branch $BR is still checked out in a worktree; leaving it in place"
+      elif git -C "$MAIN_CO" branch -D "$BR" >/dev/null 2>&1; then
+        note "deleted local workflow branch $BR"
+      else
+        note "WARN: could not delete local workflow branch $BR; remove it manually if stale"
+      fi
+    fi
+  else
+    note "WARN: not deleting local non-workflow branch $BR"
+  fi
   git -C "$MAIN_CO" pull --ff-only -q origin main 2>/dev/null || note "WARN: could not ff-only pull main ($MAIN_CO) — reconcile manually"
   local_manifest=0; for p in "${PATHS[@]}"; do case "$p" in */plugin.json|*marketplace.json) local_manifest=1;; esac; done
   [ "$local_manifest" = 1 ] && note "a plugin manifest changed — refresh installs: claude plugin marketplace update aar-skills && claude plugin update <name>@aar-skills"
