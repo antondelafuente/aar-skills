@@ -16,15 +16,22 @@ that definition. It's what #79/#80 (the skills) and #49 (the auto-handler) refer
 Add one short section to `AGENTS.md` (after Rules) — constitutional and lightweight, **not** the operational
 procedure (per #74 §4 / review F4):
 
-- **The six dispositions, one line each:** `ready` (actionable now, no unresolved design — per #74 review
-  LOW3, *not* strictly low-blast: a design-derived child can touch architectural surfaces yet still be
-  `ready` because its design is settled), `needs-design`, `needs-shaping`, `blocked` (carries `blocked-by:
-  #N`), `parked`, `other` (taxonomy-gap signal).
+- **The six dispositions, one line each:** `ready`, `needs-design`, `needs-shaping`, `blocked` (carries
+  `blocked-by: #N`), `parked`, `other` (taxonomy-gap signal).
+- **`ready` reconciled (review F1):** defined as "actionable, **no unresolved design**" — this AGENTS.md text
+  is now the canonical definition and *refines* #74's initial "low-blast" bullet (a design-derived child can
+  touch architectural surfaces yet still be `ready`). To avoid silently widening the auto-handler, the text
+  states `ready` = **eligible** for auto-handling, not blind auto-merge: the auto-handler still runs the full
+  cross-family review + checks, and the precise boundary is **#49's** to define. (A reconciliation note is
+  posted on #74.)
 - **The invariant:** every open issue is EITHER unlabeled (untriaged) OR carries exactly one disposition;
   enforcement flags only two-or-more.
 - **The `design: #<n>` pointer convention:** a design-spawned `ready` issue references its origin design issue;
   that pointer (on the child) is the canonical design→implementation link.
-- **A pointer** to the operational home: the `file-feedback` (assign) / `triage-feedback` (maintain) skills.
+- **Operational home, qualified (review F2):** AGENTS.md points at the assign/maintain *procedure* as
+  **instance + follow-up** — this program's `file-feedback`/`triage-feedback` skills (#79/#80, not yet
+  landed); a different install wires its own. AGENTS.md holds only the definition, keeping the product/instance
+  split honest.
 
 ## Alternatives considered
 
