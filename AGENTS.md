@@ -50,12 +50,12 @@ layer that builds them).
   Agent Skills layout; it makes relative references work for plugin installs AND symlink
   installs identically).
 - **Agent-filed Issues use the engineer identity, not the human's.** When an agent opens a GitHub
-  Issue, author it through the family bot token — `GH_TOKEN="$(eval "$WF_ENGINEER_TOKEN_CMD_<FAM>")"
-  gh issue create …` — the same `*-engineer[bot]` identity the SWE pipeline uses for reviews and triage
-  comments, never the ambient/human `gh` auth (raw `gh issue create` falls back to the human owner). The
-  `file-feedback` skill already does this; the rule generalizes it to *every* Issue an agent opens
-  (ad-hoc backlog, `ship-change` decompositions, follow-ups). Backfilling existing human-authored Issues
-  is not possible (GitHub can't reauthor) and not attempted.
+  Issue (or comments on one), do it through the canonical `gh-as-engineer <claude|codex> issue create …`
+  helper — the same `*-engineer[bot]` identity the SWE pipeline uses for reviews/triage comments, the
+  issue-side counterpart to `wf.sh comment` — never the ambient/human `gh` auth (raw `gh issue create`
+  falls back to the human owner). `file-feedback` and `ship-change` step 0 both route through it; the rule
+  generalizes that to *every* Issue an agent opens (ad-hoc backlog, decompositions, follow-ups).
+  Backfilling existing human-authored Issues is not possible (GitHub can't reauthor) and not attempted.
 - **Every script header cites the real incidents it encodes.** No best-practice guesses.
 - **Version bump on every behavior change** (plugin.json), one CHANGELOG-style line in the
   commit message; tag releases when someone depends on stability.

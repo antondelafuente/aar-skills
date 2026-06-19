@@ -13,41 +13,46 @@ Concrete: the two-track skill-staleness decomposition filed #65, #66, #68–#73 
 during agent work — all authored by the human owner. The #62 fix didn't cover them because it was scoped to
 one skill, not the convention.
 
-The mechanism to do it right already exists: `WF_ENGINEER_TOKEN_CMD_CLAUDE/_CODEX` resolve the
-engineer-identity GitHub App tokens the SWE pipeline already uses for reviews and triage comments. The gap
-is a missing **convention**, not a missing capability.
+The canonical interface already exists: **`gh-as-engineer <claude|codex>`** — the issue-side counterpart to
+`ship-change`'s `wf.sh comment`, which mints the engineer-identity token (`WF_ENGINEER_TOKEN_CMD_<FAM>`) and
+runs `gh` as `*-engineer[bot]`. `file-feedback` already routes through it. The gap is a missing
+**convention** plus one un-migrated point-of-need — not a missing capability or a new tool.
 
 ## Approach
 
-Add a Rule to `aar-skills/AGENTS.md` (the product constitution's "Rules" — where cross-cutting agent
-conventions live, and where, per the section's own framing, the Rule *is* the discipline and hooks are only
-backstops): **an agent that files a GitHub Issue authors it through the family engineer-identity token, the
-same identity the SWE pipeline uses for reviews/comments — never the ambient/human `gh` auth.** State the
-one-liner so it's copy-pasteable:
+Two coordinated edits, both pointing at the existing `gh-as-engineer` helper (no new spelling):
 
-```
-GH_TOKEN="$(eval "$WF_ENGINEER_TOKEN_CMD_<FAM>")" gh issue create …
-```
+1. **Convention — `aar-skills/AGENTS.md` "Rules"** (where cross-cutting agent conventions live, and where
+   the Rule *is* the discipline and hooks are only backstops): an agent that opens or comments on a GitHub
+   Issue does it through `gh-as-engineer <claude|codex> issue create …`, never ambient/human `gh`.
+2. **Point-of-need — `ship-change` SKILL.md step 0**: the "create the Issue if it doesn't exist" line said
+   raw `gh issue create …` (the motivating leak — it's what an agent reads right before filing). Change it
+   to `gh-as-engineer <claude|codex> issue create …`. This is a plugin file change → `aar-engineering`
+   `plugin.json` version bump.
 
-and note that the `file-feedback` skill already does this, so the rule generalizes that behavior to every
-issue an agent opens. (This issue, #89, was itself filed via the token to dogfood it.)
+So all three agent issue-authoring sites — `file-feedback`, `ship-change` step 0, and the AGENTS rule that
+covers everything else — name the *same* canonical helper. (This issue, #89, was itself filed via
+`gh-as-engineer claude` to dogfood it.)
 
 ## Alternatives considered
 
-- **A shared `gh_engineer` helper** (mirroring `ship-change`'s internal `gh_author`) so it's enforced by
-  reuse, not memory. Better long-term, but it's a larger surface (where it lives, PATH availability across
-  substrates and external adopters) than this gap warrants right now; the existing token seam + a Rule
-  closes the actual problem. Left as a noted future enhancement on #89, not blocking.
+- **A new `GH_TOKEN=$(eval …)` spelling in AGENTS** (the first draft). Rejected on review (DRY): it
+  introduced a second way to do what `gh-as-engineer` already does. One canonical interface, named
+  everywhere.
+- **AGENTS Rule only, leave `ship-change` step 0 as raw `gh`.** Rejected on review (the HIGH): it leaves
+  the exact point-of-need that motivated the issue still authoring as the human — a Rule the nearest
+  instruction contradicts. The point-of-need must move too.
 - **A pre-commit/CI check.** Can't see Issue authorship from a diff; wrong layer. The Rules section already
-  says the hook is a backstop, not the discipline — the discipline is the Rule.
-- **Route everything through `file-feedback`.** Wrong tool for design-decomposition follow-ups and other
-  non-feedback issues; the convention should hold regardless of which path opens the issue.
+  says the hook is a backstop, not the discipline.
+- **Route everything through `file-feedback`.** Wrong tool for decomposition follow-ups and other
+  non-feedback issues; the convention should hold regardless of which path opens the Issue.
 
 ## Blast radius
 
-- One doc: `aar-skills/AGENTS.md` "Rules". No code, no plugin, no behavior change → no `plugin.json` version
-  bump (the version-bump check scopes to `plugins/*`; this is a repo-root doc). Affects agent behavior by
-  convention, the same way every other Rule does.
+- `aar-skills/AGENTS.md` "Rules" (repo-root convention) + `ship-change` SKILL.md step-0 line + the
+  `aar-engineering` `plugin.json` version bump that the SKILL change requires. Documentation/convention
+  only — no script logic changes; `gh-as-engineer` already exists and is unchanged. Affects agent behavior
+  by convention, the same way every other Rule does.
 
 ## Rollout + rollback
 
