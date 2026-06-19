@@ -623,18 +623,24 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
   # Allowlist: this is the engineer-AUTHORING path (#89), not general issue admin. Refuse anything but
   # create/comment so a typo or a broad call can't run close/edit/delete/lock under the engineer token.
   case "$GHSUB" in create|comment) ;; *) die "wf.sh issue: only 'create' and 'comment' are allowed (got '$GHSUB'); this is the engineer-authoring path, not general issue ops" ;; esac
-  # Flag ALLOWLIST (#91): the subcommand allowlist isn't enough, and a denylist is whack-a-mole (it misses
-  # short forms, `--web=true`, `-we` bundles, future interactive flags). Instead permit ONLY the
-  # non-interactive authoring flags and reject every other `-`-prefixed arg — fails CLOSED on all
-  # interactive/destructive/unknown forms at once (`--web`/`-w`/`--web=true`/`-we`, `--editor`/`-e`,
-  # `--delete-last`, `--edit-last`, …). Non-flag args (the issue number, flag values) pass through; a
-  # legit-but-wrong flag for the subcommand just fails at `gh`, harmlessly. Strip any `=value` before matching.
-  for a in "$@"; do case "$a" in
-    -*) case "${a%%=*}" in
-          -R|--repo|-t|--title|-b|--body|-F|--body-file|-l|--label|-a|--assignee|-m|--milestone|-p|--project) ;;
-          *) die "wf.sh issue: flag '$a' is not allowed on the authoring path; permitted (non-interactive create/comment): -R -t -b -F -l -a -m -p" ;;
-        esac ;;
-  esac; done
+  # Flag ALLOWLIST (#91): the subcommand allowlist isn't enough, and a denylist is whack-a-mole (misses
+  # short forms, `--web=true`, `-we` bundles, future interactive flags). Permit ONLY the non-interactive
+  # authoring flags; reject every other `-`-prefixed arg — fails CLOSED on all interactive/destructive/
+  # unknown forms at once. STATEFUL scan: every allowed flag TAKES A VALUE, so the token right after a
+  # bare (non-`=`) allowed flag is its value and must be skipped — else a legit value beginning with `-`
+  # (e.g. `--body-file -` for stdin, or a body like `-x`) would be misread as a flag and rejected.
+  want_val=0
+  for a in "$@"; do
+    if [ "$want_val" = 1 ]; then want_val=0; continue; fi   # this token is the previous flag's value
+    case "$a" in
+      -*) case "${a%%=*}" in
+            -R|--repo|-t|--title|-b|--body|-F|--body-file|-l|--label|-a|--assignee|-m|--milestone|-p|--project)
+              case "$a" in *=*) ;; *) want_val=1 ;; esac ;;   # bare form → next token is the value
+            *) die "wf.sh issue: flag '$a' is not allowed on the authoring path; permitted (non-interactive create/comment): -R -t -b -F -l -a -m -p" ;;
+          esac ;;
+      *) ;;   # positional (subcommand, issue number)
+    esac
+  done
   ATOK=$(author_token_optional "$AUTHOR")          # engineer token, or "" with the configured fallback
   [ -n "$ATOK" ] || need_ambient_gh
   gh_author "$ATOK" issue "$@" || die "wf.sh issue: 'gh issue $GHSUB' failed — failing closed"
