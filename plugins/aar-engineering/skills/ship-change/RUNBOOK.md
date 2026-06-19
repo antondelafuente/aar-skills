@@ -39,6 +39,10 @@ check). Wiring either as a GitHub-required status is a tracked follow-up (needs 
   `pull_requests: write` *alone* it can *post* a review, but it reads as `author_association: NONE` and the
   approval does **not** satisfy the gate (`reviewDecision: REVIEW_REQUIRED`). Grant `contents: write` and
   re-accept the installation's permission request.
+- **`issues: read` — only for PRIVATE installs.** The close-gate (`finish` enforcing the two-phase close
+  contract, #50/#85) reads each closing issue's disposition labels. On a **public** repo (like `aar-skills`)
+  this works under the existing `contents`+`pull_requests` perms — no change needed. A **private** install must
+  add **`issues: read`** to both engineer Apps (+ re-accept), or the gate fails closed and blocks every merge.
 - **Instance wiring (not product):** each App's id + private key live on the instance under e.g.
   `~/.config/<family>-engineer/`. `WF_ENGINEER_TOKEN_CMD_CLAUDE` / `WF_ENGINEER_TOKEN_CMD_CODEX` mint fresh
   installation tokens per use (they expire ~1h); `WF_ENGINEER_GIT_AUTHOR_CLAUDE` /

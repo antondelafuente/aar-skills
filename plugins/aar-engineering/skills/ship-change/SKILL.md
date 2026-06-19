@@ -124,6 +124,16 @@ wf.sh finish <WORKTREE> <author> --design # gate on --scaffold APPROVE (doc-only
 on real code — use plain `finish` for any PR with code). The spawned `ready` issues are then implemented as
 normal single-phase ship-change runs.
 
+### The close-gate (enforced in `finish`)
+
+`finish` enforces the two-phase **close contract** on the issues a PR closes (before the merge approval):
+- **code `finish`:** must close **≥1** issue, and **every** closing issue's disposition is `ready`.
+- **`finish --design`:** must close **exactly one** issue, disposition `needs-design`.
+
+So you can't merge code that closes a `needs-design` (or untriaged/mislabelled) issue — a `needs-design` issue
+is closed only by its *design* landing, which spawns the `ready` children you actually implement. Violations
+block with guidance; `WF_ALLOW_NONREADY_CLOSE=1` overrides but posts a PR comment recording it.
+
 ## Triage discipline (when a review has findings)
 
 Same as the research audits: triage as a **peer**, not a patcher. **ACCEPT** (real → fix in the worktree +
