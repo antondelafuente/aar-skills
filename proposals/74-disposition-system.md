@@ -1,0 +1,176 @@
+# Proposal: a disposition-label system for the issue tracker (#74)
+
+> The canonical design doc (ADR + PR description). Reviewed by `--scaffold` before build. Lands on main.
+> **This is the first two-phase design** — its output is this doc + a set of spawned `ready` issues.
+
+## Problem
+
+Every incoming issue is hand-judged into "straightforward, just do it" vs "needs a design pass first" vs
+"vague wish I'm not sure about." That judgment lives only in someone's head each time. The existing labels
+(`bug` / `enhancement` / `documentation` / `onboarding`) are all **type/topic** — none encode an issue's
+**disposition** (how it should be handled), which is the axis that decides what happens next.
+
+This is the **substrate for three open issues**: #28 (one-time tracker cleanup) would *apply* the scheme,
+#49 (standing triage + auto-handling) would *act* on it, and #50 (design-as-a-gate) is the engine that
+*produces* `ready` issues from `needs-design` ones. They each currently presume a classification that doesn't
+exist. Define it once, here.
+
+Evidence it's needed: a survey of the old `~/orchestrator/AAR_BACKLOG.md` (16 substantive items) showed the
+three obvious buckets capture the main axis but miss two recurring states — `blocked` (decided-but-gated, the
+*most common* state there) and `parked` (real-but-not-now) — and that the truly-`ready` (auto-handleable)
+slice is small. (Full survey: this issue's comment thread.)
+
+## Approach
+
+### 1. The disposition axis (six labels)
+
+A single **disposition** label per open issue, orthogonal to the existing type labels AND to GitHub's
+open/closed lifecycle:
+
+- **`ready`** — straightforward, no design needed, low blast radius. Implement + merge on the cross-family
+  review + checks alone. The **only** bucket auto-handling (#49) may act on autonomously.
+- **`needs-design`** — real and wanted, but requires a design pass before any code (see the two-phase engine
+  below). Implementation is gated until the design lands.
+- **`needs-shaping`** — a direction, not yet actionable; too vague to start. Needs scoping into something
+  concrete before it can become `ready` or `needs-design`.
+- **`blocked`** — decided and ready *in itself* but gated on a prerequisite (another issue, an extraction,
+  an upstream). Carries a **`blocked-by: #N`** pointer in the body. Distinct from `needs-design` (the design
+  is done) and `needs-shaping` (it's clear).
+- **`parked`** — real but deliberately not-now. Distinct from `needs-shaping` (too vague) and from `wontfix`
+  (never). Next action: revisit later.
+- **`other`** — catch-all / taxonomy-gap signal: this issue's disposition doesn't fit the five above. A
+  recurring `other` is the trigger to evolve the vocabulary (the escape hatch that keeps the scheme honest).
+
+**The invariant (F2 — decided: option A):** every open issue is EITHER **unlabeled** (untriaged — awaiting
+triage) OR carries **exactly one** disposition. No-label is the explicit default for a brand-new issue and IS
+the untriaged state — there is **no** `needs-triage` label; the *absence* of a disposition is "untriaged."
+This is deliberately distinct from `needs-shaping` (a *judged* "too vague"): no-label = "nobody has judged
+this yet," `needs-shaping` = "judged, and it's not yet actionable." Enforcement flags only an issue carrying
+**two or more** dispositions; triage's job is to move every unlabeled issue to exactly one. (So "exactly-one"
+holds for every *triaged* issue, with no-label as the single defined exception.)
+
+**Size is a separate axis, not a disposition** — a `needs-design` item can be an afternoon or a multi-week
+program. If routing ever needs quick-win-vs-epic, that's a future `large`/`epic` label, out of scope here.
+
+### 2. The two-phase design engine (this supersedes #50's one-phase lean)
+
+A `needs-design` issue is not implemented directly. It goes through a **design phase** (the `finish --design`
+tooling, shipped in #75) whose deliverable is a PR that:
+1. lands a **design doc** (in `proposals/` today; the `proposals/ → design/` rename is its own tracked
+   ticket), and
+2. is **approved by the opposite-family engineer** via the `--scaffold` merge gate — same approval model as a
+   code PR; the human steers at *authoring* time, not at merge, and
+3. **spawns a set of `ready` issues** — the design's decomposition into implementable units.
+
+Implementation = picking off those `ready` issues as normal single-phase ship-change runs (auto-handleable by
+#49 because they're `ready`). So the design phase is the forcing function that *converts* one fuzzy
+`needs-design` thing into N crisp `ready` things. **This is a change of direction from #50 as written** (which
+leaned to *one* PR with a design-gate blocking the implementation commit, architectural-only); #50 gets
+rewritten around this two-phase shape.
+
+**The decomposition contract (F2/F3 — the machine-readable link):** the **canonical link is the child
+issue's `design: #<design-issue>` pointer**. The design issue number is stable *before* merge, so each
+spawned `ready` issue can reference it; the link lives on the children, where it's authoritative. The design
+doc's `## Spawned issues` section is a **human-readable intent list** (the units the design implies, by
+title/scope), authored before merge — it deliberately does **not** carry issue numbers, since the issues are
+filed *after* the design PR merges (F2: a pre-merge doc can't hold post-merge issue links). So the Phase-2
+gate keys off the children's `design:` pointer, not the doc section. Mechanical enforcement (refuse to call a
+design "done" until its `ready` issues exist) is **deferred** — a forcing-function decision for a later
+iteration, recorded as a known follow-up, not built now (keep this first design's footprint process-level).
+
+### 3. Enforcement — staged (no new CI infra to start)
+
+The repo has **no GitHub Actions / required-status-checks** today; enforcement is branch protection (1
+cross-family review) + the driver-side `wf.sh` gates + process discipline. The classifier and design-gate are
+deliberately *recorded, not blocking*. Match that trajectory:
+
+- **Phase 1 (now) — process / advisory.** `file-feedback` assigns a disposition at filing; `triage-feedback`
+  maintains it (backfill, the `blocked → untriaged` transition when a blocker closes — clear the label so
+  triage re-dispositions it, usually to `ready` — and general re-disposition). Recorded, not mechanically
+  blocking — matches how the classifier already works, zero new infra, immediately useful.
+- **Phase 2 (next) — driver-side teeth, reusing `wf.sh`.** (a) **code PRs close `ready` issues, never a
+  `needs-design` issue directly** — a `needs-design` issue is closed when its *design* lands; its spawned
+  `ready` children (linked via the `design: #<n>` pointer) are what implementation PRs close. `ship-change
+  finish` enforces this: it refuses to merge a code PR that closes a `needs-design`-labelled issue and points
+  the author at that issue's `ready` children instead (**this advances #50**). (b) #49's auto-handler acts on
+  `ready` only; `needs-design`/`needs-shaping`/`blocked`/`parked`/`other` are never auto-handled. No GitHub
+  Actions needed — driver-side, like the rest of the pipeline.
+- **Phase 3 (later, only if process slips) — a GitHub Action** for the invariant (≤ one disposition; flag any
+  issue carrying two or more) + a `blocked → untriaged` auto-flip when a blocker closes. Pairs with the
+  already-planned RUNBOOK follow-up to make `.aar-ci` / `design-gate` *required status checks*. Explicitly out
+  of scope until earned.
+
+### 4. Canonical home + the product/instance boundary (F1, F4)
+
+Two layers, honestly separated — the earlier "product-owned, install-wide" framing over-claimed, since the
+filing/triage mechanism is still instance-bound:
+
+- **The definition (constitutional, lightweight).** `AGENTS.md` carries ONLY the *invariant*
+  (untriaged-XOR-exactly-one), the disposition *label names*, and the `design: #<n>` pointer convention —
+  plus a pointer to the operational home. Just enough that the scheme is versioned and an adopter can see
+  what the labels mean; **not** the full procedure (dumping the whole vocabulary+labelset+transitions into
+  the constitution would overload it — F4).
+- **The mechanism (instance, this tracker).** The operational assign/maintain procedure — how `file-feedback`
+  assigns at filing, the `gh`/`gh-as-engineer` commands, the transition steps — lives in the instance
+  `file-feedback`/`triage-feedback` skills, which target *this* tracker (`antondelafuente/aar-skills`).
+
+**Scope, stated honestly (F1):** this builds the disposition system for **this tracker** (the upstream program
+repo), not an install-wide product feature. The *definition* is documented in the product so it's versioned
+and adopter-visible; the *filing/triage mechanism* is instance-bound for now (Anton-specific repo + paths).
+Productizing that mechanism — a shipped `aar-engineering` tracker/triage surface with repo + config seams so a
+fresh install works without instance wiring — is **explicit future work**, tracked separately, not claimed
+here.
+
+## Spawned issues (this design's `ready` decomposition)
+
+On merge, this design spawns these `ready` issues (each a normal single-phase ship-change run):
+
+1. **Add the definition to `AGENTS.md`** (lightweight, per §4/F4): the disposition label *names*, the
+   untriaged-XOR-exactly-one invariant, the `design: #<n>` pointer convention, and a pointer to the
+   operational home. NOT the full procedure. (Product — lands first; everything else points at it.)
+2. **Create the six labels on the tracker** (+ colors) via `gh label create`, per the names in AGENTS.md.
+   (Mechanical.)
+3. **Wire `file-feedback`** to assign a disposition at filing — the operational *how* (commands, when) lives
+   here in the instance skill, referencing the AGENTS.md invariant/names.
+4. **Wire `triage-feedback`** to maintain dispositions — the operational procedure (backfill, the
+   `blocked → untriaged` transition, re-disposition) lives here in the instance skill.
+5. **Backfill the ~20 open issues** with dispositions (one-time triage) — folds into / coordinates with #28.
+6. **#49**: auto-handler acts on `ready` only — update #49's scope to key off this label.
+7. **#50**: rewrite around the two-phase engine (this design supersedes its one-phase lean); wire the Phase-2
+   `finish` design-gate.
+
+Items 5/6/7 are amendments to existing issues (#28/#49/#50), not new tickets — they get the `ready` (or
+`needs-design`, for #50's rewrite) disposition and a pointer back here.
+
+## Alternatives considered
+
+- **Three buckets (`ready`/`needs-design`/`needs-shaping`) only.** Rejected by the backlog survey: `blocked`
+  and `parked` recur and are mis-served by folding into the three (a `blocked` item is not `needs-design`; a
+  `parked` item is not `needs-shaping` or `wontfix`).
+- **A default disposition of `needs-shaping` for new issues.** Rejected: conflates "nobody judged this yet"
+  with "judged, and it's vague." No-label = un-triaged is the cleaner default.
+- **Big-bang GitHub-Actions enforcement.** Rejected: no Actions infra exists; process + driver-side teeth
+  match the current trajectory and need none. The Action is a Phase-3 option only if process slips.
+- **Keep #50 one-phase (design-gate blocks the implementation commit in one PR).** Rejected per the user: the
+  two-phase shape (separate design PR → spawned `ready` issues) is cleaner and is what the design output should
+  be — a doc + a decomposition, not just "approval to proceed."
+
+## Blast radius
+
+This *design* PR is doc-only (lands this doc via `finish --design`). Its **spawned** `ready` issues touch:
+`AGENTS.md` (product), `file-feedback` + `triage-feedback` (instance skills), GitHub labels (instance), and
+amendments to #28/#49/#50. No code changes in this PR itself. SWE-pipeline + tracker-process layer.
+
+## Rollout + rollback
+
+This is the **first two-phase design** — it dogfoods `finish --design` (#75) end-to-end: doc-only PR, gated on
+the cross-family `--scaffold` approval, merged, then the `ready` issues filed. Each spawned issue rolls out
+independently via its own ship-change run; Phases 2/3 are gated behind their own issues.
+
+**Rollback (F3 — non-destructive):** rollback is *disabling the automation + deprecating the labels in place*,
+NOT deleting them — deleting a GitHub label removes its assignments from every issue/PR, which is
+irreversible. So: (1) revert the skill instructions (stop assigning/acting on dispositions); (2) leave the
+labels in place but mark them deprecated (a renamed prefix or a description note), so the historical
+issue↔disposition mapping survives. If labels ever must be deleted, export the issue→label mapping first. The
+design doc itself reverts cleanly (it's just a doc); the labels are the only stateful, not-freely-deletable
+artifact.
