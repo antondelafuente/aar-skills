@@ -43,6 +43,11 @@ check). Wiring either as a GitHub-required status is a tracked follow-up (needs 
   contract, #50/#85) reads each closing issue's disposition labels. On a **public** repo (like `aar-skills`)
   this works under the existing `contents`+`pull_requests` perms — no change needed. A **private** install must
   add **`issues: read`** to both engineer Apps (+ re-accept), or the gate fails closed and blocks every merge.
+- **`issues: write` — for `wf.sh issue` (agent-filed Issues, #89).** `wf.sh issue <fam> create|comment`
+  authors Issues / issue-comments as the engineer App. Creating or commenting on an Issue needs the App to
+  have **`issues: write`** (on private *and* public repos — unlike the read above). Without it the App can't
+  open the Issue and falls back to ambient/human auth (defeating the attribution). Grant `issues: write` to
+  both engineer Apps (+ re-accept) when using `wf.sh issue`.
 - **Instance wiring (not product):** each App's id + private key live on the instance under e.g.
   `~/.config/<family>-engineer/`. `WF_ENGINEER_TOKEN_CMD_CLAUDE` / `WF_ENGINEER_TOKEN_CMD_CODEX` mint fresh
   installation tokens per use (they expire ~1h); `WF_ENGINEER_GIT_AUTHOR_CLAUDE` /

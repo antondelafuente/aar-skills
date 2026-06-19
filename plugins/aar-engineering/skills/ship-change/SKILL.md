@@ -67,7 +67,7 @@ configured `WF_ENGINEER_TOKEN_CMD_*` commands. `wf.sh` is `scripts/wf.sh` in thi
 
 ```
 # 0. An Issue exists (the backlog item). Create it if not — author it as the ENGINEER identity, not the
-#    human owner: gh-as-engineer <claude|codex> issue create …  → note its number <N>.
+#    human owner: wf.sh issue <claude|codex> create -R <owner/repo> -t "..." -b "..."  → note its number <N>.
 
 # 1. START — worktree + branch + design-doc skeleton
 wf.sh start <N> <slug>            # prints WORKTREE=… BRANCH=… DOC=proposals/<N>-<slug>.md

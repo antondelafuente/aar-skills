@@ -20,39 +20,43 @@ runs `gh` as `*-engineer[bot]`. `file-feedback` already routes through it. The g
 
 ## Approach
 
-Two coordinated edits, both pointing at the existing `gh-as-engineer` helper (no new spelling):
+**Productize the engineer issue-authoring interface as a `wf.sh` subcommand**, so the convention can name a
+shipped command, not an instance-only script (round-2 HIGH). Chosen over shipping the standalone
+`gh-as-engineer` into the plugin after a cross-model check (Claude + two independent `codex exec` passes all
+recommended this) — issue authorship is the same product lifecycle as PR review/comment authorship, so it
+should reuse the *one* engineer-token path, not a second implementation.
 
-1. **Convention — `aar-skills/AGENTS.md` "Rules"** (where cross-cutting agent conventions live, and where
-   the Rule *is* the discipline and hooks are only backstops): an agent that opens or comments on a GitHub
-   Issue does it through `gh-as-engineer <claude|codex> issue create …`, never ambient/human `gh`.
-2. **Point-of-need — `ship-change` SKILL.md step 0**: the "create the Issue if it doesn't exist" line said
-   raw `gh issue create …` (the motivating leak — it's what an agent reads right before filing). Change it
-   to `gh-as-engineer <claude|codex> issue create …`. This is a plugin file change → `aar-engineering`
-   `plugin.json` version bump.
+1. **`wf.sh issue <claude|codex> <gh issue args…>`** — new subcommand, the Issue-side counterpart to
+   `wf.sh comment`. Reuses the existing `author_token_optional` + `gh_author` helpers (same
+   `WF_ENGINEER_TOKEN_CMD_*` policy, same fail-closed/ambient-fallback behavior as reviews). No worktree
+   needed. Added to `usage()`.
+2. **Point-of-need — `ship-change` SKILL.md step 0**: the "create the Issue if missing" line (the motivating
+   leak — what an agent reads right before filing) now says `wf.sh issue <claude|codex> create …`.
+3. **Convention — `aar-skills/AGENTS.md` "Rules"**: agent-filed Issues use the engineer identity; canonical
+   interface is `wf.sh issue`; an instance may keep a thin `gh-as-engineer` alias that delegates to it.
+4. **Identity contract — RUNBOOK**: document that `wf.sh issue` needs the engineer App to have
+   **`issues: write`** (public *and* private, unlike the existing read-only `issues: read` close-gate note).
 
-So all three agent issue-authoring sites — `file-feedback`, `ship-change` step 0, and the AGENTS rule that
-covers everything else — name the *same* canonical helper. (This issue, #89, was itself filed via
-`gh-as-engineer claude` to dogfood it.)
+Plugin files change → `aar-engineering` `plugin.json` version bump. (`gh-as-engineer` and `file-feedback`
+stay working unchanged: the instance `gh-as-engineer` becomes a thin alias to `wf.sh issue` same-day after
+merge, and `file-feedback` keeps calling `gh-as-engineer` — now one token path underneath.)
 
 ## Alternatives considered
 
-- **A new `GH_TOKEN=$(eval …)` spelling in AGENTS** (the first draft). Rejected on review (DRY): it
-  introduced a second way to do what `gh-as-engineer` already does. One canonical interface, named
-  everywhere.
-- **AGENTS Rule only, leave `ship-change` step 0 as raw `gh`.** Rejected on review (the HIGH): it leaves
-  the exact point-of-need that motivated the issue still authoring as the human — a Rule the nearest
-  instruction contradicts. The point-of-need must move too.
-- **A pre-commit/CI check.** Can't see Issue authorship from a diff; wrong layer. The Rules section already
-  says the hook is a backstop, not the discipline.
-- **Route everything through `file-feedback`.** Wrong tool for decomposition follow-ups and other
-  non-feedback issues; the convention should hold regardless of which path opens the Issue.
+- **(b) Ship the standalone `gh-as-engineer` into `aar-engineering`.** Rejected (cross-model consensus): a
+  second token-handling path alongside `wf.sh`, two audit surfaces, two things to keep in sync. The thin
+  alias delegating to `wf.sh issue` gets the familiar name without the duplicate implementation.
+- **AGENTS Rule only / reference the instance-only helper from the product.** Rejected (round-2 HIGH): a
+  product skill can't reference a command that isn't shipped — instance→product leak on a fresh install.
+- **A new `GH_TOKEN=$(eval …)` spelling.** Rejected (round-1 DRY): reinvents what the token helpers already do.
+- **A pre-commit/CI check.** Can't see Issue authorship from a diff; wrong layer.
 
 ## Blast radius
 
-- `aar-skills/AGENTS.md` "Rules" (repo-root convention) + `ship-change` SKILL.md step-0 line + the
-  `aar-engineering` `plugin.json` version bump that the SKILL change requires. Documentation/convention
-  only — no script logic changes; `gh-as-engineer` already exists and is unchanged. Affects agent behavior
-  by convention, the same way every other Rule does.
+- `wf.sh` (new `issue` subcommand + `usage()` line) and `ship-change` SKILL.md step-0 + RUNBOOK + the
+  `aar-engineering` `plugin.json` bump; plus `aar-skills/AGENTS.md` "Rules" (repo-root convention). The new
+  subcommand is additive — it reuses existing token helpers and touches no other code path, so the lifecycle
+  (start/open/review/finish) is unaffected. Instance `gh-as-engineer` + `file-feedback` keep working.
 
 ## Rollout + rollback
 
