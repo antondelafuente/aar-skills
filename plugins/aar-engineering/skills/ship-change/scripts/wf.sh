@@ -392,6 +392,65 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   fi
 }
 
+# disposition_gate <wt> <author-token> <pr> <design_mode> — the two-phase CLOSE-GATE (#50/#85). Enforces the
+# disposition contract on the issues a PR closes, BEFORE any native APPROVE is posted (a check after the
+# approval would leave a non-conforming PR approved + manually mergeable):
+#   code  (finish):          closes >=1 issue, EVERY closing issue's disposition set == {ready}
+#   design (finish --design): closes EXACTLY ONE issue, its disposition set == {needs-design}
+# Equality over the six-label disposition set (not "contains") fails closed on untriaged (zero) and malformed
+# (multiple) — so an issue mislabelled both ready+needs-design can't sneak through. Closing issues resolved via
+# GitHub's own closingIssuesReferences (Closes/Fixes + manual links). Fail closed on any lookup error. Label
+# reads work under the engineer Apps' existing contents+pull_requests perms on a PUBLIC repo; a private install
+# must add issues:read (RUNBOOK). WF_ALLOW_NONREADY_CLOSE=1 overrides but posts a durable PR comment.
+DISPO_RE='^(ready|needs-design|needs-shaping|blocked|parked|other)$'
+disposition_gate(){
+  local wt=$1 tok=$2 pr=$3 design=$4 repo owner name expect closing n labels count=0 bad="" problem=""
+  repo=$(gh_repo "$wt"); owner=${repo%%/*}; name=${repo#*/}
+  # Override FIRST (before any lookup): the hatch must rescue a lookup/permission failure too — otherwise a
+  # private install missing issues:read would fail closed on every merge with no in-band bypass. So if set, skip
+  # the gate entirely. Trail = a BEST-EFFORT PR comment (the hatch must work even if GitHub is flaky) PLUS a
+  # guaranteed terminal log.
+  if [ "${WF_ALLOW_NONREADY_CLOSE:-0}" = 1 ]; then
+    printf '⚠️ **Close-gate OVERRIDDEN** (`WF_ALLOW_NONREADY_CLOSE=1`): close-disposition checks skipped for this merge.\n' \
+      | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 || true
+    note "design-gate OVERRIDDEN (WF_ALLOW_NONREADY_CLOSE=1) — checks skipped (best-effort PR comment posted)"
+    return 0
+  fi
+  [ "$design" = 1 ] && expect=needs-design || expect=ready
+  # Query the first page (100, GitHub's max) + hasNextPage. The --jq emits "MORE:<bool>" then one issue# per
+  # line, so we never silently skip closing issues beyond the page (fail closed if more exist).
+  closing=$(gh_author "$tok" api graphql \
+      -f query='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){closingIssuesReferences(first:100){pageInfo{hasNextPage} nodes{number}}}}}' \
+      -F o="$owner" -F n="$name" -F p="$pr" \
+      --jq '.data.repository.pullRequest.closingIssuesReferences | "MORE:\(.pageInfo.hasNextPage)", (.nodes[].number)' 2>/dev/null) \
+    || die "design-gate: could not resolve PR #$pr closing issues (lookup failed) — failing closed"
+  printf '%s\n' "$closing" | head -1 | grep -qx 'MORE:false' \
+    || die "design-gate: PR #$pr closes more than 100 issues — refusing to merge without checking all of them (split the PR, or WF_ALLOW_NONREADY_CLOSE=1)."
+  closing=$(printf '%s\n' "$closing" | grep -v '^MORE:')
+  while read -r n; do
+    [ -n "$n" ] || continue
+    count=$((count+1))
+    labels=$(gh_author "$tok" api "repos/$repo/issues/$n" \
+        --jq "[.labels[].name]|map(select(test(\"$DISPO_RE\")))|sort|join(\",\")" 2>/dev/null) \
+      || die "design-gate: could not read labels for issue #$n (lookup failed) — failing closed"
+    [ "$labels" = "$expect" ] || bad="$bad #$n[disposition=${labels:-none}]"
+  done <<EOF
+$closing
+EOF
+  if [ "$design" = 1 ]; then
+    [ "$count" = 1 ] || problem="a design PR must close EXACTLY ONE needs-design issue (this closes $count)"
+  else
+    [ "$count" -ge 1 ] || problem="a code PR must close at least one ready issue (this closes 0)"
+  fi
+  [ -n "$bad" ] && problem="${problem:+$problem; }closing issue(s) not disposition=={$expect}:$bad"
+  [ -z "$problem" ] && { note "design-gate ok: closes $count issue(s), all disposition=={$expect}"; return 0; }
+  die "design-gate: $problem.
+  Two-phase close contract: code PRs close only 'ready' issues; a 'needs-design' issue is closed by its DESIGN
+  landing (finish --design), which spawns 'ready' children (linked 'design: #<n>') — close a child, not the
+  parent; triage any other non-'ready' close to 'ready' first. Override (best-effort PR comment + logged):
+  WF_ALLOW_NONREADY_CLOSE=1."
+}
+
 # =================================================================================================
 CMD=${1:-}; shift || true
 case "$CMD" in
@@ -664,6 +723,9 @@ Split into one design PR per doc."
   [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
   note "running .aar-ci checks + smoke on branch content…"
   ( cd "$WT" && bash .aar-ci/checks.sh "${PATHS[@]}" ) || die "deterministic checks/behavior-smoke FAILED — fix before merging"
+  # 1.5 the CLOSE-GATE (#50/#85): enforce the two-phase disposition contract on the PR's closing issues, BEFORE
+  #     the native APPROVE below (so a non-conforming PR is never approved/mergeable). Fail-closed.
+  disposition_gate "$WT" "$ATOK" "$PR" "$DESIGN_MODE"
   # 2. the authoritative merge gate, fail-closed, NO HIGH. approving=1 -> clean review posts a native APPROVE.
   #    --design: gate on --scaffold over the design DOC (the doc IS the deliverable). else: --code over the diff.
   if [ "$DESIGN_MODE" = 1 ]; then
