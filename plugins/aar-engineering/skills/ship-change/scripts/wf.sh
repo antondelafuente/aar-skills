@@ -418,7 +418,7 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
     rtok=$(reviewer_token "$author" "$require_reviewer")
     [ -n "$rtok" ] || need_ambient_gh
   fi
-  note "$mode review (author=$author, reviewer=opposite family)…"
+  note "$mode review (author=$author, reviewer=opposite family; quiet for several minutes can be normal; findings appear atomically at completion)…"
   AAR_SUBSTRATE="$author" AUDIT_CONSTITUTION="${AUDIT_CONSTITUTION:-$wt/AGENTS.md}" \
     bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
     || { echo "BLOCKED: reviewer process failed — tail of log:" >&2; tail -8 "$rev.run.log" >&2; exit 1; }
