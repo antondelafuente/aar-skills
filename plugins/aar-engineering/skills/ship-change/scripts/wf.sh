@@ -620,6 +620,9 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
   check_author "$AUTHOR"
   [ $# -gt 0 ] || die "no gh issue args given (e.g. create -R owner/repo -t '…' -b '…' -l <label>)"
   GHSUB=$1
+  # Allowlist: this is the engineer-AUTHORING path (#89), not general issue admin. Refuse anything but
+  # create/comment so a typo or a broad call can't run close/edit/delete/lock under the engineer token.
+  case "$GHSUB" in create|comment) ;; *) die "wf.sh issue: only 'create' and 'comment' are allowed (got '$GHSUB'); this is the engineer-authoring path, not general issue ops" ;; esac
   ATOK=$(author_token_optional "$AUTHOR")          # engineer token, or "" with the configured fallback
   [ -n "$ATOK" ] || need_ambient_gh
   gh_author "$ATOK" issue "$@" || die "wf.sh issue: 'gh issue $GHSUB' failed — failing closed"
