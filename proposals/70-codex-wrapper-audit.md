@@ -16,8 +16,8 @@ orchestrator execution profile. Those wrappers are useful local convenience, but
 ## Approach
 
 Keep one canonical product skill source under `plugins/*/skills/*`. Update the README Codex install instructions so a
-Codex engineer can install all owned aar-skills source skills, including `aar-engineering`'s `ship-change`, by symlinking
-the plugin skill directories into `~/.codex/skills/`.
+Codex engineer can install the research skills by symlinking the plugin skill directories into `~/.codex/skills/`, and
+can separately install `aar-engineering`'s `ship-change` when developing the scaffold.
 
 Coverage decision:
 
@@ -28,8 +28,9 @@ Coverage decision:
   local wrapper can remain an instance convenience.
 - `run-experiment`: no product wrapper needed. The source skill already describes the substrate-neutral wake requirement
   and the Codex blocking-watcher implementation path; this box's local wrapper can remain an instance convenience.
-- `ship-change`: no product wrapper needed, but the README must include its symlink line. The source skill already says
-  Codex-authored reviews need `AUDIT_VERIFIER_CMD` pointed at a Claude-family CLI.
+- `ship-change`: no product wrapper needed, but the README must include its symlink line under the build-the-product
+  gate. The source skill already says Codex-authored reviews need `AUDIT_VERIFIER_CMD` pointed at a Claude-family CLI,
+  and the README should mention the engineer-token / cross-family verifier config requirement.
 
 Also add a short README note that local harness wrappers are optional convenience files. If a user keeps such wrappers,
 they should stay thin and point at these source skills rather than copying the procedure.
@@ -50,7 +51,7 @@ GPU backend behavior, verifier behavior, or the local `~/.codex/skills/` instanc
 
 ## Rollout + rollback
 
-Roll out by merging the README update, then optionally aligning this box's local `~/.codex/skills/ship-change` entry with
+Roll out by merging the README update, then optionally adding this box's local `~/.codex/skills/ship-change` symlink with
 the documented source-symlink path.
 
 Rollback is reverting the README line and note. The source skills remain unchanged.
