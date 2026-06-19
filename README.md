@@ -28,14 +28,23 @@ Your human wants these skills available. Do this, in order:
      frozen recipes, artifact store, ledger, and teardown/cost policy — before `run-experiment`
      can drive a real run; the installed skill alone is not enough. `aar-engineering` is the
      build-the-product layer — install it only if you're developing these skills, not just using them.)
-   - *Codex CLI / other Agent-Skills harnesses* — symlink each skill dir (note a plugin can expose
-     more than one skill — `experiment-lifecycle` has two):
+   - *Codex CLI / other Agent-Skills harnesses* — symlink each source skill dir into the harness's
+     skills directory (note a plugin can expose more than one skill — `experiment-lifecycle` has two):
      ```
+     mkdir -p ~/.codex/skills
      ln -s ~/aar-skills/plugins/gpu-job/skills/gpu-job                    ~/.codex/skills/gpu-job
      ln -s ~/aar-skills/plugins/verify-claims/skills/verify-claims        ~/.codex/skills/verify-claims
      ln -s ~/aar-skills/plugins/experiment-lifecycle/skills/design-experiment ~/.codex/skills/design-experiment
      ln -s ~/aar-skills/plugins/experiment-lifecycle/skills/run-experiment    ~/.codex/skills/run-experiment
      ```
+     If you are developing the scaffold itself, also install the build-the-product skill:
+     ```
+     ln -s ~/aar-skills/plugins/aar-engineering/skills/ship-change         ~/.codex/skills/ship-change
+     ```
+     `ship-change` in an enforced repo also needs engineer identity config and a cross-family reviewer command
+     (for Codex authors, `AUDIT_VERIFIER_CMD` should point at a Claude-family CLI); see its `RUNBOOK.md`.
+     Local harness wrappers are optional convenience files. Keep them thin: point at these source skills instead of
+     copying the procedures.
 3. **Configure gpu-job:** run `~/aar-skills/plugins/gpu-job/skills/gpu-job/scripts/gpu_job_init.sh`.
    It writes a local config (`~/.config/gpu-job/env`, chmod 600) and uploads nothing.
    **You will need to ask your human for, verbatim:**
@@ -84,10 +93,11 @@ If *you* are setting these up by hand in the Claude Code UI (the agent path is t
 /plugin install experiment-lifecycle@aar-skills
 ```
 
-**Codex CLI / other Agent-Skills harnesses:** clone, then symlink each skill dir into your harness's
+**Codex CLI / other Agent-Skills harnesses:** clone, then symlink each source skill dir into your harness's
 skills directory (e.g. `~/.codex/skills/`) — use the explicit per-skill `ln -s` lines in "If you are a
-coding agent" above (a plugin can expose more than one skill, so symlink the `skills/<skill>` dirs, not
-`skills/<module>`). Scripts are referenced relative to each skill.
+coding agent" above. Install `ship-change` only if you are developing the scaffold itself. A plugin can expose
+more than one skill, so symlink the `skills/<skill>` dirs, not `skills/<module>`. Scripts are referenced
+relative to each skill.
 
 ## Updating
 
