@@ -132,7 +132,9 @@ normal single-phase ship-change runs.
 
 So you can't merge code that closes a `needs-design` (or untriaged/mislabelled) issue — a `needs-design` issue
 is closed only by its *design* landing, which spawns the `ready` children you actually implement. Violations
-block with guidance; `WF_ALLOW_NONREADY_CLOSE=1` overrides but posts a PR comment recording it.
+block with guidance; `WF_ALLOW_NONREADY_CLOSE=1` overrides — it bypasses the gate entirely (including a
+lookup/permission failure, so it's also the rollback for a misconfigured install) and leaves a best-effort PR
+comment plus a terminal log.
 
 ## Triage discipline (when a review has findings)
 

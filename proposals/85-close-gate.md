@@ -23,9 +23,12 @@ The gate, for the PR being finished:
    - **design mode (`finish --design`):** **exactly one** closing issue, `== {needs-design}`.
    Equality (not "contains") fails closed on untriaged (zero dispositions) and on malformed multi-disposition
    issues.
-3. On violation: `die` with guidance pointing at the two-phase path — unless **`WF_ALLOW_NONREADY_CLOSE=1`**,
-   which proceeds but **posts a PR comment** (engineer identity) recording the override + offending issues, so
-   the durable trail shows it.
+3. On violation: `die` with guidance pointing at the two-phase path — unless **`WF_ALLOW_NONREADY_CLOSE=1`**.
+   That override is checked **first, before any lookup** (review F1): it bypasses the gate entirely — so it also
+   rescues a lookup/permission failure (e.g. a private install lacking `issues: read`), which is the meantime
+   rollback. Its trail is a **best-effort** PR comment **plus a guaranteed terminal log** (review F2 — the hatch
+   must work even if GitHub posting is flaky, so the comment can't be blocking; honest about that rather than
+   claiming a guaranteed durable comment).
 
 Token: the existing author token (`ATOK`) — label reads work under the engineer Apps' existing
 `contents`+`pull_requests` perms on this **public** repo (verified during the #50 design). `RUNBOOK.md` gets a

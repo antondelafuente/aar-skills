@@ -406,6 +406,16 @@ DISPO_RE='^(ready|needs-design|needs-shaping|blocked|parked|other)$'
 disposition_gate(){
   local wt=$1 tok=$2 pr=$3 design=$4 repo owner name expect closing n labels count=0 bad="" problem=""
   repo=$(gh_repo "$wt"); owner=${repo%%/*}; name=${repo#*/}
+  # Override FIRST (before any lookup): the hatch must rescue a lookup/permission failure too — otherwise a
+  # private install missing issues:read would fail closed on every merge with no in-band bypass. So if set, skip
+  # the gate entirely. Trail = a BEST-EFFORT PR comment (the hatch must work even if GitHub is flaky) PLUS a
+  # guaranteed terminal log.
+  if [ "${WF_ALLOW_NONREADY_CLOSE:-0}" = 1 ]; then
+    printf '⚠️ **Close-gate OVERRIDDEN** (`WF_ALLOW_NONREADY_CLOSE=1`): close-disposition checks skipped for this merge.\n' \
+      | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 || true
+    note "design-gate OVERRIDDEN (WF_ALLOW_NONREADY_CLOSE=1) — checks skipped (best-effort PR comment posted)"
+    return 0
+  fi
   [ "$design" = 1 ] && expect=needs-design || expect=ready
   closing=$(gh_author "$tok" api graphql \
       -f query='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){closingIssuesReferences(first:50){nodes{number}}}}}' \
@@ -429,16 +439,11 @@ EOF
   fi
   [ -n "$bad" ] && problem="${problem:+$problem; }closing issue(s) not disposition=={$expect}:$bad"
   [ -z "$problem" ] && { note "design-gate ok: closes $count issue(s), all disposition=={$expect}"; return 0; }
-  if [ "${WF_ALLOW_NONREADY_CLOSE:-0}" = 1 ]; then
-    printf '⚠️ **Close-gate OVERRIDDEN** (`WF_ALLOW_NONREADY_CLOSE=1`): %s. Merging anyway.\n' "$problem" \
-      | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 || true
-    note "design-gate OVERRIDDEN (WF_ALLOW_NONREADY_CLOSE=1): $problem"
-    return 0
-  fi
   die "design-gate: $problem.
   Two-phase close contract: code PRs close only 'ready' issues; a 'needs-design' issue is closed by its DESIGN
   landing (finish --design), which spawns 'ready' children (linked 'design: #<n>') — close a child, not the
-  parent; triage any other non-'ready' close to 'ready' first. Override (posts a PR comment): WF_ALLOW_NONREADY_CLOSE=1."
+  parent; triage any other non-'ready' close to 'ready' first. Override (best-effort PR comment + logged):
+  WF_ALLOW_NONREADY_CLOSE=1."
 }
 
 # =================================================================================================
