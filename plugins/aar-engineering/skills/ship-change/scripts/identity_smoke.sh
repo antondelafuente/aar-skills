@@ -24,6 +24,7 @@ git config --global init.defaultBranch main
 cat > "$TMP/bin/gh" <<'EOF'
 #!/bin/bash
 set -u
+printf '%s\n' "$*" >> "${GH_FAKE_LOG:-/dev/null}"
 case "${1:-}" in
   auth)
     [ "${2:-}" = status ] && [ -n "${GH_TOKEN:-}" ] && exit 0
@@ -41,11 +42,18 @@ case "${1:-}" in
         esac ;;
       *) exit 1 ;;
     esac ;;
+  issue)
+    case "${2:-}" in
+      create) echo "https://github.com/example/repo/issues/7"; exit 0 ;;
+      comment) echo "comment-ok"; exit 0 ;;
+      *) echo "fake gh: unsupported issue $*" >&2; exit 1 ;;
+    esac ;;
   *) echo "fake gh: unsupported $*" >&2; exit 1 ;;
 esac
 EOF
 chmod +x "$TMP/bin/gh"
 export PATH="$TMP/bin:$PATH"
+export GH_FAKE_LOG="$TMP/gh.log"
 
 REPO="$TMP/repo"; mkdir -p "$REPO/proposals"
 ( cd "$REPO" && git init -q && git remote add origin https://github.com/example/repo.git )
@@ -98,6 +106,23 @@ echo "$out"
 check "doctor exits zero under explicit ambient override" "[ $rc -eq 0 ]"
 check "doctor reports ambient fallback enabled" "grep -q 'ambient workflow fallback: ENABLED' <<<\"\$out\""
 check "doctor reports ready under override" "grep -q '^READY:' <<<\"\$out\""
+
+echo "=== explicit ambient override: issue create/comment leave trail calls ==="
+: > "$GH_FAKE_LOG"
+out=$(GH_TOKEN=ambient-token \
+  WF_ALLOW_AMBIENT_IDENTITY=1 \
+  bash "$WF" issue codex create -R example/repo -t title -b body 2>&1); rc=$?
+echo "$out"
+check "issue create exits zero under explicit ambient override" "[ $rc -eq 0 ]"
+check "issue create prints created URL" "grep -q 'https://github.com/example/repo/issues/7' <<<\"\$out\""
+check "issue create posts override trail to created issue" "grep -q 'issue comment 7 -R example/repo --body-file -' \"$GH_FAKE_LOG\""
+: > "$GH_FAKE_LOG"
+out=$(GH_TOKEN=ambient-token \
+  WF_ALLOW_AMBIENT_IDENTITY=1 \
+  bash "$WF" issue codex comment -R example/repo 8 -b body 2>&1); rc=$?
+echo "$out"
+check "issue comment exits zero under explicit ambient override" "[ $rc -eq 0 ]"
+check "issue comment posts override trail to parsed issue number" "grep -q 'issue comment 8 -R example/repo --body-file -' \"$GH_FAKE_LOG\""
 
 echo
 [ "$fail" = 0 ] && { echo "identity smoke: ALL PASS"; exit 0; } || { echo "identity smoke: FAILURES" >&2; exit 1; }

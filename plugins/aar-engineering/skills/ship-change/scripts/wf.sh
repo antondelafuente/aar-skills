@@ -374,14 +374,19 @@ wt_pr_required(){ local pr; pr=$(wt_pr "$1" "${2:-}"); [ -n "$pr" ] || die "no P
 # repo slug + main checkout, derived FROM a worktree dir (any worktree shares origin + the main checkout):
 gh_repo(){      git -C "${1:-$ORIGIN_REPO}" remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##'; }
 repo_arg_from_gh_args(){  # repo_arg_from_gh_args <fallback-repo> <gh-subcommand-args...>
-  local repo=$1 want_repo=0 a
+  local repo=$1 want_repo=0 want_val=0 a
   shift || true
   for a in "$@"; do
+    if [ "$want_val" = 1 ]; then want_val=0; continue; fi
     if [ "$want_repo" = 1 ]; then repo=$a; want_repo=0; continue; fi
     case "$a" in
       -R|--repo) want_repo=1 ;;
       -R=*) repo=${a#-R=} ;;
       --repo=*) repo=${a#--repo=} ;;
+      -t|--title|-b|--body|-F|--body-file|-l|--label|-a|--assignee|-m|--milestone|-p|--project)
+        want_val=1 ;;
+      -t=*|--title=*|-b=*|--body=*|-F=*|--body-file=*|-l=*|--label=*|-a=*|--assignee=*|-m=*|--milestone=*|-p=*|--project=*)
+        ;;
     esac
   done
   echo "$repo"
@@ -662,7 +667,12 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] — report lifecycle identit
       model_rc=1
     fi
   else
-    echo "  model reviewer: ok (default Codex reviewer is opposite-family for Claude-authored reviews)"
+    if command -v codex >/dev/null 2>&1; then
+      echo "  model reviewer: ok (default Codex reviewer is on PATH for Claude-authored reviews)"
+    else
+      echo "  model reviewer: missing (default Codex reviewer not on PATH for Claude-authored reviews)"
+      model_rc=1
+    fi
   fi
   ready=1
   if ambient_identity_allowed; then
@@ -732,7 +742,7 @@ EOF
     note "scaffolded design-doc skeleton: $DOC"
   fi
   echo "WORKTREE=$WT"; echo "BRANCH=$BR"; echo "DOC=$DOC"
-  note "next: write the design doc at $WT/$DOC, then: wf.sh open $WT"
+  note "next: write the design doc at $WT/$DOC, then: wf.sh open $WT <claude|codex>"
   ;;
 
 open)   # wf.sh open <worktree> <author>   — commit the design doc, push, open the DRAFT PR
@@ -801,7 +811,7 @@ design-review)  # wf.sh design-review <worktree> <author>
   [ -n "$ATOK" ] || need_ambient_gh
   require_clean "$WT"; PR=$(wt_pr_required "$WT" "$ATOK")
   DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
-  [ -n "$DOC" ] || die "no committed design doc under proposals/ (run: wf.sh open $WT)"
+  [ -n "$DOC" ] || die "no committed design doc under proposals/ (run: wf.sh open $WT <claude|codex>)"
   # push so the reviewed doc == what the PR shows (consistency with code-review)
   git_push_author "$ATOK" "$WT" -q origin HEAD || die "push failed — can't review a doc the PR doesn't reflect"
   run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Design review (\`--scaffold\`)"
