@@ -386,6 +386,22 @@ repo_arg_from_gh_args(){  # repo_arg_from_gh_args <fallback-repo> <gh-subcommand
   done
   echo "$repo"
 }
+issue_number_from_gh_issue_args(){  # issue_number_from_gh_issue_args <gh issue args...>
+  local sub=${1:-} want_val=0 a
+  shift || true
+  [ "$sub" = comment ] || return 0
+  for a in "$@"; do
+    if [ "$want_val" = 1 ]; then want_val=0; continue; fi
+    case "$a" in
+      -R|--repo|-t|--title|-b|--body|-F|--body-file|-l|--label|-a|--assignee|-m|--milestone|-p|--project)
+        want_val=1 ;;
+      -R=*|--repo=*|-t=*|--title=*|-b=*|--body=*|-F=*|--body-file=*|-l=*|--label=*|-a=*|--assignee=*|-m=*|--milestone=*|-p=*|--project=*)
+        ;;
+      -*) ;;
+      *) echo "$a"; return 0 ;;
+    esac
+  done
+}
 main_checkout(){ git -C "$1" worktree list --porcelain | awk '/^worktree /{print $2; exit}'; }   # 1st worktree = main
 wt_pr(){
   local tok=${2:-}
@@ -870,7 +886,7 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
           || note "WARN: could not post ambient-identity override note to issue #$INUM (non-fatal; terminal warning already emitted)"
       fi
     else
-      INUM=${2:-}
+      INUM=$(issue_number_from_gh_issue_args "$@" || true)
       gh_author "$ATOK" issue "$@" || die "wf.sh issue: 'gh issue $GHSUB' failed — failing closed"
       # A second comment is the least invasive durable trail for arbitrary `gh issue comment` args.
       if [ -n "$INUM" ]; then

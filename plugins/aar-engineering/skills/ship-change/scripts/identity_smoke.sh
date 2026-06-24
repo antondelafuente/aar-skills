@@ -2,6 +2,11 @@
 # identity_smoke.sh — unit-style smoke for wf.sh's strict engineer-identity policy (#109).
 # Self-contained: fake gh, throwaway git repos, no network and no real tokens.
 set -uo pipefail
+unset BASH_ENV ENV
+unset GH_TOKEN
+unset WF_ENGINEER_TOKEN_CMD_CLAUDE WF_ENGINEER_TOKEN_CMD_CODEX WF_REVIEWER_TOKEN_CMD
+unset WF_ENGINEER_GIT_AUTHOR_CLAUDE WF_ENGINEER_GIT_AUTHOR_CODEX
+unset WF_ALLOW_AMBIENT_IDENTITY AUDIT_VERIFIER_CMD
 WF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wf.sh
 [ -f "$WF" ] || { echo "FAIL: wf.sh not found next to smoke" >&2; exit 1; }
 
