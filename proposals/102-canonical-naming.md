@@ -32,10 +32,10 @@ Investigation found these live surfaces:
 
 ## Approach
 
-Make `automated-researcher` the canonical product name, repo name, and local checkout path. Keep
-`aar-skills` as a compatibility alias for filesystem paths and GitHub redirects long enough that
-current sessions, existing issue links, symlinked Codex skills, and old docs do not fail during the
-transition.
+Make `automated-researcher` the canonical product name, repo name, local checkout path, and fresh-install
+marketplace namespace. Keep `aar-skills` as a compatibility alias for filesystem paths and GitHub redirects
+long enough that current sessions, existing issue links, symlinked Codex skills, and old docs do not fail
+during the transition.
 
 The name decision:
 
@@ -58,16 +58,23 @@ The name decision:
   `.aar-ci/` are not renamed by this issue. Retiring those names is part of the separate engineering-layer
   design.
 
+This rename deliberately fixes only the top-level surfaces: repo, local checkout, install examples, and
+public entry-point prose. It does not claim to purge all `aar`/`AAR` vocabulary. A fresh clone will still
+contain internal names such as `aar-engineering` and `.aar-ci/` until the separate engineering-layer design
+decides whether those names should stay, move, or be retired.
+
 The implementation should happen in ordered, small changes rather than one giant rename commit:
 
 1. Land this design.
 2. Update tracked product docs and manifests in the product repo: README, root marketplace metadata,
-   `AGENTS.md`, relevant proposal references that are normative, and `aar-engineering` docs/help text
-   that prints `aar-skills` in user-facing commands. Historical proposals and changelog lines may keep
-   old names unless they are used as current instructions.
+   `AGENTS.md`, and `aar-engineering` docs/help text that prints `aar-skills` in user-facing commands.
+   Landed proposals and changelog lines stay historical records unless a later issue explicitly promotes
+   one to current documentation.
 3. Rename the GitHub repo and update the Anton controller's local product checkout so the clearer name is
    canonical and the old name remains an alias. The exact `/home/anton` command sequence belongs in
-   `research-lab/registry/PRODUCT_TRANSITION.md`, not in this product ADR.
+   `research-lab/registry/PRODUCT_TRANSITION.md`, not in this product ADR. That instance runbook must move
+   Claude launch paths and `update-fleet.sh` detection atomically, then verify fleet classification after
+   the flip.
 4. Update controller references that load live source: fleet launch/update scripts, Claude settings/hooks,
    Codex wrapper symlinks, memory entries, and root guidance. Keep compatibility checks that recognize both
    paths during the transition.
@@ -111,6 +118,16 @@ avoidable breakage. A compatibility alias is cheap and keeps the transition reve
 Rejected for this issue. `aar-engineering` is cross-cutting, but it is also the workflow used to ship
 changes to this repo. Moving it while renaming the repo would mix a reference migration with a release
 boundary change and make rollback harder. The extraction question should be decided on its own merits.
+
+### Rename repo, path, and docs but keep marketplace name `aar-skills`
+
+Rejected. This is the lowest-breakage option because the marketplace namespace is independent of the
+GitHub repo name and local `--plugin-dir` sessions ignore it. But it preserves the old name in the first
+fresh-install command an outside researcher runs, so the public product remains partly branded as
+`aar-skills` exactly where a new user is forming the model. The design accepts a one-time reinstall
+migration for marketplace users to make the fresh-install surface coherent. If implementation evidence
+shows the reinstall path is worse than expected, this is the first fallback: rename repo/path/docs now and
+defer the marketplace namespace switch.
 
 ### Rename `research-lab` or remove old lab paths now
 
