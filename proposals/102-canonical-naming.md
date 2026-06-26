@@ -35,7 +35,8 @@ Investigation found these live surfaces:
 Make `automated-researcher` the canonical product name, repo name, local checkout path, and fresh-install
 marketplace namespace. Keep `aar-skills` as a compatibility alias for filesystem paths and GitHub redirects
 long enough that current sessions, existing issue links, symlinked Codex skills, and old docs do not fail
-during the transition.
+during the transition. The alias is temporary migration scaffolding, not a permanent product surface; issue
+#115 owns deleting old names once the canonical references have proven clean.
 
 The name decision:
 
@@ -83,9 +84,8 @@ The implementation should happen in ordered, small changes rather than one giant
 6. Run a fake-HOME Claude install smoke and a Codex skill-resolution smoke for the new path/name. Then
    run the local fleet health check and verify existing `--plugin-dir` sessions still resolve through
    the compatibility symlink.
-7. After a settling period, file a cleanup issue for deleting stale alias prose that is no longer
-   needed. Do not delete the filesystem symlink until there is evidence no live launcher, memory, or
-   external install doc still depends on it.
+7. After a settling period, execute the legacy-name cleanup tracked in #115. Do not delete the filesystem
+   symlink until there is evidence no live launcher, memory, or external install doc still depends on it.
 
 `aar-engineering` stays in this repo for this rename. It is a different architectural question:
 whether the SWE pipeline should become a separate reusable product/plugin, remain the in-repo engineering
@@ -197,7 +197,7 @@ Rollback:
 - Do not create a new repository named `aar-skills` while old GitHub URLs may still matter. GitHub rename
   redirects are only durable if the old name stays reserved.
 
-## Follow-up issues to file after this design lands
+## Follow-up issues
 
 - Ready: Rename product repo and local canonical checkout to `automated-researcher` with `aar-skills`
   compatibility alias.
@@ -206,5 +206,8 @@ Rollback:
 - Ready: Update controller/home live-source references and hooks to prefer `automated-researcher` while
   accepting `aar-skills`.
 - Ready: Update `research-lab` orientation and transition docs to point at `automated-researcher`.
-- Needs-design: Decide whether `aar-engineering` remains the in-repo SWE pipeline, becomes a separate
-  plugin/repo, or splits into a generic workflow engine plus repo-local profiles.
+- Blocked: #115 removes old compatibility names and symlinks after the canonical rename proves clean,
+  including `aar-skills`, `MATS`, and `antondelafuente.com`.
+- Needs-design: #116 decides whether `aar-engineering` remains the in-repo SWE pipeline, becomes a
+  separate plugin/repo, or splits into a generic workflow engine plus repo-local profiles, including the
+  replacement name now that public product vocabulary is moving away from "AAR".
