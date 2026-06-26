@@ -32,10 +32,10 @@ Investigation found these live surfaces:
 
 ## Approach
 
-Make `automated-researcher` the canonical product name, repo name, local checkout path, and new
-installation name. Keep `aar-skills` as a compatibility alias long enough that current sessions,
-existing issue links, installed plugin caches, symlinked Codex skills, and old docs do not fail during
-the transition.
+Make `automated-researcher` the canonical product name, repo name, and local checkout path. Keep
+`aar-skills` as a compatibility alias for filesystem paths and GitHub redirects long enough that
+current sessions, existing issue links, symlinked Codex skills, and old docs do not fail during the
+transition.
 
 The name decision:
 
@@ -45,11 +45,18 @@ The name decision:
   `/home/anton/automated-researcher`.
 - Product docs: update human-facing docs to say "automated-researcher" first and mention
   `aar-skills` only as a legacy alias.
-- Marketplace identity: new install examples should use `@automated-researcher`.
-- Existing compatibility: keep the old `@aar-skills` wording where it is describing already-installed
-  local fleet state or rollback, then remove it after the fleet and fake-HOME install path prove clean.
+- Marketplace identity: choose an explicit one-way namespace migration, not an alias. The root
+  `.claude-plugin/marketplace.json` has one `name`, so `@aar-skills` and `@automated-researcher`
+  cannot both be live marketplace names from the same checkout. The intended end state is
+  `@automated-researcher`; implementation must treat that as a reinstall/deprecation step, update local
+  Claude settings, and smoke-test a fresh install under the new namespace. Already-running local
+  `--plugin-dir` sessions are protected by the filesystem alias, not by a marketplace alias.
 - Lab names: keep `research-lab` as the private instance repo and keep the old lab paths as
   compatibility symlinks. This design does not rename `research-lab`, `registry`, `journal`, or `site`.
+- AAR vocabulary: keep "AAR" as internal role vocabulary for now. Public entry points should lead with
+  "automated-researcher" and explain or avoid "AAR"; internal names such as `aar-engineering` and
+  `.aar-ci/` are not renamed by this issue. Retiring those names is part of the separate engineering-layer
+  design.
 
 The implementation should happen in ordered, small changes rather than one giant rename commit:
 
@@ -58,11 +65,12 @@ The implementation should happen in ordered, small changes rather than one giant
    `AGENTS.md`, relevant proposal references that are normative, and `aar-engineering` docs/help text
    that prints `aar-skills` in user-facing commands. Historical proposals and changelog lines may keep
    old names unless they are used as current instructions.
-3. Rename the GitHub repo and update the local product checkout so
-   `/home/anton/automated-researcher` is real and `/home/anton/aar-skills` is the symlink.
-4. Update controller references that load live source: `update-fleet.sh`, `new-claude.sh`, Claude
-   settings/hooks, Codex wrapper symlinks, memory entries, and root `AGENTS.md`/`CLAUDE.md`/`README.md`.
-   Keep compatibility checks that recognize both paths during the transition.
+3. Rename the GitHub repo and update the Anton controller's local product checkout so the clearer name is
+   canonical and the old name remains an alias. The exact `/home/anton` command sequence belongs in
+   `research-lab/registry/PRODUCT_TRANSITION.md`, not in this product ADR.
+4. Update controller references that load live source: fleet launch/update scripts, Claude settings/hooks,
+   Codex wrapper symlinks, memory entries, and root guidance. Keep compatibility checks that recognize both
+   paths during the transition.
 5. Update `research-lab` docs that point at the product scaffold. Do not touch experiment records only
    because they mention the old name historically.
 6. Run a fake-HOME Claude install smoke and a Codex skill-resolution smoke for the new path/name. Then
@@ -146,26 +154,31 @@ Out of scope:
 
 ## Rollout + rollback
 
-Rollout should be alias-first and test-through-user-path:
+Rollout should be alias-first and test-through-user-path. The product-level contract is:
 
-1. Before the operational rename, ensure `main` is clean and current for the product repo.
-2. Rename the GitHub repo to `automated-researcher`; update local `origin` to the new URL.
-3. Move the local checkout from `/home/anton/aar-skills` to `/home/anton/automated-researcher`.
-4. Create `/home/anton/aar-skills` as a symlink back to `/home/anton/automated-researcher`.
-5. Run product checks, fake-HOME install smoke, Codex symlink resolution, and fleet health.
-6. Update references in product, controller/home, and lab docs through their normal review paths.
-7. Run `update-fleet.sh --if-changed` or `--reload` only after the product PRs land; existing sessions
-   that still point at `/home/anton/aar-skills/plugins` should continue to work through the symlink.
+1. The GitHub repo is renamed to `automated-researcher`.
+2. The Anton controller makes the clearer local path canonical and leaves `aar-skills` as a filesystem
+   alias. The exact commands and sequencing live in `research-lab/registry/PRODUCT_TRANSITION.md`.
+3. Product, controller/home, and lab references are updated through their normal review paths.
+4. Product checks, fake-HOME Claude install smoke, Codex skill-resolution smoke, and fleet health pass
+   before the alias is treated as stable.
+5. Existing local sessions that still point at the old filesystem path continue to resolve through the
+   symlink; marketplace-installed sessions are migrated or reinstalled because there is no marketplace
+   alias.
 
 Rollback:
 
 - GitHub repo rename can be reversed to `aar-skills`; GitHub redirects cover most old URLs during the
   window.
-- Local rollback is `rm /home/anton/aar-skills`, move the checkout back to `/home/anton/aar-skills`, and
-  recreate `/home/anton/automated-researcher` as the symlink.
-- Marketplace rollback is to keep or restore the old `name: aar-skills` and old install examples.
+- Local rollback reverses the controller symlink direction according to `PRODUCT_TRANSITION.md`: the old
+  path becomes canonical again and `automated-researcher` returns to being the alias.
+- Marketplace rollback is to keep or restore the old `name: aar-skills` and old install examples. There
+  is no marketplace alias; switching the namespace means existing marketplace installs must be migrated
+  or reinstalled.
 - Because the alias remains, rollback should not require changing existing Claude `--plugin-dir` sessions
   before the next restart.
+- Do not create a new repository named `aar-skills` while old GitHub URLs may still matter. GitHub rename
+  redirects are only durable if the old name stays reserved.
 
 ## Follow-up issues to file after this design lands
 
