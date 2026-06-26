@@ -1,5 +1,5 @@
 #!/bin/bash
-# aar-skills deterministic checks + behavior smoke. TRACKED check profile (run by ship_change.sh).
+# automated-researcher deterministic checks + behavior smoke. TRACKED check profile (run by ship_change.sh).
 # Args: the changed paths being shipped. Runs from the repo root. Exit non-zero on ANY failure.
 # The pyramid: cheap deterministic checks first, then the fake-HOME behavior smoke for plugin/skill changes.
 set -uo pipefail
@@ -10,12 +10,41 @@ ok(){ echo "  ok: $*" >&2; }
 
 changed_under(){ local pfx=$1; printf '%s\n' "${PATHS[@]}" | grep -q "^$pfx" ; }
 
-echo "[checks] aar-skills — ${#PATHS[@]} path(s)" >&2
+ROOT="$(git rev-parse --show-toplevel)"
+
+echo "[checks] automated-researcher — ${#PATHS[@]} path(s)" >&2
 
 # 1. JSON validity (manifests/marketplace)
 for p in "${PATHS[@]}"; do case "$p" in
   *.json) [ -f "$p" ] && { python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$p" 2>/dev/null && ok "json $p" || err "invalid JSON: $p"; } ;;
 esac; done
+
+# 1b. README install namespace must match marketplace.json:name. The fake-HOME smoke reads the namespace
+#     from the manifest, so it cannot catch docs that teach `plugin install <plugin>@wrong-name`.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(README\.md|\.claude-plugin/marketplace\.json)$'; then
+  if CHECK_ROOT="$ROOT" python3 - <<'PY'
+import json
+import os
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(os.environ["CHECK_ROOT"])
+market = json.loads((root / ".claude-plugin/marketplace.json").read_text())["name"]
+readme = (root / "README.md").read_text()
+names = sorted(set(re.findall(r"(?:^|\s)/?(?:claude\s+)?plugin\s+install\s+\S+@([A-Za-z0-9._-]+)", readme)))
+bad = [name for name in names if name != market]
+if bad:
+    print(f"README plugin-install namespace(s) {bad} != marketplace name {market}", file=sys.stderr)
+    sys.exit(1)
+if not names:
+    print("README contains no plugin install namespace examples", file=sys.stderr)
+    sys.exit(1)
+PY
+  then ok "README install namespace matches marketplace.json:name"
+  else err "README install namespace drift"
+  fi
+fi
 
 # 2. shell syntax — *.sh AND extensionless shell scripts (e.g. .githooks/* hooks) detected by shebang
 for p in "${PATHS[@]}"; do
@@ -59,7 +88,6 @@ done
 # 6. behavior smoke (fake-HOME install -> skill discovery) — gates auto-merge for plugin/skill changes (deterministic
 #    checks can't catch an install/discovery break). Smoke the changed plugins; AND if the root marketplace.json
 #    changed, smoke every plugin it declares (a marketplace edit can break discovery for any of them).
-ROOT="$(git rev-parse --show-toplevel)"
 SMOKE="$ROOT/.aar-ci/fake_home_smoke.sh"
 SMOKE_PLUGS=$(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#plugins/([^/]+)/.*#\1#')
 if printf '%s\n' "${PATHS[@]}" | grep -q '^\.claude-plugin/marketplace.json$'; then

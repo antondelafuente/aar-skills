@@ -15,7 +15,7 @@ description: >-
 
 The **engineering** counterpart to `run-experiment`: where `run-experiment` runs a research experiment,
 this ships a change to the *product itself*. It belongs to the **SWE pipeline** layer (see
-`aar-skills/AGENTS.md` "Two layers"), not the shipped research product.
+`automated-researcher/AGENTS.md` "Two layers"), not the shipped research product.
 
 **The agents are the engineers** (`AGENTS.md` "The vision"). Every change is **authored by one model
 family and reviewed by the OTHER** (Claude-authored → Codex reviews; vice-versa). The human is the
@@ -169,9 +169,9 @@ GitHub is the durable coordination record, but it should read like a handoff to 
 ## The per-repo `.aar-ci/` profile (what the repo supplies)
 
 - `<repo>/.aar-ci/checks.sh` (required, tracked, executable) — deterministic checks + when to run the
-  behavior smoke. See `aar-skills/.aar-ci/checks.sh`.
+  behavior smoke. See `automated-researcher/.aar-ci/checks.sh`.
 - `<repo>/.aar-ci/classify.sh` + `classifier.conf` — the mechanical/architectural classifier (fail-closed;
-  a non-configurable protected floor + an adjustable glob list). See `aar-skills/.aar-ci/`.
+  a non-configurable protected floor + an adjustable glob list). See `automated-researcher/.aar-ci/`.
 - `<repo>/.aar-ci/fake_home_smoke.sh` — the virgin-HOME install/resolve behavior smoke.
 
 ## Composes
