@@ -10,6 +10,8 @@ ok(){ echo "  ok: $*" >&2; }
 
 changed_under(){ local pfx=$1; printf '%s\n' "${PATHS[@]}" | grep -q "^$pfx" ; }
 
+ROOT="$(git rev-parse --show-toplevel)"
+
 echo "[checks] automated-researcher — ${#PATHS[@]} path(s)" >&2
 
 # 1. JSON validity (manifests/marketplace)
@@ -20,14 +22,16 @@ esac; done
 # 1b. README install namespace must match marketplace.json:name. The fake-HOME smoke reads the namespace
 #     from the manifest, so it cannot catch docs that teach `plugin install <plugin>@wrong-name`.
 if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(README\.md|\.claude-plugin/marketplace\.json)$'; then
-  if python3 - <<'PY'
+  if CHECK_ROOT="$ROOT" python3 - <<'PY'
 import json
+import os
 import pathlib
 import re
 import sys
 
-market = json.loads(pathlib.Path(".claude-plugin/marketplace.json").read_text())["name"]
-readme = pathlib.Path("README.md").read_text()
+root = pathlib.Path(os.environ["CHECK_ROOT"])
+market = json.loads((root / ".claude-plugin/marketplace.json").read_text())["name"]
+readme = (root / "README.md").read_text()
 names = sorted(set(re.findall(r"(?:^|\s)/?(?:claude\s+)?plugin\s+install\s+\S+@([A-Za-z0-9._-]+)", readme)))
 bad = [name for name in names if name != market]
 if bad:
@@ -84,7 +88,6 @@ done
 # 6. behavior smoke (fake-HOME install -> skill discovery) — gates auto-merge for plugin/skill changes (deterministic
 #    checks can't catch an install/discovery break). Smoke the changed plugins; AND if the root marketplace.json
 #    changed, smoke every plugin it declares (a marketplace edit can break discovery for any of them).
-ROOT="$(git rev-parse --show-toplevel)"
 SMOKE="$ROOT/.aar-ci/fake_home_smoke.sh"
 SMOKE_PLUGS=$(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#plugins/([^/]+)/.*#\1#')
 if printf '%s\n' "${PATHS[@]}" | grep -q '^\.claude-plugin/marketplace.json$'; then
