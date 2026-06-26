@@ -1,8 +1,8 @@
 {
-  "name": "aar-skills",
+  "name": "automated-researcher",
   "owner": { "name": "Anton de la Fuente" },
   "metadata": {
-    "description": "Modular research-agent skills: remote GPU jobs, adversarial claim verification. Extracted from a working autonomous-research lab."
+    "description": "Automated-researcher skills: remote GPU jobs, experiment lifecycle support, and adversarial claim verification. Extracted from a working autonomous-research lab."
   },
   "plugins": [
     {

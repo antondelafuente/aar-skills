@@ -1,3 +1,4 @@
+- automated-researcher (2026-06-26): rename current product-facing docs and marketplace namespace from `aar-skills` to `automated-researcher`. README install examples, root marketplace metadata, AGENTS.md heading, `.aar-ci` author-facing labels/checks, and ship-change refresh/help text now use the new canonical name. Adds a deterministic check that README `plugin install <plugin>@...` examples match `.claude-plugin/marketplace.json:name`.
 - docs (2026-06-19): clarify Codex skill setup after the wrapper audit. Codex should symlink the canonical source
   skills, with `ship-change` added only for scaffold developers; local Codex wrappers remain optional thin instance
   conveniences, not product source.

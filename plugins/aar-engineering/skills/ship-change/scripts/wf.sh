@@ -932,7 +932,7 @@ classify)       # wf.sh classify <worktree> <author>   — advisory record (neve
     missing_identity_die "classify requires an author family (claude|codex) so the opposite-family reviewer identity can post the classification"
   fi
   [ -d "$WT" ] || die "no such worktree: $WT"
-  [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the aar-skills repo?)"
+  [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the automated-researcher repo?)"
   require_clean "$WT"
   mapfile -t PATHS < <(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD"
@@ -1100,7 +1100,7 @@ Split into one design PR per doc."
   fi
   git -C "$MAIN_CO" pull --ff-only -q origin main 2>/dev/null || note "WARN: could not ff-only pull main ($MAIN_CO) — reconcile manually"
   local_manifest=0; for p in "${PATHS[@]}"; do case "$p" in */plugin.json|*marketplace.json) local_manifest=1;; esac; done
-  [ "$local_manifest" = 1 ] && note "a plugin manifest changed — refresh installs: claude plugin marketplace update aar-skills && claude plugin update <name>@aar-skills"
+  [ "$local_manifest" = 1 ] && note "a plugin manifest changed — refresh installs: claude plugin marketplace update automated-researcher && claude plugin update <name>@automated-researcher"
   if [ "$DESIGN_MODE" = 1 ]; then
     echo "SHIPPED: design PR #$PR merged (opposite-family --scaffold approval + checks). Worktree cleaned. Next: file the spawned 'ready' issues."
   else

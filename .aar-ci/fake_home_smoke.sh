@@ -18,7 +18,7 @@ cp "$HOME/.git-credentials" "$V/.git-credentials" 2>/dev/null || true
 python3 -c "import json,os;s=json.load(open(os.path.expanduser('~/.claude.json')));json.dump({k:s[k] for k in ('oauthAccount','userID','hasCompletedOnboarding','firstStartTime') if k in s},open('$V/.claude.json','w'))" 2>/dev/null || err "could not seed .claude.json"
 
 cd "$V/proj" || { echo "  SMOKE-FAIL: cd into fake HOME failed" >&2; exit 1; }
-# marketplace NAME comes from the manifest, not the dir basename (a worktree/checkout may not be named 'aar-skills')
+# marketplace NAME comes from the manifest, not the dir basename (a worktree/checkout may not match it)
 MKT=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['name'])" "$REPO/.claude-plugin/marketplace.json" 2>/dev/null) || err "could not read marketplace name"
 HOME="$V" claude plugin marketplace add "$REPO" >/dev/null 2>&1 || err "marketplace add failed"
 HOME="$V" claude plugin install "$PLUG@${MKT:-$(basename "$REPO")}" >/dev/null 2>&1 || err "plugin install failed: $PLUG"

@@ -1,6 +1,6 @@
-# aar-skills — development conventions (agent-facing)
+# automated-researcher — development conventions (agent-facing)
 
-This repo is the PRODUCT: modular agent skills, developed here in their public shape even
+This repo is the PRODUCT: modular agent skills for automated research, developed here in their public shape even
 while the repo is private. The lab's orchestrator repo is the INSTANCE — it consumes this
 repo via symlinks/plugin installs and never the reverse. The instance-side transition map
 (what migrates next, gates, current state) lives at the lab's orchestrator/PRODUCT_TRANSITION.md.
@@ -9,8 +9,8 @@ repo via symlinks/plugin installs and never the reverse. The instance-side trans
 
 This repo holds **two layers** — same repo, different concerns:
 
-1. **The product** — the shipped research plugins (`gpu-job`, `verify-claims`, `experiment-lifecycle`): the AAR
-   scaffold that turns a coding agent into an autonomous researcher. Quality bar: *is the research valid.* Customer:
+1. **The product** — the shipped research plugins (`gpu-job`, `verify-claims`, `experiment-lifecycle`): the
+   automated-researcher scaffold that turns a coding agent into an autonomous researcher. Quality bar: *is the research valid.* Customer:
    the alignment researcher.
 2. **The SWE pipeline** — the engineering layer that builds, reviews, tests, and ships the product
    (`aar-engineering`, `tests/`, CI). Quality bar: *does the product's machinery work and not regress.* Customer: us.

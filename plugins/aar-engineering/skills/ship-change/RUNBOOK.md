@@ -27,10 +27,10 @@ check). Wiring either as a GitHub-required status is a tracked follow-up (needs 
 
 ## Engineer identities (as-built)
 
-- **`codex-engineer`** — a GitHub App, installed on `aar-skills`. It can author Codex work and review
+- **`codex-engineer`** — a GitHub App, installed on `automated-researcher`. It can author Codex work and review
   Claude-authored changes. This instance currently exposes its token through the legacy `WF_REVIEWER_TOKEN_CMD`
   seam, which `wf.sh` treats as a fallback alias for `WF_ENGINEER_TOKEN_CMD_CODEX`.
-- **`claude-engineer`** — a GitHub App, installed on `aar-skills` (its token seam `WF_ENGINEER_TOKEN_CMD_CLAUDE`
+- **`claude-engineer`** — a GitHub App, installed on `automated-researcher` (its token seam `WF_ENGINEER_TOKEN_CMD_CLAUDE`
   + `WF_ENGINEER_GIT_AUTHOR_CLAUDE` are wired on this box). It authors Claude work and reviews Codex-authored
   changes — verified live: it posted the cross-family reviews on PR #57 and authored issue #62 (both read as
   `claude-code-engineer[bot]` / `app/claude-code-engineer`).
@@ -40,7 +40,7 @@ check). Wiring either as a GitHub-required status is a tracked follow-up (needs 
   approval does **not** satisfy the gate (`reviewDecision: REVIEW_REQUIRED`). Grant `contents: write` and
   re-accept the installation's permission request.
 - **`issues: read` — only for PRIVATE installs.** The close-gate (`finish` enforcing the two-phase close
-  contract, #50/#85) reads each closing issue's disposition labels. On a **public** repo (like `aar-skills`)
+  contract, #50/#85) reads each closing issue's disposition labels. On a **public** repo (like `automated-researcher`)
   this works under the existing `contents`+`pull_requests` perms — no change needed. A **private** install must
   add **`issues: read`** to both engineer Apps (+ re-accept), or the gate fails closed and blocks every merge.
 - **`issues: write` — for `wf.sh issue` (agent-filed Issues, #89).** `wf.sh issue <fam> create|comment`
@@ -124,7 +124,7 @@ git -C <repo> revert <merge-commit-sha>        # creates a revert commit
 ```
 
 If a plugin manifest changed, after a revert/merge refresh installed plugins:
-`claude plugin marketplace update aar-skills && claude plugin update <name>@aar-skills`.
+`claude plugin marketplace update automated-researcher && claude plugin update <name>@automated-researcher`.
 
 ## Follow-ups (not yet built)
 

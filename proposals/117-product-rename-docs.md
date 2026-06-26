@@ -27,6 +27,16 @@ Update current product-facing surfaces to lead with `automated-researcher`:
 Keep internal names such as `aar-engineering` and `.aar-ci` unchanged. Keep landed proposals and changelog
 history as historical records. Compatibility path deletion remains #115.
 
+The marketplace namespace and documented install namespace must move as one unit: `marketplace.json:name`
+and every README `plugin install <plugin>@<namespace>` example must agree. The fallback from #102 keeps both
+at `aar-skills`; it must not rename one without the other. This PR adds a deterministic check for that
+contract because the fake-HOME smoke reads the namespace from the manifest and cannot catch README drift.
+
+Precondition for the namespace flip: live local consumers on Anton's controller are `--plugin-dir` sessions,
+not marketplace-installed sessions depending on `@aar-skills`. Controller settings still record enabled
+plugins under the old namespace, but #119 owns moving those local settings; this product PR does not claim that
+already-installed marketplace caches have an alias.
+
 ## Alternatives considered
 
 ### Keep the marketplace namespace `aar-skills`
@@ -55,6 +65,9 @@ logic, GitHub branch protection, or live controller launch scripts.
 
 The marketplace namespace change affects fresh Claude plugin installs. Existing local `--plugin-dir` sessions
 continue to resolve through the filesystem alias until #119 moves controller launch paths.
+
+The `.aar-ci` label updates are author-facing and tied to the new deterministic README/manifest namespace
+check. They do not rename the internal `.aar-ci/` directory.
 
 ## Rollout + rollback
 

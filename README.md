@@ -1,4 +1,4 @@
-# aar-skills
+# automated-researcher
 
 Modular skills for coding agents doing real research work — extracted from a working
 autonomous-research lab (a MATS alignment-research program run by agents end-to-end),
@@ -9,19 +9,21 @@ is a thin skill + battle-tested scripts that work in Claude Code, Codex CLI, and
 else that reads the [Agent Skills](https://agentskills.io) format. The conversation stays
 the interface.
 
+Legacy note: this repo was previously named `aar-skills`. During migration, existing local installs may keep
+that as a compatibility alias, but new installs should use `automated-researcher`.
 
 ## If you are a coding agent handed this link
 
 Your human wants these skills available. Do this, in order:
 
-1. **Clone:** `git clone <this-repo-url> ~/aar-skills` (anywhere is fine; remember the path).
+1. **Clone:** `git clone <this-repo-url> ~/automated-researcher` (anywhere is fine; remember the path).
 2. **Install the skills** (pick your harness):
    - *Claude Code* — use the HEADLESS CLI, not the interactive `/plugin` UI:
      ```
-     claude plugin marketplace add ~/aar-skills
-     claude plugin install gpu-job@aar-skills
-     claude plugin install verify-claims@aar-skills
-     claude plugin install experiment-lifecycle@aar-skills
+     claude plugin marketplace add ~/automated-researcher
+     claude plugin install gpu-job@automated-researcher
+     claude plugin install verify-claims@automated-researcher
+     claude plugin install experiment-lifecycle@automated-researcher
      ```
      Then tell your human to run `/reload-plugins` (or restart the session) to activate.
      (`experiment-lifecycle` also needs an **execution profile** — your instance's provisioning,
@@ -32,20 +34,20 @@ Your human wants these skills available. Do this, in order:
      skills directory (note a plugin can expose more than one skill — `experiment-lifecycle` has two):
      ```
      mkdir -p ~/.codex/skills
-     ln -s ~/aar-skills/plugins/gpu-job/skills/gpu-job                    ~/.codex/skills/gpu-job
-     ln -s ~/aar-skills/plugins/verify-claims/skills/verify-claims        ~/.codex/skills/verify-claims
-     ln -s ~/aar-skills/plugins/experiment-lifecycle/skills/design-experiment ~/.codex/skills/design-experiment
-     ln -s ~/aar-skills/plugins/experiment-lifecycle/skills/run-experiment    ~/.codex/skills/run-experiment
+     ln -s ~/automated-researcher/plugins/gpu-job/skills/gpu-job                    ~/.codex/skills/gpu-job
+     ln -s ~/automated-researcher/plugins/verify-claims/skills/verify-claims        ~/.codex/skills/verify-claims
+     ln -s ~/automated-researcher/plugins/experiment-lifecycle/skills/design-experiment ~/.codex/skills/design-experiment
+     ln -s ~/automated-researcher/plugins/experiment-lifecycle/skills/run-experiment    ~/.codex/skills/run-experiment
      ```
      If you are developing the scaffold itself, also install the build-the-product skill:
      ```
-     ln -s ~/aar-skills/plugins/aar-engineering/skills/ship-change         ~/.codex/skills/ship-change
+     ln -s ~/automated-researcher/plugins/aar-engineering/skills/ship-change         ~/.codex/skills/ship-change
      ```
      `ship-change` in an enforced repo also needs engineer identity config and a cross-family reviewer command
      (for Codex authors, `AUDIT_VERIFIER_CMD` should point at a Claude-family CLI); see its `RUNBOOK.md`.
      Local harness wrappers are optional convenience files. Keep them thin: point at these source skills instead of
      copying the procedures.
-3. **Configure gpu-job:** run `~/aar-skills/plugins/gpu-job/skills/gpu-job/scripts/gpu_job_init.sh`.
+3. **Configure gpu-job:** run `~/automated-researcher/plugins/gpu-job/skills/gpu-job/scripts/gpu_job_init.sh`.
    It writes a local config (`~/.config/gpu-job/env`, chmod 600) and uploads nothing.
    **You will need to ask your human for, verbatim:**
    - a **RunPod API key** — they create it at runpod.io → Settings → API Keys (needs a funded
@@ -88,9 +90,9 @@ If *you* are setting these up by hand in the Claude Code UI (the agent path is t
 "If you are a coding agent" above — follow one or the other, not both):
 ```
 /plugin marketplace add <this-repo>
-/plugin install gpu-job@aar-skills
-/plugin install verify-claims@aar-skills
-/plugin install experiment-lifecycle@aar-skills
+/plugin install gpu-job@automated-researcher
+/plugin install verify-claims@automated-researcher
+/plugin install experiment-lifecycle@automated-researcher
 ```
 
 **Codex CLI / other Agent-Skills harnesses:** clone, then symlink each source skill dir into your harness's
