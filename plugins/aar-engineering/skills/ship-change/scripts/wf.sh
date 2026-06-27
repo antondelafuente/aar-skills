@@ -452,14 +452,14 @@ fd_review_high_github(){  # fd_review_high_github <repo> <pr> <pk> <read-token> 
   comments=$(GH_TOKEN="$tok" gh api "repos/$repo/issues/$pr/comments?per_page=100" 2>/dev/null) || return 2
   # Trust only reviewer-LOGIN-authored bodies whose marker is at the START of the body — startswith, NOT
   # contains, so a marker QUOTED inside a fenced review body (a review OF this very change, or a sweep's
-  # candidate text) can never masquerade as a real marked review. Reject the fresh-eyes sweep marker outright
-  # (defense in depth). Pick the most-recent survivor.
+  # candidate text) can never masquerade as a real marked review. startswith alone also excludes the fresh-eyes
+  # sweep (its body starts with the DISTINCT WF-FRESH-SWEEP marker, never WF-REVIEW) — so no extra sweep-marker
+  # filter is needed, and adding one would wrongly reject a genuine review that merely *mentions* the sweep
+  # marker (e.g. a review of this code). Pick the most-recent survivor.
   body=$(jq -rn --argjson R "$reviews" --argjson C "$comments" --arg login "$login" --arg prefix "$prefix" '
     ([ $R[] | {t: (.submitted_at // .created_at // ""), login: .user.login, body} ]
      + [ $C[] | {t: (.created_at // ""), login: .user.login, body} ])
-    | map(select(.login == $login and .body != null
-                 and (.body | startswith($prefix))
-                 and (.body | contains("<!-- WF-FRESH-SWEEP -->") | not)))
+    | map(select(.login == $login and .body != null and (.body | startswith($prefix))))
     | sort_by(.t) | last | .body // empty') 2>/dev/null || return 2
   [ -n "$body" ] || return 1   # no marked reviewer review recoverable
   # Capture the parser output AND status BEFORE cleanup so a temp write/read failure fails closed instead of
