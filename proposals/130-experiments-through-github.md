@@ -227,13 +227,15 @@ carry an open sub-decision, so they are `needs-design` — only the work that ca
 **`ready` (no open design):**
 - **Canonical-path record layout (local writes only):** `design-experiment` snapshots the *locked brief*
   (`DESIGN.md`/`START.md`/`CHECKLIST.md`) into `experiments/<exp>/` at clearance; `run-experiment` appends
-  only execution records, audit outputs, `RESULTS.md`, triage, and artifact-store pointers — it **never
-  authors the brief** ("your brief is your world"). Pure local writes, no PR/repo-resolution assumptions, so
-  independent of everything below.
+  only execution records, audit outputs, `RESULTS.md`, and artifact-store pointers — it **never authors the
+  brief** ("your brief is your world"). Pure local writes, no PR/repo-resolution assumptions, so independent
+  of everything below. (Writing the **triage** record is *not* part of this `ready` work — its schema is
+  deferred, so triage-writing is `blocked-by` the triage-schema child.)
 
 **`blocked-by` (file once parents land):**
-- `design-experiment` PR-open + `--design` review posting + fact-record linking — blocked-by the helper and
-  the per-experiment worktree/branch contract (Step 1).
+- `design-experiment` PR-open + `--design` review posting + fact-record linking — blocked-by the helper, the
+  per-experiment worktree/branch contract (Step 1), **and the instance-profile interface** (repo / base
+  branch / identity resolution it needs to open the PR).
 - `run-experiment` push-to-PR + close-review + merge gate — blocked-by the helper, the worktree/branch
   contract, the instance-profile interface, the triage schema, and terminal states.
 
