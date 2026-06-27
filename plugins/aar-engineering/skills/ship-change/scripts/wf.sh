@@ -211,9 +211,9 @@ review_audit_env(){  # review_audit_env <author> <constitution>
   # clean review file could then be reused as the merge verdict — a gate bypass). Clear it unconditionally.
   if [ "$author" = claude ] && is_claude_verifier_cmd "${AUDIT_VERIFIER_CMD:-}"; then
     note "ignoring same-family AUDIT_VERIFIER_CMD for author=claude; using default Codex verifier"
-    printf '%s\0' BASH_ENV= AUDIT_VERIFIER_CMD= AUDIT_DRY_RUN= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+    printf '%s\0' BASH_ENV= AUDIT_VERIFIER_CMD= AUDIT_DRY_RUN= DISPOSITION_FILE= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
   else
-    printf '%s\0' BASH_ENV= AUDIT_DRY_RUN= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+    printf '%s\0' BASH_ENV= AUDIT_DRY_RUN= DISPOSITION_FILE= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
   fi
 }
 
@@ -1238,11 +1238,12 @@ Split into one design PR per doc."
        # Detect a TRUE duplicate WITHIN the reviewer-derived list (a hashed-id collision = real ambiguity)
        # BEFORE any dedup, so `sort -u` below only collapses the legitimate reviewer∩state overlap.
        REVHIGH=$(fd_review_high_list "$PRIORREV")
-       DUPR=$(printf '%s\n' "$REVHIGH" | grep -v '^$' | sort | uniq -d)
+       # awk 'NF' (not grep -v '^$') so an EMPTY list — the expected convergence case — returns 0, not 1-under-pipefail.
+       DUPR=$(printf '%s\n' "$REVHIGH" | awk 'NF' | sort | uniq -d)
        [ -z "$DUPR" ] || die "ambiguous reviewer findings — colliding id(s): $(printf '%s ' $DUPR) — cannot disposition unambiguously"
        # UNION of reviewer-derived HIGH ids (trusted; catches a deleted/downgraded disposition) AND the state's
        # own HIGH ids (catches a stale `unresolved` HIGH the current reviewer no longer raises). Either blocks.
-       { printf '%s\n' "$REVHIGH"; fd_high_list "$FD"; } | grep -v '^$' | sort -u > "$FDLIST"
+       { printf '%s\n' "$REVHIGH"; fd_high_list "$FD"; } | awk 'NF' | sort -u > "$FDLIST"
        ( cd "$WT" && bash "$(dirname "$0")/disposition_gate.sh" "$FD" "$FDLIST" ) \
          || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
   esac
