@@ -50,7 +50,7 @@ commits to the one branch."
 
 **Canonical merged record path.** The branch/PR are the *process*; the durable home on `main` is a stable
 per-experiment directory — `experiments/<exp>/` (`DESIGN.md`, `START.md`, `RESULTS.md`, the four gate
-outputs + their triage responses, and artifact/R2 pointers) — mirroring the existing per-experiment dir
+outputs + their triage responses, and artifact-store pointers) — mirroring the existing per-experiment dir
 convention (`~/orchestrator/<exp>/` today). Records are committed to that path so they survive branch
 deletion and never collide across experiments; the PR and its reviews are *pointers* to that path, not the
 only place the record lives.
@@ -60,8 +60,14 @@ only place the record lives.
 The constitution already requires the design be **cleared before the run** ("clear the design with Anton
 before running it"; the design-audit is the last step of DESIGN-together). #130 does not add a new gate — it
 **relocates that existing clearance onto the PR**. The cross-family `audit_experiment --design` is posted to
-the PR, Anton arbitrates the survivors, and only then is the zero-context executor handed `START.md` and
-spawned. **Design approval blocks the run.**
+the PR, the design-approver arbitrates the survivors, and only then is the zero-context executor handed
+`START.md` and spawned. **Design approval blocks the run.**
+
+**Clearance binds to the reviewed commit.** Approval records the exact `DESIGN.md`/`START.md` commit SHA as
+a clearance artifact; `run-experiment` verifies that SHA before any spend, and **any later change to the
+design or the executor brief forces re-clearance** before the run. This is the same integrity property
+ship-change's merge gate already has (re-review the final diff) — the reviewed design must be the *run*
+design, not whatever the branch drifted to after approval.
 
 At the other end, separate **compute teardown** from **validity closure** — they are not the same event:
 
@@ -86,7 +92,7 @@ onto the PR.
 ### 3. Skill placement — the seam maps onto the branch, unchanged in spirit
 
 - **`design-experiment`** gains: commit `DESIGN.md` to `run/<exp>`, open the draft PR, request and post the
-  `audit_experiment --design` review (and link the `verify_claim` fact record), drive to Anton's clearance,
+  `audit_experiment --design` review (and link the `verify_claim` fact record), drive to the design-approver's clearance,
   then write `START.md` and hand off.
 - **`run-experiment`** gains: the executor pushes records (`RESULTS.md`, the `--data` audit outputs, ledger/
   R2/artifact pointers) to the branch as commits; tears down compute on verified upload; at close, requests
@@ -117,9 +123,13 @@ research audits + the zero-HIGH close gate — but neither re-implements the Git
 
 **The helper's home is a runtime layer, not the build plugin.** `aar-engineering` is the *build-the-product*
 plugin (installed only by scaffold developers), so the helper cannot live there or the research runtime would
-take a build-layer dependency. Its canonical home is **`verify-claims`** — already the shared
-cross-family runtime both flows consume — and `ship-change`/`wf.sh` is refactored to consume the same helper.
-(Resolved here, not deferred: a `ready` extraction child cannot carry an undecided home.)
+take a build-layer dependency. Its home is a **neutral GitHub-lifecycle runtime helper** that both
+flows consume — *not* the build plugin, and *not* `verify-claims` either: verify-claims is the **read-only**
+adversarial-audit plugin, so giving it draft-PR creation, identity, and merge authority would be the wrong
+seam (it would own mutation it has no business owning). The helper owns the GitHub *mutation/posting*
+plumbing; `verify-claims` keeps producing audit *outputs*. The exact host (a small dedicated plugin vs.
+another existing runtime home) is the helper child's first decision — which is why that child is
+`needs-design`, not `ready`.
 
 **The helper enforces the cross-family contract mechanically**, inheriting the discipline #134 just
 established for `wf.sh`: design/close reviews take an **explicit** runner/designer family — no silent
@@ -177,9 +187,10 @@ is reproducible even if instance config later changes.
   the experiment-PR path goes through the helper, which **requires** an explicit runner/designer family and
   fails closed; only that path carries the cross-family guarantee. (Folding explicit-family selection into the
   engine's own contract is an option for the helper child.)
-- **Shared helper (decision 5):** the GitHub-identity + review-posting primitives are extracted into
-  **`verify-claims`** (the shared cross-family runtime), and `aar-engineering`/`wf.sh` is refactored to
-  consume it — so `experiment-lifecycle` never depends on the build plugin. This is the one cross-cutting edit.
+- **Shared helper (decision 5):** the GitHub-identity + review-posting + mutation primitives are extracted
+  into a neutral GitHub-lifecycle runtime helper (not the build plugin, not read-only `verify-claims`), and
+  `aar-engineering`/`wf.sh` is refactored to consume it. This is the one cross-cutting edit; its exact host is
+  the helper `needs-design` child.
 - **Canonical record path:** establishes `experiments/<exp>/` on the research repo's `main` as the durable
   per-experiment home.
 - **Builds on** Step 1 (per-experiment worktrees; the `run/<exp>` branch) — a separate `needs-design` issue.
@@ -195,9 +206,10 @@ carry an open sub-decision, so they are `needs-design` — only the work that ca
 `ready`, and dependent work is filed `blocked-by` its parents (per the two-phase contract).
 
 **`needs-design` children (each carries an open sub-decision):**
-- **Shared-helper extraction** — into `verify-claims`, *with* the merge-authority trust/source-selection
-  contract (which primitives load from trusted-base vs runtime) + the poisoned-helper smoke. The home is
-  decided; the trust split is the open design.
+- **Shared-helper extraction** — into a neutral GitHub-lifecycle runtime helper (host TBD: a small dedicated
+  plugin vs. an existing runtime home; *not* read-only `verify-claims`, *not* the build plugin), *with* the
+  merge-authority trust/source-selection contract (which primitives load from trusted-base vs runtime) + the
+  poisoned-helper smoke. Both the host and the trust split are open design.
 - **Triage-artifact schema** — path, finding identifiers, allowed statuses {fixed | justified-with-reason |
   deferred}, pass/fail rules. None exists in the lifecycle yet.
 - **Terminal experiment states** — blocked / invalid / abandoned / null-conclusion: which states exist, what
@@ -205,13 +217,16 @@ carry an open sub-decision, so they are `needs-design` — only the work that ca
 - **Instance-profile discovery/init interface** — the concrete config path, schema, init owner, and brief
   snapshot rules. Today it is only a narrative seam.
 
-**`ready` (no open design — independent of the above):**
-- `run-experiment` **record-pushing**: commit `DESIGN.md`/`START.md`/`RESULTS.md` + gate outputs + pointers
-  to the `experiments/<exp>/` canonical path. Pure plumbing, depends on nothing open.
+**`ready` (no open design):**
+- `run-experiment` **local record-writing**: write `DESIGN.md`/`START.md`/`RESULTS.md` + gate outputs +
+  artifact-store pointers into the `experiments/<exp>/` tree in the working copy. Pure local plumbing — it
+  makes no PR/repo-resolution assumptions, so it is independent of everything below.
 
 **`blocked-by` (file once parents land):**
-- `design-experiment` PR-open + `--design` review posting + fact-record linking — blocked-by the helper.
-- `run-experiment` close-review + merge gate — blocked-by the helper, the triage schema, and terminal states.
+- `design-experiment` PR-open + `--design` review posting + fact-record linking — blocked-by the helper and
+  the per-experiment worktree/branch contract (Step 1).
+- `run-experiment` push-to-PR + close-review + merge gate — blocked-by the helper, the worktree/branch
+  contract, the instance-profile interface, the triage schema, and terminal states.
 
 ## Rollout + rollback
 
