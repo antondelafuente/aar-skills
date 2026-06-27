@@ -19,24 +19,26 @@ merge review, and let the **model** (not a hash) decide which of its findings ar
 SEMANTIC, not textual — a rephrased version of an already-dispositioned finding must NOT block (design-review
 F1). Concretely:
 
-1. **Force-stateless un-anchored sweep.** `run_review` gains `WF_STATELESS_REVIEW=1`, which skips the
-   disposition injection so the reviewer does a full, amnesiac holistic read (re-raises *everything*, anchored
-   to nothing). This un-anchored read is exactly what caught #132's pre-existing hole that the
-   disposition-anchored review trusted past. **Its output is POSTED as a durable PR comment** (design-review
-   F2), so a fresh agent can triage it from GitHub, not just a `/tmp` file.
-2. **Semantic adjudication by the merge review, not hashing.** The disposition-aware merge review is given the
-   sweep's findings as candidate items and asked to surface any HIGH **not semantically covered** by a valid
-   disposition — including a pre-existing hole no prior finding named. Rephrasings of dispositioned findings
-   are recognized and suppressed by the model; genuinely-new holes become **residual HIGH** and block via the
-   existing gate. The author then dispositions the real ones.
-3. No hash-based auto-seeding of the sweep into the state (that equated textual novelty with real novelty —
-   F1). The author may still `fdispo seed` to record a confirmed-new finding; the *gate* relies on the model's
-   semantic judgment, backstopped deterministically by #139's structural gate over whatever the author did
-   disposition.
+1. **Force-stateless un-anchored sweep, to its OWN artifact.** `run_review` gains `WF_STATELESS_REVIEW=1`,
+   which skips the disposition injection so the reviewer does a full amnesiac holistic read (re-raises
+   *everything*, anchored to nothing) — exactly the un-anchored read that caught #132's pre-existing hole. The
+   sweep writes a **distinct `wf_fresh_<branch>.md` artifact** (NOT the `wf_code_*`/`wf_scaffold_*` review file
+   #139 consumes), and is posted **comment-only, non-gating** (no native `REQUEST_CHANGES`; raw stateless HIGHs
+   are not a verdict). Posting makes it durable/recoverable from GitHub (F2/F3).
+2. **Candidate-only: the sweep never mutates disposition state or the deterministic gate (F1/F2).** It does NOT
+   `fd_seed`, is NOT in `fd_review_high_list`, and is NOT fed to #139's structural gate — feeding its hash-ids
+   anywhere deterministic would re-introduce the rephrasing false-block (a reworded dispositioned finding =
+   new hash). The structural gate (#139) is **unchanged**.
+3. **Semantic adjudication by the merge review, the only place novelty is judged.** The disposition-aware merge
+   review is handed the `wf_fresh` findings as *candidates* (via a `FRESH_SWEEP_FILE` env) and asked to surface
+   any HIGH **not semantically covered** by a valid disposition — including a pre-existing hole no prior
+   finding named. Rephrasings of dispositioned findings are recognized and suppressed by the model; genuinely-
+   new holes become **residual HIGH** and block via the existing gate. The author then dispositions the real
+   ones (the posted sweep + the residual review are what they triage — F4).
 
 So the pair is: **stateful gate for convergence + a mandatory un-anchored fresh sweep at the merge checkpoint
-for completeness, reconciled semantically by the model.** No state on a PR → no sweep (today's stateless
-behavior is already "all fresh").
+for completeness, reconciled SEMANTICALLY by the model (never by hash).** No state on a PR → no sweep (today's
+stateless behavior is already "all fresh").
 
 ### Cadence
 
@@ -51,8 +53,10 @@ sound rather than self-referential.
   *mandatory* backstop; an opt-in step gets skipped exactly when convergence pressure is highest. Auto-in-
   `finish` is enforceable.
 - **Block directly on the stateless sweep's raw HIGH count.** Rejected: stateless re-raises dispositioned
-  findings, so its raw count is meaningless as a gate. The sweep *feeds the state* (only new ids become
-  `unresolved`); the existing structural + model gates do the blocking.
+  findings, so its raw count is meaningless as a gate (it would block every disposition-aware PR). The sweep is
+  **candidate input only**; the disposition-aware merge review's *semantic* residual is the gate.
+- **Auto-seed the sweep's findings into state by hash.** Rejected (design-review F1): textual novelty ≠
+  semantic novelty — a rephrased dispositioned finding would false-block. The model adjudicates novelty.
 - **Run the sweep every round (code-review), not just finish.** Deferred: more cost for less leverage; the
   merge checkpoint is where a trusted-past hole would actually escape. `finish` is the load-bearing moment.
 
