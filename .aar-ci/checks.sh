@@ -100,6 +100,18 @@ PY
   fi
 fi
 
+# 1d. feedback-loop exposes two independently installed skills, so its init helper is packaged in both skill dirs.
+#     Keep the copies byte-identical; unlike DISPOSITIONS.md there is no separate editorial source.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/feedback-loop/skills/(file-feedback|triage-feedback)/scripts/feedback_loop_init\.sh$'; then
+  FF_INIT="plugins/feedback-loop/skills/file-feedback/scripts/feedback_loop_init.sh"
+  TF_INIT="plugins/feedback-loop/skills/triage-feedback/scripts/feedback_loop_init.sh"
+  if [ -f "$FF_INIT" ] && [ -f "$TF_INIT" ] && cmp -s "$FF_INIT" "$TF_INIT"; then
+    ok "feedback-loop init copies match"
+  else
+    err "feedback_loop_init.sh copies drift; keep file-feedback and triage-feedback copies byte-identical"
+  fi
+fi
+
 # 2. shell syntax — *.sh AND extensionless shell scripts (e.g. .githooks/* hooks) detected by shebang
 for p in "${PATHS[@]}"; do
   [ -f "$p" ] || continue

@@ -32,7 +32,8 @@
       Parking with only an in-process monitor is FAIL for autonomous detached runs; a blocking watcher that keeps the
       executor turn alive is controller-supervised, not autonomous detached.
       (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + box-side idle-teardown watchdog).  ev:
-- ☐ Read experiment_gotchas.md tail (a peer may have logged the wall you're about to hit).      ev:
+- ☐ Read the consuming instance's feedback/gotcha guidance, or the `FEEDBACK_INSTANCE_GUIDANCE`
+      target when using feedback-loop (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample
       logs, generated data, reproduce scripts), not just SUMMARY.md, BEFORE teardown.            ev: rclone lsf
 - ☐ [BLOCK] RESULTS.md written + judged against the pre-registered DESIGN rules; conclusions
@@ -40,7 +41,8 @@
 - ☐ [BLOCK] Cross-family close audit run + every finding responded (ACCEPT/DISPUTE/DEFER).       ev: AUDIT.md
 - ☐ [BLOCK] Teardown verified via the DEPLOYING account's control plane (REST 404 / GraphQL
       empty with the DEPLOY key — never SSH liveness); self-wake/watchdog cleared.               ev:
-- ☐ Retro filed (gotchas + backlog + the GAPS below) via file-feedback.                          ev:
+- ☐ Retro filed via feedback-loop's file-feedback when installed/configured; otherwise recorded
+      through the consuming instance's feedback guidance.                                         ev:
 
 ## DATA AUDIT  (STANDING — not conditional; every experiment touches data)
 - ☐ [BLOCK] Audit/resolve EVERY data surface class — **(a) training data, (b) eval input data,
