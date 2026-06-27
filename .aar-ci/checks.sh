@@ -198,6 +198,13 @@ if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-c
   else
     err "wf.sh changed but fd_state_smoke.sh missing — cannot verify the finding-disposition helpers"
   fi
+  IV_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/issue_verbs_smoke.sh"
+  if [ -f "$IV_SMOKE" ]; then
+    echo "[checks] engineer issue-verbs smoke" >&2
+    bash "$IV_SMOKE" >&2 && ok "issue_verbs smoke" || err "issue_verbs smoke FAILED"
+  else
+    err "wf.sh changed but issue_verbs_smoke.sh missing — cannot verify the narrow maintainer verbs (#164)"
+  fi
 fi
 
 # 8. disposition structural-gate smoke (#138): the deterministic gate that validates .aar-ci/dispositions.json
