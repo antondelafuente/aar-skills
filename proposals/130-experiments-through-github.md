@@ -153,7 +153,9 @@ taint the record — but it is **enforced in the right place**: the read-only au
 `--data`) enforce family in `verify-claims` / the audit-runner contract where they actually run; the GitHub
 helper enforces it on the rungs it runs (`--design`, close) and otherwise only **posts/merges** already-
 produced audit outputs. The helper does not own the read-only audit contract — it must not become a second
-home for cross-family enforcement.
+home for cross-family enforcement. Making `verify_claim`/`--data` actually require explicit family and fail
+closed (today they default to a substrate family with no check) is the **audit-runner cross-family contract**
+prerequisite child below; the four-rung promise is `blocked-by` it.
 
 **Merge-authority code loads from a trusted source, never the branch under review.** Because the helper now
 carries *write/merge* authority, an experiment PR that edited the helper could otherwise run its own
@@ -234,6 +236,10 @@ carry an open sub-decision, so they are `needs-design` — only the work that ca
   evidence each requires, when such a record merges as "no valid conclusion."
 - **Instance-profile discovery/init interface** — the concrete config path, schema, init owner, and brief
   snapshot rules. Today it is only a narrative seam.
+- **Audit-runner cross-family contract** — make `verify_claim` and experiment `--design`/`--data`/close *all*
+  require an explicit runner/designer family and **fail closed on same-family**. Today only `--scaffold`/
+  `--code` require explicit `AAR_SUBSTRATE`; the read-only rungs default to a substrate family with no check,
+  so the four-rung cross-family promise is unbacked until this lands.
 
 **`ready` (no open design):** none stands fully independent. The record layout below *looked* ready but
 depends on where `experiments/<exp>/` lives (the worktree/profile contract), so it is `blocked-by`. Honest
