@@ -56,9 +56,16 @@ The config keys are:
 - `FEEDBACK_INSTANCE_PIPELINES_DIR`: optional local pipelines/helper pointer.
 - `FEEDBACK_ISSUE_COMMAND`: optional issue creation/comment command override.
 
-The initializer may suggest `antondelafuente/automated-researcher` only when it can identify the plugin source
-checkout as this upstream repository. It must not derive the product repo from the caller's current directory,
-and it must not silently default outside installs to Anton's tracker.
+The initializer always requires `FEEDBACK_PRODUCT_REPO` through an environment preseed or an interactive prompt.
+It does not auto-detect or auto-suggest `antondelafuente/automated-researcher`; that avoids a fork/upstream
+ambiguity and removes the hidden "works on Anton's box" class entirely. A non-interactive run without
+`FEEDBACK_PRODUCT_REPO` exits with a clear message and leaves no partial config.
+
+The skills read `~/.config/feedback-loop/env` at point of need. If the config file or `FEEDBACK_PRODUCT_REPO` is
+missing, product feedback is not silently sent anywhere: the skill drafts the exact Issue/search/comment text for
+the researcher and tells them to run `feedback_loop_init.sh` to enable direct filing. Deployment-only feedback
+requires the corresponding instance file keys; when absent, the skill drafts a local note instead of writing to
+Anton paths.
 
 ### `file-feedback`
 
@@ -113,23 +120,32 @@ single-source contract rather than hand-maintaining a second vocabulary.
 
 ### Experiment-lifecycle references
 
-Update the lifecycle skills/templates so feedback remains optional:
+Update the lifecycle skills/templates so feedback has a concrete product pointer while remaining optional:
 
-- replace hardcoded `file-feedback` requirements with neutral wording that says to use the installed feedback
-  loop or the consuming instance's feedback process;
+- reference `feedback-loop`'s `file-feedback` skill by name at retro/checklist points;
+- add explicit fallback wording: if `feedback-loop` is not installed or configured, use the consuming instance's
+  feedback process and record the note where the instance tells you to;
 - replace literal `experiment_gotchas.md`/`AAR_BACKLOG` assumptions with configured instance feedback surfaces;
-- keep the design/run retro requirement, but do not require `feedback-loop` to be installed for
+- keep the design/run retro requirement, but do not require `feedback-loop` to be installed for the rest of
   `experiment-lifecycle` to make sense.
 
 ## Alternatives considered
 
 - **Copy the home skills nearly verbatim.** Rejected: that would preserve the hidden coupling to Anton's home
   checkout and make outside installs fail in confusing ways.
+- **Fold `file-feedback` / `triage-feedback` into `aar-engineering`.** Rejected: `triage-feedback` uses
+  `ship-change` when it is maintaining the product, but `file-feedback` is also a user-side research skill for
+  people who install `experiment-lifecycle` without the build-the-product SWE layer. Keeping a separate
+  `feedback-loop` plugin preserves the install boundary: research users can report friction without installing
+  the engineering workflow, while maintainers can optionally integrate with `aar-engineering`.
 - **Make feedback-loop the canonical home for disposition definitions.** Rejected by #111/#121: dispositions
   govern the whole product issue lifecycle and are enforced by `aar-engineering`; repo-root `AGENTS.md` remains
   the editorial source, with packaged references for plugin installs.
 - **Only document "file an Issue" in README.** Rejected: the live workflow has real routing judgment, duplicate
   handling, disposition assignment, and fix-now discipline. That belongs in a point-of-need skill.
+- **Auto-default `FEEDBACK_PRODUCT_REPO` to this upstream repo when the checkout looks like upstream.** Rejected:
+  upstream/fork detection is exactly the wrong place to be clever. An explicit prompt/env key is simpler,
+  clearer, and cannot misroute an outside install's feedback to Anton's tracker.
 - **Require `aar-engineering` for issue filing.** Rejected: the integration is valuable when configured, but a
   product user should still get a safe draft/fallback when engineer Apps are not installed.
 - **Move all instance archive procedure into product.** Rejected: local gotcha/archive filenames and emoji
@@ -143,8 +159,10 @@ Update the lifecycle skills/templates so feedback remains optional:
   or Anton's feedback filenames.
 - Adds packaged disposition references under the new skills; existing CI drift checks cover them.
 - Does not change `ship-change`, GitHub branch protection, GPU execution behavior, or research experiment method.
-- Does not edit Anton's instance wrappers in this PR; the controller symlink/wrapper flip remains routed
-  instance work after merge.
+- The product PR does not edit Anton's home directory, but same-day deployment is part of the release step:
+  after merge, flip the local Claude/Codex wrapper skills for `file-feedback` and `triage-feedback` to point at
+  the product plugin source, preserving any instance-only overlay guidance in `/home/anton` rather than leaving
+  duplicate live skill bodies.
 
 ## Rollout + rollback
 
@@ -152,8 +170,10 @@ Roll out through the normal `ship-change` lifecycle: draft PR, scaffold review, 
 classification, checks, fake-HOME smoke, final review, protected merge. The new plugin is opt-in, so existing
 installs keep working if they do not install it.
 
-After merge, this deployment can flip the local Claude/Codex wrapper skills to the product source and then keep
-instance-only file/archive details in `/home/anton` guidance.
+After merge, this deployment must flip the local Claude/Codex wrapper skills to the product source in the same
+work session and keep instance-only file/archive details in `/home/anton` guidance. If that instance flip cannot
+be completed immediately, open a tracked instance follow-up before marking this shipped; do not leave two
+independently-editable live copies as the steady state.
 
 Rollback is a normal revert of the merge commit. Because the plugin is additive and the lifecycle text degrades
 to neutral instance-feedback wording, rollback risk is low.
