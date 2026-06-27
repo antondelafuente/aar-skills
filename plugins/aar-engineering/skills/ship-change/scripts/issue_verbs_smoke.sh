@@ -177,6 +177,17 @@ check "dispose does NOT remove the non-disposition 'bug' type label" "! grep -q 
 echo "=== dispose: 'parked-reason' is a valid key (only the LABEL is restricted to dispositions) ==="
 check "parked-reason key was accepted above" "[ $rc -eq 0 ]"
 
+echo "=== empty supplied value fails closed (automation passing an unset var) ==="
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo -r "" 2>&1); rc=$?
+echo "$out"
+check "empty bare --reason exits nonzero" "[ $rc -ne 0 ]"
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo --duplicate-of "" 2>&1); rc=$?
+echo "$out"
+check "empty bare --duplicate-of exits nonzero" "[ $rc -ne 0 ]"
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo --reason= 2>&1); rc=$?
+echo "$out"
+check "empty --reason= exits nonzero" "[ $rc -ne 0 ]"
+
 echo "=== allowlist: a disallowed flag fails closed (no arbitrary passthrough) ==="
 out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo --web 2>&1); rc=$?
 echo "$out"

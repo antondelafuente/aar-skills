@@ -635,6 +635,9 @@ issue_maintainer_verb(){
   local a
   for a in "$@"; do
     if [ -n "$want" ]; then
+      # An explicitly-supplied flag value must be non-empty: automation passing an unset variable
+      # (e.g. `--reason "$VAR"` with VAR empty) must FAIL CLOSED, not silently fall back to default semantics.
+      [ -n "$a" ] || die "wf.sh issue $verb: flag value for --$want must not be empty (an empty value was supplied)"
       case "$want" in
         repo) repo=$a ;; comment) comment=$a ;; reason) reason=$a ;; dupof) dupof=$a ;;
         dlabel) dlabel=$a ;; bodyline) bodyline=$a ;;
@@ -643,6 +646,9 @@ issue_maintainer_verb(){
       want=""; continue
     fi
     case "$a" in
+      # An explicit `--flag=` / `-x=` with an EMPTY value fails closed too (same reason as the bare-form check
+      # above) — an empty supplied value must never read as "flag omitted".
+      -[A-Za-z]=|--*=) die "wf.sh issue $verb: flag '$a' was given an empty value (an empty value is not allowed)" ;;
       -R|--repo)            want=repo ;;
       -R=*) repo=${a#-R=} ;; --repo=*) repo=${a#--repo=} ;;
       -c|--comment)         [ "$verb" = close ] || die "wf.sh issue $verb: -c/--comment is only valid for 'close'"; want=comment ;;
