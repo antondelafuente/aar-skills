@@ -148,30 +148,40 @@ and the instance applies the capability change to itself.
    (Finding 2); and a behavior smoke asserting **all** directions (bare `gh` write blocked; credential-
    mutating `gh auth` blocked; `wf.sh`-routed write AND full engineer push allowed). Owns the
    guard-specific override flag.
-2. **Read-only-ambient detector: `wf.sh doctor` check + a `.aar-ci` fake-`gh` smoke (product).** Implements
-   ONE concrete, non-mutating test (this design picks the method, it is not a placeholder), and it probes
-   the **actual write permission classes that caused the incident — issues/PRs/comments/contents — not
-   repo administration** (Finding 1: a repo-admin PATCH would falsely pass a token that can write issues/PRs
-   but not admin). The probe is a **permission-gated write that is shaped to never mutate**, against the
-   write classes the incident is about, inspecting **HTTP status only**:
-   - Primary (issues/PR-comment class, the exact incident surface): `gh api --method PATCH
-     "repos/{owner}/{repo}/issues/comments/{nonexistent-id}" -f body=x` — a **read-only** token is
-     rejected at the permission layer with **403** (PASS); a **write-capable** token passes the permission
-     check and hits the missing resource, returning **404** (FAIL, loud). It never mutates because the
-     target comment id does not exist.
-   - Same-shape contents-class corroborator (the other incident write surface): a `PUT`/`PATCH` against a
-     contents endpoint with a deliberately-invalid precondition so a write-capable token gets a
-     422/404-class status (passed the permission gate) while a read-only token gets 403.
+2. **Read-only-ambient detector: `wf.sh doctor` check + a `.aar-ci` fake-`gh` smoke (product), covering
+   BOTH the `gh`/API surface AND the ambient `git push` surface (Finding 1).** Implements concrete,
+   non-mutating tests (this design picks the methods; it is not a placeholder), probing the **actual write
+   permission classes that caused the incident — issues/PRs/comments/contents — not repo administration**
+   (a repo-admin PATCH would falsely pass a token that can write issues/PRs but not admin).
 
-   `doctor` reads the status via `gh api -i` / `--include` and never trusts the body; **403 on the
-   permission-gated write classes ⇒ read-only (PASS); a non-403 "permission-passed" status (404/422/2xx)
-   ⇒ write-capable (FAIL)**. This status-based probe is chosen over header-scope introspection because
-   fine-grained PATs and installation tokens do **not** return classic `x-oauth-scopes` headers, so the
-   permission-denied status is the only portable signal. The `.aar-ci` fake-`gh` smoke supplies a stub `gh`
-   that returns 403 for the read-only fixture and the permission-passed status for the write-capable
-   fixture, and asserts `doctor` reports read-only vs write-capable accordingly. Fails loudly if an install
-   still hands agents a write-capable ambient token, so a regression/rollback is caught instead of silently
-   re-opening the footgun.
+   **(a) API-write probe — against a REAL, existing resource so the only variable is the permission gate
+   (not GitHub's 403-vs-404 status ordering, which is not a documented contract — Finding 2).** Use an
+   **identity-write on an existing object the token can address**: `gh api --method PATCH
+   "repos/{owner}/{repo}/issues/comments/{id-of-a-known-existing-comment}" -f body="{its-current-body}"` —
+   an existing target with an identity body, so a write-capable token passes the permission gate and
+   *re-sets the body to itself* (semantic no-op, **2xx**), while a read-only token is blocked at the
+   permission layer (**403**). The signal is now a clean **403 ⇒ read-only (PASS) / 2xx ⇒ write-capable
+   (FAIL)** on a real resource, with no reliance on missing-resource status ordering. (If the instance
+   prefers zero writes whatsoever, the alternative is a `GET` of the token's *own* permission surface where
+   available, e.g. an installation token's permissions object; but the identity-write canary is the
+   portable default because fine-grained PATs don't expose `x-oauth-scopes` headers.)
+   **The child issue MUST empirically prove the 403/2xx matrix against both a read-only and a write-capable
+   token before this probe is treated as the rollout gate** — the validation is part of the child's
+   acceptance, not assumed.
+
+   **(b) Ambient-`git push` probe (Finding 1):** a **non-mutating `git push --dry-run`** to a disposable
+   ref on the GitHub remote, with **all credential prompts disabled** (`GIT_TERMINAL_PROMPT=0`,
+   `GIT_ASKPASS=/bin/false`/`true`, `core.askPass` empty, SSH `BatchMode=yes`) and the engineer credential
+   explicitly absent, so it exercises only whatever **ambient** Git credential the shell resolves. If the
+   dry-run push is *accepted* (an owner HTTPS/SSH credential can write), `doctor` FAILS loudly; if it is
+   *rejected* for auth, the ambient Git surface is read-only (PASS). `--dry-run` never updates the remote.
+
+   `doctor` reads HTTP status via `gh api -i` / `--include` and never trusts the body. The `.aar-ci`
+   fake-`gh`/fake-`git` smoke supplies stubs that return the read-only fixture (403 / push-rejected) and
+   the write-capable fixture (2xx / push-accepted) and asserts `doctor` reports read-only vs write-capable
+   accordingly for **both** the API and the Git surface. Fails loudly if an install still hands agents a
+   write-capable ambient credential on either surface, so a regression/rollback is caught instead of
+   silently re-opening the footgun.
 3. **Codify the contract across ALL its canonical homes — one canonical reference, no duplicate live
    contracts (product, doc-only; Finding 5).** Add the rule to `AGENTS.md` ("the ambient agent GitHub
    credential MUST be read-only; all writes go through the engineer token path"), next to the existing
