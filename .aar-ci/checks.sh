@@ -193,4 +193,16 @@ if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-c
   fi
 fi
 
+# 8. disposition structural-gate smoke (#138): the deterministic gate that validates .aar-ci/dispositions.json
+#    against the reviewer's finding list (fail-closed). Runs when the gate or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/aar-engineering/skills/ship-change/scripts/disposition_gate(_smoke)?\.sh$'; then
+  DG_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/disposition_gate_smoke.sh"
+  if [ -f "$DG_SMOKE" ]; then
+    echo "[checks] disposition structural-gate smoke" >&2
+    bash "$DG_SMOKE" >&2 && ok "disposition_gate smoke" || err "disposition_gate smoke FAILED"
+  else
+    err "disposition_gate.sh changed but disposition_gate_smoke.sh missing — cannot verify the structural gate"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }
