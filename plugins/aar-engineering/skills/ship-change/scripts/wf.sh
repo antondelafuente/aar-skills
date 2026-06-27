@@ -690,20 +690,47 @@ issue_maintainer_verb(){
     dispose)
       [ -n "$dlabel" ] || die "wf.sh issue dispose: --label <disposition> is required"
       [ -n "$bodyline" ] || die "wf.sh issue dispose: --body-line \"<key>: <val>\" is required"
+      # The disposition vocab is fixed (DISPO_RE, the same set the close-gate enforces): dispose sets a
+      # DISPOSITION, so reject anything that isn't one — this is not a general label setter.
+      printf '%s' "$dlabel" | grep -qE "$DISPO_RE" || die "wf.sh issue dispose: --label must be a disposition ($(bash "${BASH_SOURCE[0]}" dispositions | paste -sd'|' -)); got '$dlabel' (use 'wf.sh issue <fam> label' for non-disposition labels)"
       case "$bodyline" in *:*) ;; *) die "wf.sh issue dispose: --body-line must contain a 'key:' (e.g. \"blocked-by: #42\") so it can be set idempotently" ;; esac
       local key; key=${bodyline%%:*}            # idempotency key = text before the first colon
+      # Treat the key as a LITERAL prefix, never a regex: validate a conservative charset (word chars + '-')
+      # so it can't smuggle ERE metacharacters that would delete unrelated body lines.
+      case "$key" in *[!A-Za-z0-9_-]*|"") die "wf.sh issue dispose: --body-line key '$key' must be [A-Za-z0-9_-]+ (e.g. 'blocked-by'); the part before the first ':'" ;; esac
       local cur newbody
       cur=$(gh_author "$ATOK" issue view "$num" -R "$repo" --json body -q .body 2>/dev/null) \
         || die "wf.sh issue dispose: could not read issue #$num body — failing closed"
-      # Drop any existing line whose key matches (so re-disposing replaces, never duplicates), then append.
-      newbody=$(printf '%s' "$cur" | grep -vE "^[[:space:]]*${key}[[:space:]]*:" || true)
+      # Drop any existing line whose key matches (LITERAL prefix compare in awk, not a regex), so re-disposing
+      # replaces rather than duplicates; fail closed on a filter error rather than risk an empty-body overwrite.
+      newbody=$(printf '%s' "$cur" | awk -v k="$key" '{ l=$0; sub(/^[ \t]+/,"",l); if (index(l, k ":")==1) next; print }') \
+        || die "wf.sh issue dispose: body-line filter failed — failing closed (refusing to overwrite the issue body)"
       newbody=$(printf '%s\n%s\n' "$newbody" "$bodyline")
-      printf '%s' "$newbody" | gh_author "$ATOK" issue edit "$num" -R "$repo" --add-label "$dlabel" --body-file - \
+      # Set the disposition label AND remove every OTHER disposition label in the same edit, so the
+      # "exactly one disposition" invariant holds (a single --add-label could otherwise leave two). Read the
+      # current labels; remove any disposition label that isn't the one we're setting.
+      local -a editargs=(issue edit "$num" -R "$repo" --add-label "$dlabel" --body-file -)
+      local curlabels lbl
+      curlabels=$(gh_author "$ATOK" issue view "$num" -R "$repo" --json labels -q '.labels[].name' 2>/dev/null) \
+        || die "wf.sh issue dispose: could not read issue #$num labels — failing closed"
+      while IFS= read -r lbl; do
+        [ -n "$lbl" ] || continue
+        [ "$lbl" = "$dlabel" ] && continue
+        printf '%s' "$lbl" | grep -qE "$DISPO_RE" && editargs+=(--remove-label "$lbl")
+      done <<< "$curlabels"
+      printf '%s' "$newbody" | gh_author "$ATOK" "${editargs[@]}" \
         || die "wf.sh issue dispose: 'gh issue edit' (label + body-line) failed — failing closed"
       ;;
   esac
-  if [ -n "$ATOK" ]; then note "ran 'gh issue $verb' on #$num as the $author engineer identity"
-  else note "ran 'gh issue $verb' on #$num (ambient token — no engineer identity configured for $author)"; fi
+  if [ -n "$ATOK" ]; then
+    note "ran 'gh issue $verb' on #$num as the $author engineer identity"
+  else
+    # Ambient fallback (WF_ALLOW_AMBIENT_IDENTITY=1): leave a durable override trail on the issue, mirroring
+    # the create/comment path, so an owner-token maintenance write is auditable on the issue itself.
+    ambient_override_notice "wf.sh issue $verb" | gh_author "$ATOK" issue comment "$num" -R "$repo" --body-file - >/dev/null 2>&1 \
+      || note "WARN: could not post ambient-identity override note to issue #$num (non-fatal; terminal warning already emitted)"
+    note "ran 'gh issue $verb' on #$num (ambient token — no engineer identity configured for $author)"
+  fi
 }
 
 main_checkout(){ git -C "$1" worktree list --porcelain | awk '/^worktree /{print $2; exit}'; }   # 1st worktree = main

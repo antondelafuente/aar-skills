@@ -32,8 +32,18 @@ sub=${1:-}; shift || true
 case "$sub" in
   close) exit 0 ;;
   view)
-    # consume args; emit the stored body for --json body
-    cat "${GH_FAKE_BODY:-/dev/null}" 2>/dev/null || echo ""
+    # emit the stored body for --json body, or the stored labels (one per line) for --json labels
+    want_json=""
+    for a in "$@"; do
+      if [ "$want_json" = 1 ]; then
+        case "$a" in
+          body)   cat "${GH_FAKE_BODY:-/dev/null}" 2>/dev/null || echo "" ;;
+          labels) cat "${GH_FAKE_LABELS:-/dev/null}" 2>/dev/null || echo "" ;;
+        esac
+        exit 0
+      fi
+      case "$a" in --json) want_json=1 ;; esac
+    done
     exit 0 ;;
   edit)
     # if a body-file is "-" capture stdin to $GH_FAKE_NEWBODY so the test can inspect the resulting body
@@ -54,6 +64,8 @@ export PATH="$TMP/bin:$PATH"
 export GH_FAKE_LOG="$TMP/gh.log"
 export GH_FAKE_BODY="$TMP/body.txt"
 export GH_FAKE_NEWBODY="$TMP/newbody.txt"
+export GH_FAKE_LABELS="$TMP/labels.txt"
+: > "$GH_FAKE_LABELS"
 
 # Engineer-token env so the verbs run on the ENGINEER path; the fake gh records the token it saw.
 ENGENV=(WF_ENGINEER_TOKEN_CMD_CLAUDE='printf claude-token'
@@ -109,6 +121,32 @@ echo "=== dispose: rejects a body line with no key ==="
 out=$(env "${ENGENV[@]}" bash "$WF" issue claude dispose 42 -R example/repo --label blocked --body-line "no colon here" 2>&1); rc=$?
 echo "$out"
 check "keyless body-line exits nonzero" "[ $rc -ne 0 ]"
+
+echo "=== dispose: rejects a non-disposition --label ==="
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude dispose 42 -R example/repo --label bug --body-line "blocked-by: #9" 2>&1); rc=$?
+echo "$out"
+check "non-disposition label exits nonzero" "[ $rc -ne 0 ]"
+check "non-disposition label explains the set" "grep -qi 'must be a disposition' <<<\"\$out\""
+
+echo "=== dispose: rejects a body-line key with regex metacharacters ==="
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude dispose 42 -R example/repo --label blocked --body-line ".*: boom" 2>&1); rc=$?
+echo "$out"
+check "regex-metachar key exits nonzero" "[ $rc -ne 0 ]"
+
+echo "=== dispose: enforces single disposition (removes the OTHER disposition label) ==="
+: > "$GH_FAKE_LOG"; printf 'Original body.\n' > "$GH_FAKE_BODY"; : > "$GH_FAKE_NEWBODY"
+printf 'ready\nbug\nblocked\n' > "$GH_FAKE_LABELS"   # issue currently has TWO disposition labels (ready, blocked) + a type label
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude dispose 42 -R example/repo --label parked --body-line "parked-reason: later" 2>&1); rc=$?
+echo "$out"
+check "dispose-with-conflicts exits zero" "[ $rc -eq 0 ]"
+check "dispose adds the new disposition" "grep -q -- '--add-label parked' \"\$GH_FAKE_LOG\""
+check "dispose removes the stale 'ready' disposition" "grep -q -- '--remove-label ready' \"\$GH_FAKE_LOG\""
+check "dispose removes the stale 'blocked' disposition" "grep -q -- '--remove-label blocked' \"\$GH_FAKE_LOG\""
+check "dispose does NOT remove the non-disposition 'bug' type label" "! grep -q -- '--remove-label bug' \"\$GH_FAKE_LOG\""
+: > "$GH_FAKE_LABELS"   # reset for any later cases
+
+echo "=== dispose: 'parked-reason' is a valid key (only the LABEL is restricted to dispositions) ==="
+check "parked-reason key was accepted above" "[ $rc -eq 0 ]"
 
 echo "=== allowlist: a disallowed flag fails closed (no arbitrary passthrough) ==="
 out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo --web 2>&1); rc=$?

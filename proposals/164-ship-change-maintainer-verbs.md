@@ -34,11 +34,16 @@ closed:
   `--milestone`, `--add-assignee`, `--add-project`, or other `gh issue edit` mutations leak in.
 - **`wf.sh issue <fam> dispose <N> -R <repo> --label L --body-line "blocked-by: #M"`** — the atomic
   disposition path the `blocked` vocab needs: it sets exactly one disposition label *and* appends/updates a
-  single body line in one engineer-authored call. `--label` takes one disposition label; `--body-line` takes
-  one line of text that is **appended** to the Issue body (idempotently — re-running with the same key
-  replaces rather than duplicates), never an arbitrary full-body overwrite. This is the required body-set
-  path: a `blocked` Issue carries `blocked-by: #N` in its body, so the engineer path must set a body line, not
-  just labels.
+  single body line in one engineer-authored call. `--label` is validated against the fixed disposition vocab
+  (`DISPO_RE` — the same set the close-gate enforces; a non-disposition label is rejected, use `label` for
+  those), and the edit **removes every other disposition label on the Issue in the same call**, so the
+  "exactly one disposition" invariant holds rather than a bare add leaving two. `--body-line` takes one line
+  that is **appended** to the Issue body (idempotently — its key, the literal text before the first `:`, must
+  be `[A-Za-z0-9_-]+` and is compared as a literal prefix, never a regex, so re-running with the same key
+  replaces that line rather than duplicating it, and a metacharacter key can't delete unrelated lines), never
+  an arbitrary full-body overwrite (the body read/filter fails closed rather than risk emptying the body).
+  This is the required body-set path: a `blocked` Issue carries `blocked-by: #N` in its body, so the engineer
+  path must set a body line, not just labels.
 
 All three reuse the same allowlist discipline already in the `create`/`comment` path: a stateful flag scan
 that permits only the named flags (each consuming its value) and fails closed on every other `-`-prefixed
