@@ -25,8 +25,13 @@ command -v jq >/dev/null 2>&1 || block "jq not available"
 high_ids=()
 while IFS= read -r line || [ -n "$line" ]; do
   [ -n "$line" ] || continue
-  id=${line%% *}
-  sev=${line#* }
+  # Strict format: exactly "<ID> <SEVERITY>". A malformed line BLOCKS (fail-closed) — never silently
+  # drops to zero HIGHs and passes.
+  if [[ ! "$line" =~ ^([^[:space:]]+)[[:space:]]+(HIGH|MED|LOW)$ ]]; then
+    block "malformed findings line: '$line' (expected '<ID> <SEVERITY>', SEVERITY in HIGH|MED|LOW)"
+  fi
+  id=${BASH_REMATCH[1]}
+  sev=${BASH_REMATCH[2]}
   [ "$sev" = HIGH ] && high_ids+=("$id")
 done < "$FIND"
 
@@ -66,7 +71,10 @@ for id in "${high_ids[@]}"; do
       commit=$(printf '%s' "$entry" | jq -r '.commit // empty' 2>/dev/null)
       [ -n "$commit" ] || block "finding $id: fixed requires a commit"
       git rev-parse --verify --quiet "${commit}^{commit}" >/dev/null 2>&1 \
-        || block "finding $id: fixed commit '$commit' not found in this repo" ;;
+        || block "finding $id: fixed commit '$commit' not found in this repo"
+      # Must be IN this PR branch — an existing object from an unrelated branch must not satisfy `fixed`.
+      git merge-base --is-ancestor "$commit" HEAD 2>/dev/null \
+        || block "finding $id: fixed commit '$commit' is not in this PR branch (not an ancestor of HEAD)" ;;
     refuted)
       : ;; # reason is advisory context for the model reviewer; structurally complete
   esac

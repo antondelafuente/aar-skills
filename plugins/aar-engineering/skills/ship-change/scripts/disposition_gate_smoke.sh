@@ -82,5 +82,14 @@ expect BLOCK malformed-json "$d" "$(find_ 'F1 HIGH')"
 d=$(disp '{"altitude":"whatever","findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
 expect BLOCK invalid-altitude "$d" "$(find_ 'F1 HIGH')"
 
+# 15. `fixed` commit that EXISTS but is NOT an ancestor of HEAD (e.g. an unrelated branch) -> BLOCK.
+ORPHAN=$(printf 'orphan' | git commit-tree "$(git rev-parse 'HEAD^{tree}')")
+d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$ORPHAN\"}]}")
+expect BLOCK fixed-non-ancestor "$d" "$(find_ 'F1 HIGH')"
+
+# 16. malformed findings line (missing severity) -> BLOCK (fail-closed, never fail-open to zero HIGHs).
+d=$(disp '{"altitude":"implementation","findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
+expect BLOCK malformed-findings-line "$d" "$(find_ 'F1')"
+
 if [ "$fails" -eq 0 ]; then echo "disposition_gate_smoke: ALL PASS"; else echo "disposition_gate_smoke: FAILURES"; fi
 exit "$fails"
