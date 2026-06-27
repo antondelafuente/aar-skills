@@ -32,13 +32,18 @@ leave it running — but stop short of self-deletion. Concretely, once a run rea
 executor has verified GPU teardown and pushed its `RESULTS.md`, it performs one final host-close: it records a
 **host-lifecycle** status where the dispatcher can read it, confirms its branch is committed and pushed (so
 nothing in the launch dir is the only copy), and then stops its own idle tmux session via a dedicated
-**non-destructive** dispatcher path. **The self-wake is cleared LAST — only after the host-close finalizer is
-durably in charge** (Finding-driven ordering): the self-wake is the one thing that would catch a *hung* (not
-exited) executor, and #54's relaunch supervisor acts on process *exit*, not a hang — so if the executor
-cleared its wake and then hung before the finalizer was durably launched, nothing would catch the live-idle
-host. So the order is: durably launch the host-close finalizer → *then* clear the self-wake. (Equivalently the
-self-wake clear can move into the finalizer step itself; either way no wake is cleared before the finalizer
-owns the host.) The marker is deliberately scoped to the
+**non-destructive** dispatcher path. **The self-wake clear moves INTO the detached closer — the executor never
+clears its own wake** (Finding-driven ordering; this removes a race the executor-clears-it version had). The
+self-wake is the one thing that would catch a *hung* (not exited) executor — and #54's relaunch supervisor acts
+on process *exit*, not a hang — so the wake must survive until the closer is genuinely killing the host. If the
+executor cleared its own wake (even "last"), the detached closer could race in and kill the session *before*
+that clear-line ran, or the executor could hang after launching the closer with its wake already gone. Both
+are eliminated by giving the wake-clear to the closer: the **executor's only host-close act is to durably
+launch the closer and return** (wake still armed); the **closer then clears the self-wake, clears
+`desired-active`, and kills the session as one atomic controller-side step**, outside the executor's process.
+There is no cross-process handshake and no race, because only one process (the closer) ever clears the wake or
+kills the session, and it does both together after it is durably in charge. The marker is deliberately scoped
+to the
 *host* lifecycle only — `host_state=closing|closed` — and carries **no experiment-outcome semantics**:
 *whether the experiment concluded / was blocked / was abandoned* is the canonical-terminal-experiment-state
 question owned by the #130 design (`blocked` / `invalid` / `abandoned` / `null-conclusion`), and the host
@@ -113,30 +118,47 @@ nothing killed); the finalizer is the whole *initiated → closed* lifecycle (po
 (This implies a small `run-experiment`/template note distinguishing audited checklist gates from post-audit
 finalizer gates — captured in the product child below.)
 
+**Reconciling with #54's own close gate — apply the SAME readiness-vs-finalizer split to it** (Finding-driven,
+load-bearing cross-design seam). #54 proposes a *blocking close-checklist gate* "run-supervision record
+cleared/inactive" — i.e. it wants `desired-active` cleared as an **audited** Close gate. That directly
+conflicts with #30's requirement that `desired-active` be cleared only *after* the audit (atomically with the
+kill, in the detached closer), because for a dispatched run the clear and the kill must be the same durable
+step. The resolution is *not* to fork the two designs: it is to apply #30's readiness-vs-finalizer split to
+#54's gate too. #54's audited close gate should verify **readiness to close** — the run-supervision record
+exists and the close path is armed — while the actual `desired-active`-clear is the **post-audit finalizer**
+(for a dispatched run, the same closer that kills the session; for a non-dispatched run, #54's own close step
+after the audit). So #54 and #30 share one rule: *audit readiness; the clear/close is the post-audit
+finalizer.* This is a **coordination requirement on the #54-record child** (it must adopt the readiness-gate
+wording rather than an audited `desired-active`-cleared gate), and #30's implementation children that touch
+#54's record carry it explicitly — recorded here, and a reason those children are `blocked-by #168` until #54's
+gate is amended to match (see Rollout).
+
 Second, **the run must stay recoverable until the closer is durably in charge** — so `desired-active` is *not*
 cleared early. If the executor cleared `desired-active` at the top of Close and then crashed before the closer
 was durably launched, #54 would (correctly) refuse to relaunch a not-desired-active run while no closer exists
 to kill the host — an orphaned, unsupervised, un-closed session. So the ordering is: **(1) executor, while
 fully recoverable:** write the `closing` marker (a *recoverable* state — #54 still treats the run as
 desired-active and would relaunch a crash here) and durably launch the detached closer; that is the executor's
-last attestable act. **(2) detached closer, atomically:** clear `desired-active` *and immediately* kill the
-session as one durable step (the #54-mandated "clear before the supervisor observes the session gone", now
-genuinely immediate), then prune and write the durable generation-keyed `closed` marker outside the session.
-The `desired-active`-clear and the kill live together in the closer, so there is no window where the run is
-neither recoverable nor being closed. The executor never commits anything after its session is gone; the
-post-kill truth lives in the closer's control-plane record.
+last act. **(2) detached closer, atomically:** clear the self-wake, clear `desired-active`, *and immediately*
+kill the session as one durable controller-side step (the #54-mandated "clear before the supervisor observes
+the session gone", now genuinely immediate and race-free because the closer owns both the wake-clear and the
+kill), then prune and write the durable generation-keyed `closed` marker outside the session. The wake-clear,
+the `desired-active`-clear, and the kill all live together in the closer, so there is no window where the run
+is un-watched-yet-not-being-closed, and no race between an executor wake-clear and the closer's kill. The
+executor never commits or clears anything after its session is gone; the post-kill truth lives in the closer's
+control-plane record.
 
 **The full post-audit Close sequence (reconciled with the rest of `run-experiment`'s Close).** Host-close is
 the *very last* substrate action, so it must slot in after — not displace — the other post-audit Close steps
-(self-wake clear, retro/`file-feedback`, the close self-audit). The complete executor-side order is: run the
-independent close audit → file the retro/feedback → run the close self-audit → **then the host-close handoff,
-as the final block:** durably launch the host-close finalizer → clear the self-wake (LAST, only once the
-finalizer is durably in charge) → return. Everything destructive (clear `desired-active`, kill, prune,
-`closed`) is the *detached closer's* job after the executor returns. The closer needs no handshake waiting on
-the executor to clear the wake: the wake-clear and the finalizer launch are both the executor's own last
-in-session steps (wake-clear strictly after the durable launch), and the closer's own work is gated only on its
-own durable start — so there is no cross-process wait, just a fixed in-executor order followed by the closer's
-independent atomic close. (This ordering is what the `run-experiment` Close-clause child must encode.)
+(retro/`file-feedback`, the close self-audit). The complete executor-side order is: run the independent close
+audit → file the retro/feedback → run the close self-audit → **then the host-close handoff as the final
+act:** durably launch the host-close finalizer → return. The executor does **not** clear its own self-wake; the
+finalizer (closer) does — so the wake stays armed (catching a hung executor) right up until the closer is
+durably killing the host. Everything teardown-side (clear self-wake, clear `desired-active`, kill, prune,
+`closed`) is the *detached closer's* atomic job after the executor returns. There is no cross-process
+handshake and no race: exactly one process (the closer) ever clears the wake or kills the session. (This
+ordering — including "the closer, not the executor, clears the self-wake" — is what the `run-experiment`
+Close-clause child must encode.)
 
 **Where the marker lives, and its schema** (Finding-driven). The marker must live **outside the git
 worktree** — in the dispatcher's own control-plane state dir — *not* a file inside the worktree. This is
@@ -162,9 +184,10 @@ still-running close, and a stuck one apart, and to reject a generation mismatch.
 
 **The closer is a bounded background wait — give it a deadline and a failure state** (Finding-driven; AGENTS.md
 "Bounded background waits"). A detached closer with no deadline is exactly the unbounded-park footgun that rule
-exists to forbid, and it's worse here because the executor has *already cleared its self-wake* by the time the
-closer runs — so nothing the executor owns is watching it. So the closer carries a `deadline`; if it exceeds it
-(the kill/prune hung), it writes `host_state=failed` with the reason, and `--list` plus any TTL sweep
+exists to forbid, and it's worse here because the closer *itself* clears the self-wake as part of its atomic
+step — so once it is running, the self-wake can no longer be the thing that catches *it* hanging. So the closer
+carries its own `deadline`; if it exceeds it (the kill/prune hung), it writes `host_state=failed` with the
+reason, and `--list` plus any TTL sweep
 **surface a stale `closing` (deadline passed, still not `closed`) and a `failed` as a visible operator-actionable
 state**, never silently. `failed`/stale-`closing` hosts are *not* auto-reaped (they're the ones a human must
 look at); the marker turns a stuck close into a flagged item rather than an invisible orphaned session.
@@ -183,13 +206,17 @@ layered above it.
 **Migration for pre-marker worktrees** (Finding-driven). Dispatch worktrees that already exist when
 `--host-close` ships have *no* marker, and a naive "no `closed` marker ⇒ refuse unless `--force`" would turn
 today's working clean+pushed `--reap` into forced cleanup for every legacy dispatch — a silent regression of
-the existing safe path. So an unmarked dispatch *predating a per-install **migration cutoff*** (a timestamp
-captured when `--host-close` first ships) is classified **`legacy-unmarked`** (no marker file at all, and older
-than the cutoff), and for those hosts `--reap`/`--reap-all` **preserve the existing clean+pushed-only behavior**
-(no `--force` required). A *post*-cutoff missing marker is **not** legacy — it is a suspected launcher bug and
-still requires `--force`/operator classification, so the fallback never fails open on a host that *should* have
-had a marker. New dispatches always get a marker, so `legacy-unmarked` is a shrinking, time-bounded one-time
-class, not a permanent fork; a host that has ever been through `--host-close` is never `legacy-unmarked`.
+the existing safe path. But classifying "legacy" from *absence-of-marker + age alone is unsafe*, because the
+dispatcher **reuses the slug/worktree path** across dispatches: a brand-new post-cutoff dispatch on a reused
+old path, if its launcher bugged out before writing a marker, could be misread as the old legacy occupant and
+reaped under the lax rule. So legacy is classified from a **reliable session-birth / generation record, not
+absence+age**: at migration, a one-time inventory records the *generation/birth identity* of each then-existing
+unmarked worktree; a host is `legacy-unmarked` **only if its current worktree's birth identity matches an
+inventoried pre-cutoff entry**. Any worktree whose birth identity is *not* in that inventory — including a
+freshly-reused path — is post-migration, so a missing marker there is a **suspected launcher bug** requiring
+`--force`/operator classification, never lax reap. New dispatches always get a marker, so `legacy-unmarked` is a
+fixed, inventory-bounded one-time set that only shrinks; a host that has ever been through `--host-close`, or
+whose birth identity isn't in the migration inventory, is never `legacy-unmarked`.
 
 For this to work for a *zero-context* executor — which reads ONLY the brief + scaffold + the machine-consumed
 records this contract already has it consult — the host-close handle must be **surfaced on a record the
@@ -393,9 +420,11 @@ substrate supplies the *mechanism* and the field's *values*.
   (`dispatch_host=none` with a disabled `reason`), which returns the gate to a declared N.A. — or, for a full
   product rollback, reverting the checklist-gate clause itself. **A disabled declaration reclassifies only
   *unmarked* hosts, and must NOT fail open on liveness** (Finding-driven): the `legacy-unmarked` fallback to
-  clean+pushed reap applies only to hosts with *no marker at all and predating the migration cutoff* — a
-  per-install timestamp captured when `--host-close` first ships, so a *post*-cutoff missing marker is a
-  suspected launcher bug, not legacy, and still requires `--force`/operator classification. Crucially, a host
+  clean+pushed reap applies only to hosts whose **worktree birth identity is in the one-time migration
+  inventory** (see "Migration for pre-marker worktrees") — not "unmarked + old", which a reused-path launcher
+  bug could spoof. Any host not in that inventory (including a freshly-reused path) is post-migration, so a
+  missing marker there is a suspected launcher bug and still requires `--force`/operator classification.
+  Crucially, a host
   carrying a live `running` or in-progress `closing` marker is **never** auto-downgraded to clean+pushed reap by
   a rollback — it keeps the marker-aware refusal (reap needs `--force` or explicit operator classification),
   because a live/mid-close run must not be reapable just because the *mechanism* was disabled. (For a full
