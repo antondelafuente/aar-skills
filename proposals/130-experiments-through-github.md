@@ -266,14 +266,18 @@ result at umbrella altitude: every piece is a `needs-design` child or `blocked-b
   `CHECKLIST.md`) into the experiment's canonical working dir `experiments/<exp>/` at clearance; `run-experiment`
   appends only execution records, audit outputs, `RESULTS.md`, and artifact-store pointers — never the brief
   ("your brief is your world"). `experiments/<exp>/` is the *actual* working dir, not a second copy. Blocked-by
-  the worktree/profile contract (which defines where `experiments/<exp>/` lives) and the triage-schema child
-  (for the triage record).
+  the worktree/profile contract (which defines where `experiments/<exp>/` lives), the triage-schema child
+  (for the triage record), **and the record sensitivity/visibility contract** (which record content may be
+  committed vs pointer-only vs redacted).
 - `design-experiment` PR-open + `--design` review posting + fact-record linking — blocked-by the helper, the
   per-experiment worktree/branch contract (Step 1), the instance-profile interface (repo / base
-  branch / identity resolution it needs to open the PR), **and the record sensitivity/visibility contract**.
+  branch / identity resolution it needs to open the PR), the record sensitivity/visibility contract, **and the
+  design-clearance artifact schema** (the run-capable handoff must not land before the executor can verify
+  clearance).
 - `run-experiment` push-to-PR + close-review + merge gate — blocked-by the helper, the worktree/branch
-  contract, the instance-profile interface, the triage schema, terminal states, **and the record
-  sensitivity/visibility contract**.
+  contract, the instance-profile interface, the triage schema, terminal states, the record
+  sensitivity/visibility contract, **and the design-clearance artifact schema** (no pre-spend run path lands
+  before clearance verification exists).
 
 ## Rollout + rollback
 
