@@ -42,6 +42,26 @@ existing destructive reap (operator/TTL-invoked, after review). This design supp
 (the completion event) and a small machine-readable **terminal-status marker** the dispatcher and an operator
 can both read to know a host is finished and safe to remove.
 
+**Who attests what, given the executor kills its own session.** The executor cannot verify the *post-kill*
+state (its session is gone, so "I confirmed the host is closed" is unattestable by it). So the obligation
+splits cleanly along the kill boundary: the executor attests only the **pre-kill** half it can — the marker is
+written and `--host-close` was invoked as the last Close action — and the dispatcher owns the **post-kill**
+confirmation. Mechanically, `--host-close` writes the terminal-status marker *first* (so the marker survives
+even if the kill races the executor's last turn), then kills the session and verifies-and-prunes from
+*outside* that session (it runs in the dispatcher's own process, not the dying executor's), updating the marker
+to a `closed` state. The executor's CHECKLIST evidence is therefore "marker present + `--host-close` returned
+cleanly," not "I watched my own session die" — which matches the close self-audit rule (verify state by
+inspection, not memory) without asking the executor to inspect a process it just killed.
+
+To make the terminal marker actually *load-bearing* — the signal that a host is safe to remove — the
+dispatcher's destructive and listing paths must consult it, not just the existing clean+pushed guard.
+`--host-close` makes the marker the single source of "this host is terminal"; in turn `--list` shows
+**terminal vs running** (so an operator sees at a glance what is reap-eligible), `--reap-all` and any TTL sweep
+target **only terminal-marked** hosts (a still-running executor's worktree is never swept), and `--reap <exp>`
+on a host with no terminal marker **warns / refuses unless `--force`** (so an operator can't accidentally reap
+a live run, while keeping `--force` as the rescue hatch). The clean+pushed guard stays as the *destructive*
+safety floor; the marker is the *liveness* gate layered above it.
+
 For this to work for a *zero-context* executor — which reads ONLY the brief + scaffold — the host-close
 handle must be **surfaced on the brief / execution-profile surface, not buried instance-side**. The same way
 the self-wake contract requires the waker/backstop id be recorded in `CHECKLIST.md`, the dispatch contract
@@ -54,6 +74,18 @@ instance/substrate. And because the CHECKLIST template is the scaffold's canonic
 gates, the contract is anchored there: a universal `[BLOCK]` checklist gate requiring terminal
 host-marker / host-closed evidence (or an explicit N.A. for no-persistent-host substrates), so the host-close
 can't be silently skipped the way buried prose gets skipped.
+
+**The gate is capability-gated, never substrate-blind.** The `[BLOCK]` checklist gate must key off *whether a
+`dispatch_host_close` handle is present on the brief/profile*, not fire unconditionally. It blocks **only when
+a handle is wired** (then the executor must run it and show the marker evidence); it resolves **N.A.** when no
+handle is present — which covers both the permanent no-persistent-host case (a Codex thread/watcher that just
+exits) **and** the transitional window where a substrate with a persistent host has not yet shipped its
+handle. This is the ordering safety property: the product gate is *blocked-by* the instance handle, so landing
+the product contract first can never strand a fresh executor with an obligation it has no command to satisfy —
+absent a handle, the gate is N.A., and the day the instance wires `--host-close` the same gate flips to active
+for that substrate with no further product change. (Concretely: a Claude executor between product-land and
+instance-land sees no handle on its `START.md` → N.A.; once `dispatch-claude.sh --host-close` ships and the
+dispatch step writes the handle into `START.md`, the gate becomes a real `[BLOCK]`.)
 
 The load-bearing decision is **"auto-mark reapable, not auto-`rm -rf` on completion."** A finished executor is
 not a *reviewed* executor: the worktree may hold the failed logs, partial artifacts, or exact debug state a
@@ -108,10 +140,13 @@ worktree, so the gate resolves N.A.) and must satisfy the same contract its own 
   "version bump on every behavior change" rule — it is not a no-op doc edit. No CI logic moves; the
   install/discovery surface is unchanged beyond the manifest version. This design PR itself is
   `proposals/*.md` only.
-- **Instance (this box), where the mechanism lives:** `dispatch-claude.sh` gains a completion path
-  (kill-session + write terminal-status marker; reuse the existing clean+pushed guards) and `new-claude.sh`
-  is unaffected beyond what the executor calls at Close. `run-experiment`'s executor gains a final host-close
-  action. These land as the `ready` children, not in this design PR.
+- **Instance (this box), where the mechanism lives:** `dispatch-claude.sh` gains the non-destructive
+  `--host-close` verb (write terminal-status marker → kill session → external prune/verify, reusing the
+  existing clean+pushed guards) **and marker-aware listing/deletion** — `--list` distinguishes terminal vs
+  running, `--reap-all`/TTL target only terminal-marked hosts, and `--reap <exp>` warns/refuses without a
+  marker unless `--force`. `new-claude.sh` is unaffected beyond what the executor calls at Close.
+  `run-experiment`'s executor gains a final host-close action. These land as the `ready` children, not in this
+  design PR.
 - **Risk profile:** low. The destructive operation (`--reap`/`rm -rf`) is unchanged and stays behind its
   existing guards and an explicit operator/TTL trigger; the new automatic behavior is only *killing an idle
   session* and *writing a status file*, both reversible and non-destructive (the worktree and its pushed
@@ -124,10 +159,15 @@ worktree, so the gate resolves N.A.) and must satisfy the same contract its own 
   product contract — the `run-experiment` Close clause, the `design-experiment` dispatch-contract line, the
   `CHECKLIST`-template `[BLOCK]` gate, the `START`-template `dispatch_host_close` handle, **plus the
   experiment-lifecycle version bump + CHANGELOG entry**; (2) the instance non-destructive
-  `dispatch-claude.sh --host-close <exp>` verb (kill-session + write terminal-status marker, reusing the
-  existing clean+pushed guards, never deleting the worktree); (3) the `run-experiment` executor's final
-  host-close action that invokes (2) at Close. The product contract (1) can land independently; the instance
-  pieces (2)/(3) depend on the contract wording from (1) but are otherwise self-contained.
+  `dispatch-claude.sh --host-close <exp>` verb (write marker → kill-session → external prune, reusing the
+  existing clean+pushed guards, never deleting the worktree) **plus the marker-aware `--list`/`--reap`/`--reap-all`
+  semantics**; (3) the `run-experiment` executor's final
+  host-close action that invokes (2) at Close. The product contract (1) lands first **safely** precisely
+  because its gate is capability-gated (above): with no handle wired yet, every existing executor — Claude
+  included — resolves the gate N.A., so (1) never strands a fresh executor with an unsatisfiable `[BLOCK]`. The
+  gate only turns active for a substrate once (2)+(3) ship its `--host-close` verb and write the handle into
+  that substrate's brief — so the destructive obligation arrives *with* the command that satisfies it, never
+  before. The instance pieces (2)/(3) depend on the contract wording from (1) but are otherwise self-contained.
 - **Rollback:** the product change is a doc clause — revert the squash commit through the normal lifecycle.
   The instance completion path is opt-in by construction: if it misbehaves, the executor simply stops calling
   the host-close at Close and the world reverts to today's manual-reap behavior, with no data at risk because
