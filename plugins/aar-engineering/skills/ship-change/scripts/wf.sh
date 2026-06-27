@@ -2,7 +2,7 @@
 # wf.sh — the GitHub-backed scaffold-change workflow driver (SWE pipeline, ENFORCED).
 #
 # Drives one scaffold change through its whole lifecycle, GitHub as the durable coordination layer:
-#   Issue -> worktree branch -> namespaced proposals/<issue>-<slug>.md -> draft PR -> --scaffold design
+#   Issue -> worktree branch -> namespaced designs/<issue>-<slug>.md -> draft PR -> --scaffold design
 #   review (posted) -> implement -> --code review (posted) -> classifier (records mechanical|architectural
 #   with evidence, posted) -> checks + fail-closed gate -> merge-when-clean.
 # The agent (following SKILL.md) does the JUDGMENT steps (write the design doc, implement, respond to
@@ -973,11 +973,11 @@ start)  # wf.sh start <issue#> <slug>
   BR="change/${ISSUE}-${SLUG}"; WT="${WF_WORKTREE_ROOT:-/tmp}/wf-${ISSUE}-${SLUG}"
   [ -e "$WT" ] && die "worktree path already exists: $WT (finish or remove the prior run first)"
   git -C "$ORIGIN_REPO" worktree add -q "$WT" -b "$BR" main || die "could not create worktree/branch $BR"
-  DOC="proposals/${ISSUE}-${SLUG}.md"
+  DOC="designs/${ISSUE}-${SLUG}.md"
   if [ ! -f "$WT/$DOC" ]; then
-    mkdir -p "$WT/proposals"
+    mkdir -p "$WT/designs"
     cat > "$WT/$DOC" <<EOF
-# Proposal: <title> (#${ISSUE})
+# Design: <title> (#${ISSUE})
 
 > The canonical design doc (ADR + PR description). Reviewed by \`--scaffold\` before build. Lands on main.
 
@@ -1018,9 +1018,11 @@ open)   # wf.sh open <worktree> <author>   — commit the design doc, push, open
     missing_identity_die "open requires an author family (claude|codex) for engineer attribution"
   fi
   BR=$(wt_branch "$WT")
-  DOC=$(cd "$WT" && git status --porcelain proposals/ | sed 's/^...//' | head -1)
-  [ -n "$DOC" ] || DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
-  [ -n "$DOC" ] || die "no design doc under proposals/ found (write proposals/<issue>-<slug>.md first)"
+  # New docs live under designs/; a legacy proposals/ doc (an in-flight branch that predates the
+  # rename) is still discovered so it can finish without manual surgery.
+  DOC=$(cd "$WT" && git status --porcelain designs/ proposals/ | sed 's/^...//' | head -1)
+  [ -n "$DOC" ] || DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- designs/ proposals/ | head -1)
+  [ -n "$DOC" ] || die "no design doc under designs/ found (write designs/<issue>-<slug>.md first)"
   ISSUE=$(basename "$DOC" | sed -E 's/^([0-9]+)-.*/\1/')
   AUTHOR_TOKEN=""; GIT_AUTHOR=""
   if [ -n "$AUTHOR" ]; then
@@ -1072,8 +1074,8 @@ design-review)  # wf.sh design-review <worktree> <author>
   ATOK=$(author_token_optional "$AUTHOR")
   [ -n "$ATOK" ] || need_ambient_gh
   require_clean "$WT"; PR=$(wt_pr_required "$WT" "$ATOK")
-  DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
-  [ -n "$DOC" ] || die "no committed design doc under proposals/ (run: wf.sh open $WT <claude|codex>)"
+  DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- designs/ proposals/ | head -1)
+  [ -n "$DOC" ] || die "no committed design doc under designs/ (run: wf.sh open $WT <claude|codex>)"
   # push so the reviewed doc == what the PR shows (consistency with code-review)
   git_push_author "$ATOK" "$WT" -q origin HEAD || die "push failed — can't review a doc the PR doesn't reflect"
   run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Design review (\`--scaffold\`)"
@@ -1288,20 +1290,21 @@ finish) # wf.sh finish <worktree> <author> [--design]   — checks + fail-closed
   mapfile -t PATHS < <(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD — nothing to merge"
   # FAIL-CLOSED: --design skips --code, so it must NEVER run on a PR that contains code, and the --scaffold
-  # approval must cover the EXACT doc that lands. Require the diff to be (1) design-doc-only (proposals/*.md)
-  # and (2) EXACTLY ONE design doc — else the gate would review only one of several docs (head -1) while the
-  # rest merged un-design-reviewed. Capture that one doc as the gate target.
+  # approval must cover the EXACT doc that lands. Require the diff to be (1) design-doc-only (designs/*.md,
+  # or a legacy proposals/*.md for an in-flight branch) and (2) EXACTLY ONE design doc — else the gate would
+  # review only one of several docs (head -1) while the rest merged un-design-reviewed. Capture that one doc
+  # as the gate target.
   DESIGN_DOC=""
   if [ "$DESIGN_MODE" = 1 ]; then
-    # Use a RENAME-STABLE path list (--no-renames): with rename detection, a code->proposals/*.md rename shows
+    # Use a RENAME-STABLE path list (--no-renames): with rename detection, a code->designs/*.md rename shows
     # only the NEW doc path, so the old code path could masquerade as doc-only and skip --code. --no-renames
     # decomposes a rename into delete(old)+add(new), so the old code path surfaces in NONDOC and is rejected.
     mapfile -t RPATHS < <(cd "$WT" && git diff --no-renames --name-only "$(base_ref "$WT")"...HEAD)
-    NONDOC=$(printf '%s\n' "${RPATHS[@]}" | grep -vE '^proposals/.*\.md$' || true)
+    NONDOC=$(printf '%s\n' "${RPATHS[@]}" | grep -vE '^(designs|proposals)/.*\.md$' || true)
     [ -z "$NONDOC" ] || die "finish --design is for design-doc-only PRs; this diff also touches non-doc paths:
 $NONDOC
 Use plain 'wf.sh finish $WT $AUTHOR' (gates on --code) for any PR with code."
-    mapfile -t DESIGN_DOCS < <(printf '%s\n' "${RPATHS[@]}" | grep -E '^proposals/.*\.md$')
+    mapfile -t DESIGN_DOCS < <(printf '%s\n' "${RPATHS[@]}" | grep -E '^(designs|proposals)/.*\.md$')
     [ "${#DESIGN_DOCS[@]}" = 1 ] || die "finish --design expects EXACTLY ONE design doc (the --scaffold approval covers one doc); this diff changes ${#DESIGN_DOCS[@]}:
 $(printf '%s\n' "${DESIGN_DOCS[@]}")
 Split into one design PR per doc."
@@ -1333,7 +1336,7 @@ Split into one design PR per doc."
   #     Best-effort — a cosmetic body refresh must never block an otherwise-clean merge. Uses the REST API
   #     (gh api PATCH), NOT `gh pr edit`: the latter issues a GraphQL query needing read:org, which a minimal
   #     repo-scoped token lacks, so it silently no-op'd the refresh (#43). REST pulls PATCH needs only `repo`.
-  FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
+  FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- designs/ proposals/ | head -1)
   if [ -n "$FDOC" ]; then
     FISSUE=$(basename "$FDOC" | sed -E 's/^([0-9]+)-.*/\1/')
     # mktemp -> a guaranteed-unique path (no stale-path/dir collision); fall back to a fixed path if mktemp

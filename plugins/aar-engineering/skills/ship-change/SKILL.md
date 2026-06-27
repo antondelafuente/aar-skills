@@ -86,8 +86,8 @@ workflow if unsure. `wf.sh` is `scripts/wf.sh` in this skill.
 #    human owner: wf.sh issue <claude|codex> create -R <owner/repo> -t "..." -b "..."  → note its number <N>.
 
 # 1. START — worktree + branch + design-doc skeleton
-wf.sh start <N> <slug>            # prints WORKTREE=… BRANCH=… DOC=proposals/<N>-<slug>.md
-#   → WRITE the design doc at <WORKTREE>/proposals/<N>-<slug>.md (problem, approach, alternatives,
+wf.sh start <N> <slug>            # prints WORKTREE=… BRANCH=… DOC=designs/<N>-<slug>.md
+#   → WRITE the design doc at <WORKTREE>/designs/<N>-<slug>.md (problem, approach, alternatives,
 #     blast radius, rollout). This is the ADR; it lands on main and survives branch deletion.
 #     The PR body is a short reader view derived from the first paragraphs of Problem + Approach;
 #     write those first paragraphs as plain English for a human opening the PR cold.
@@ -138,7 +138,7 @@ wf.sh finish <WORKTREE> <author> --design # gate on --scaffold APPROVE (doc-only
 #   → then FILE the spawned `ready` issues — the design's decomposition into implementable units.
 ```
 
-`--design` **fails closed** if the diff contains anything but `proposals/*.md` (so it can never skip `--code`
+`--design` **fails closed** if the diff contains anything but `designs/*.md` (so it can never skip `--code`
 on real code — use plain `finish` for any PR with code). The spawned `ready` issues are then implemented as
 normal single-phase ship-change runs.
 

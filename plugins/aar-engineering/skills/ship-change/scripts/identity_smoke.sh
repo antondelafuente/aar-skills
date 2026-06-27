@@ -69,11 +69,11 @@ chmod +x "$TMP/bin/gh"
 export PATH="$TMP/bin:$PATH"
 export GH_FAKE_LOG="$TMP/gh.log"
 
-REPO="$TMP/repo"; mkdir -p "$REPO/proposals"
+REPO="$TMP/repo"; mkdir -p "$REPO/designs"
 ( cd "$REPO" && git init -q && git remote add origin https://github.com/example/repo.git )
 ( cd "$REPO" && git remote set-url --push origin "file://$REMOTE" )
-cat > "$REPO/proposals/1-test.md" <<'EOF'
-# Proposal: test (#1)
+cat > "$REPO/designs/1-test.md" <<'EOF'
+# Design: test (#1)
 
 ## Problem
 
@@ -83,8 +83,8 @@ test
 
 test
 EOF
-( cd "$REPO" && git add proposals/1-test.md && git commit -qm init )
-printf '\nchanged for open\n' >> "$REPO/proposals/1-test.md"
+( cd "$REPO" && git add designs/1-test.md && git commit -qm init )
+printf '\nchanged for open\n' >> "$REPO/designs/1-test.md"
 
 echo "=== missing engineer env: doctor blocks and names the missing seams ==="
 out=$(GH_TOKEN=ambient-token bash "$WF" doctor codex "$REPO" 2>&1); rc=$?
@@ -158,15 +158,15 @@ cat > "$TMP/bad-bash-env.sh" <<'EOF'
 export AUDIT_VERIFIER_CMD='claude -p "poisoned from BASH_ENV" > "$OUT_TMP"'
 EOF
 
-REVIEW_REPO="$TMP/review-repo"; mkdir -p "$REVIEW_REPO/proposals"
+REVIEW_REPO="$TMP/review-repo"; mkdir -p "$REVIEW_REPO/designs"
 ( cd "$REVIEW_REPO" && git init -q && git remote add origin https://github.com/example/repo.git )
 ( cd "$REVIEW_REPO" && git remote set-url --push origin "file://$REMOTE" )
 cat > "$REVIEW_REPO/AGENTS.md" <<'EOF'
 # test constitution
 EOF
 ( cd "$REVIEW_REPO" && git add AGENTS.md && git commit -qm base && git push -q -u origin main && git checkout -q -b change/review )
-cat > "$REVIEW_REPO/proposals/1-review.md" <<'EOF'
-# Proposal: review test (#1)
+cat > "$REVIEW_REPO/designs/1-review.md" <<'EOF'
+# Design: review test (#1)
 
 ## Problem
 
@@ -176,7 +176,7 @@ test
 
 test
 EOF
-( cd "$REVIEW_REPO" && git add proposals/1-review.md && git commit -qm "design: review test" )
+( cd "$REVIEW_REPO" && git add designs/1-review.md && git commit -qm "design: review test" )
 
 echo "=== author-aware review env: claude author strips same-family verifier and BASH_ENV ==="
 : > "$GH_FAKE_LOG"; FAKE_AUDIT_LOG="$TMP/audit-claude.env"
