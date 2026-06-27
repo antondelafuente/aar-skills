@@ -77,14 +77,26 @@ self-audit rule (verify state by inspection, not memory) without asking the exec
 just terminated.
 
 **Where the marker lives, and its schema** (Finding-driven). The marker must live **outside the git
-worktree** — in the dispatcher's own control-plane state dir, keyed by slug (alongside where `--list` already
-enumerates dispatches), *not* a file inside the worktree. This is load-bearing because the worktree is exactly
-what the existing `--reap` clean+pushed guard polices: a marker written *inside* it would dirty the tree (or
-sit unpushed) and the guard would then refuse the very reap the marker is meant to authorize. A control-plane
-marker keyed by slug is read/written by the dispatcher and the detached closer without ever touching the
-worktree's git state, so it composes with the clean+pushed guard instead of fighting it. The marker schema is
-small but explicit: `host_state` (`closing` | `closed` | `failed`), a start `timestamp`, a `deadline`, and the
-closer's `pid` + `log` path — enough for an external reader to tell a still-running close from a stuck one.
+worktree** — in the dispatcher's own control-plane state dir — *not* a file inside the worktree. This is
+load-bearing because the worktree is exactly what the existing `--reap` clean+pushed guard polices: a marker
+written *inside* it would dirty the tree (or sit unpushed) and the guard would then refuse the very reap the
+marker is meant to authorize. A control-plane marker is read/written by the dispatcher and the detached closer
+without ever touching the worktree's git state, so it composes with the clean+pushed guard instead of fighting
+it.
+
+**The marker is keyed by dispatch *generation*, not bare slug** (Finding-driven, correctness-critical). The
+dispatcher reuses the slug across dispatches of the same experiment (`name=run-$slug`, `wt=$WSROOT/$slug`,
+`branch=run/$slug`), so a slug-only marker would let a **stale `closed` marker from a prior dispatch make a
+later live re-dispatch of the same exp look reapable** — exactly the live-run-reap hazard the marker exists to
+prevent. So the marker is keyed by a **dispatch generation / run id** unique per spawn (e.g. slug + a spawn
+nonce or the worktree's creation identity). Two enforcement points follow: (1) **spawn initializes a
+`host_state=running` marker for the new generation** (so a fresh dispatch immediately overwrites/supersedes any
+stale prior-generation marker rather than inheriting it); (2) **destructive paths verify the marker generation
+matches the current session/worktree** before acting — a `closed` marker whose generation doesn't match the
+worktree on disk is treated as stale and does *not* authorize a reap. The marker schema is therefore:
+`host_state` (`running` | `closing` | `closed` | `failed`), a **`generation`/run-id**, a start `timestamp`, a
+`deadline`, and the closer's `pid` + `log` path — enough for an external reader to tell a live run, a
+still-running close, and a stuck one apart, and to reject a generation mismatch.
 
 **The closer is a bounded background wait — give it a deadline and a failure state** (Finding-driven; AGENTS.md
 "Bounded background waits"). A detached closer with no deadline is exactly the unbounded-park footgun that rule
@@ -97,13 +109,14 @@ look at); the marker turns a stuck close into a flagged item rather than an invi
 
 To make the host-state marker actually *load-bearing* — the signal that a host is safe to remove — the
 dispatcher's destructive and listing paths must consult it, not just the existing clean+pushed guard.
-`--host-close` makes the marker the single source of host liveness; in turn `--list` shows **`closed` vs
-`closing` vs `failed` vs `legacy-unmarked` vs running** (so an operator sees at a glance what is reap-eligible
-and what is stuck), `--reap-all` and any TTL sweep target **only `closed`-marked** hosts (a running executor's
-worktree, or a `closing`/`failed` one, is never swept), and `--reap <exp>` on a host with no `closed` marker
-**warns / refuses unless `--force`** (so an operator can't accidentally reap a live or stuck run, while keeping
-`--force` as the rescue hatch). The clean+pushed guard stays as the *destructive* safety floor; the marker is
-the *liveness* gate layered above it.
+`--host-close` makes the marker the single source of host liveness; in turn `--list` shows **`running` vs
+`closing` vs `closed` vs `failed` vs `legacy-unmarked`** (so an operator sees at a glance what is reap-eligible
+and what is stuck), `--reap-all` and any TTL sweep target **only `closed`-marked hosts whose generation matches
+the worktree on disk** (a running executor's worktree, a `closing`/`failed` one, or a stale-generation `closed`
+is never swept), and `--reap <exp>` without a matching `closed` marker **warns / refuses unless `--force`** (so
+an operator can't accidentally reap a live, stuck, or re-dispatched run, while keeping `--force` as the rescue
+hatch). The clean+pushed guard stays as the *destructive* safety floor; the marker is the *liveness* gate
+layered above it.
 
 **Migration for pre-marker worktrees** (Finding-driven). Dispatch worktrees that already exist when
 `--host-close` ships have *no* marker, and a naive "no `closed` marker ⇒ refuse unless `--force`" would turn
@@ -241,14 +254,19 @@ substrate supplies the *mechanism* and the field's *values*.
   record. (This is a real ordering constraint surfaced in design review — recorded here so the `ready` children
   carry it.)
 - **Instance (this box), where the mechanism lives:** `dispatch-claude.sh` gains the non-destructive
-  `--host-close` verb (write `closing` marker → spawn a *deadline-bounded* detached closer that kills the
-  session, writes `closed`, prunes — or writes `failed` on timeout — reusing the existing clean+pushed guards),
-  the **host-state marker stored in the dispatcher control-plane state dir keyed by slug, outside the
-  worktree** (so it never dirties the tree the reap guard polices), **and marker-aware listing/deletion** —
-  `--list` distinguishes `closed`/`closing`/`failed`/running, `--reap-all`/TTL target only `closed` hosts, and
-  `--reap <exp>` warns/refuses without a `closed` marker unless `--force`. `new-claude.sh` is unaffected beyond
-  what the executor calls at Close.
-  `run-experiment`'s executor gains a final host-close action. These land as the `ready` children, not in this
+  `--host-close` verb (clear `desired-active` via #54's API → write `closing` marker → spawn a
+  *deadline-bounded* detached closer that kills the session, writes `closed`, prunes — or writes `failed` on
+  timeout — reusing the existing clean+pushed guards), the **generation-keyed host-state marker stored in the
+  dispatcher control-plane state dir, outside the worktree** (so it never dirties the tree the reap guard
+  polices), **and marker-aware listing/deletion** — `--list` distinguishes
+  `running`/`closing`/`closed`/`failed`/`legacy-unmarked`, `--reap-all`/TTL target only generation-matched
+  `closed` hosts, and `--reap <exp>` warns/refuses without a matching `closed` marker unless `--force`.
+  **The operator point-of-need docs must move with the mechanism:** the `manage-aar` skill (and any box
+  guidance) still describe the *old* `~/.aar-dispatch` folder model and are already stale vs the worktree
+  dispatcher, so the instance child updates them so `--list`, the host states, and the marker-aware reap
+  semantics are discoverable exactly where an operator reaches for cleanup. `new-claude.sh` is unaffected
+  beyond what the executor calls at Close. `run-experiment`'s executor gains a final host-close action. These
+  land as the `ready` children, not in this
   design PR.
 - **Risk profile:** low. The destructive operation (`--reap`/`rm -rf`) is unchanged and stays behind its
   existing guards and an explicit operator/TTL trigger; the new automatic behavior is only *killing an idle
@@ -268,16 +286,25 @@ substrate supplies the *mechanism* and the field's *values*.
   `dispatch_host_close` handle defined as fields on #54's record, **plus the experiment-lifecycle version bump
   + CHANGELOG entry**; (2) the instance non-destructive `dispatch-claude.sh --host-close <exp>` verb (clear
   `desired-active` via #54's API → write `closing` marker → spawn a deadline-bounded detached closer that kills
-  the session + writes `closed` + prunes, or `failed` on timeout; marker stored in the control-plane state dir
-  outside the worktree; reusing the existing clean+pushed guards; `legacy-unmarked` preserves old reap),
-  the dispatch step writing the handle + `dispatch_host` declaration onto #54's record at spawn, **plus the
-  marker-aware `--list`/`--reap`/`--reap-all` semantics**; (3) the `run-experiment` executor's final
-  host-close action that invokes (2) at Close. The product contract (1) lands **safely** because its gate is
-  tri-state: until a substrate declares `persistent + handle`, an existing executor resolves a *declared* N.A.
-  (`dispatch_host=none`/`none-yet`), so (1) never strands a fresh executor with an unsatisfiable `[BLOCK]`, while
-  a substrate that *claims* a persistent host but forgot the handle FAILs rather than silently skips. The gate
-  turns active for a substrate once (2)+(3) ship its `--host-close` and flip its declaration to
-  `persistent + handle` — the destructive obligation arrives *with* the command that satisfies it.
+  the session + writes `closed` + prunes, or `failed` on timeout; **generation-keyed** marker stored in the
+  control-plane state dir outside the worktree; spawn initializes a `running` marker; reusing the existing
+  clean+pushed guards; `legacy-unmarked` preserves old reap), the dispatch step writing the handle +
+  `dispatch_host` declaration onto #54's record at spawn, the **marker-aware (generation-matched)
+  `--list`/`--reap`/`--reap-all` semantics**, and the **`manage-aar`/box-guidance doc update** so the new states
+  + cleanup are discoverable at the point of need; (3) the `run-experiment` executor's final
+  host-close action that invokes (2) at Close.
+
+  **Ordering correction (Finding-driven — the tri-state gate is NOT safe before any launcher change).** Because
+  the gate FAILs on an `unset` declaration once a substrate is in scope, and the *current* dispatcher writes no
+  `dispatch_host` declaration at all, child (1)'s gate must **not** land alone — it would make every unmarked
+  Claude dispatch FAIL immediately. So a tiny **prerequisite (1a)** ships *with or before* the gate: the
+  dispatcher writes the explicit transitional `dispatch_host=none-yet` declaration onto #54's record at spawn
+  (a few lines, no `--host-close` logic). That makes the gate resolve a *declared* N.A. for Claude in the
+  transitional window — never `unset`⇒FAIL — without yet requiring the full host-close mechanism. The gate then
+  turns into a real `[BLOCK]` for the Claude substrate only once (2)+(3) ship `--host-close` and the dispatcher
+  flips its declaration to `persistent + handle`. So the safe landing order is: **#54 record API → (1a)
+  declaration write + (1) gate → (2)+(3) host-close mechanism + flip to `persistent`.** A Codex substrate that
+  truly has no persistent host declares `dispatch_host=none` and is permanently N.A.
 - **Rollback:** the product change is a doc clause — revert the squash commit through the normal lifecycle.
   The instance completion path is opt-in by construction: if it misbehaves, the executor simply stops calling
   the host-close at Close and the world reverts to today's manual-reap behavior, with no data at risk because
