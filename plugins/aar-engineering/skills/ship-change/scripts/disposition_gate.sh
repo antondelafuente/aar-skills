@@ -18,7 +18,7 @@ block() { echo "DISPOSITION-GATE: BLOCK $*"; exit 2; }
 # A valid issue link is "#123" or a GitHub issue URL — guards against child_issue:true / whitespace.
 issue_link_ok() {
   [[ "$1" =~ ^#[0-9]+$ ]] && return 0
-  [[ "$1" =~ ^https://github\.com/[^/]+/[^/]+/issues/[0-9]+$ ]] && return 0
+  [[ "$1" =~ ^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/issues/[0-9]+$ ]] && return 0
   return 1
 }
 
@@ -54,16 +54,24 @@ if [ "${#high_ids[@]}" -eq 0 ]; then
   exit 0
 fi
 
-# HIGH findings exist -> the dispositions file must be present and valid JSON.
+# HIGH findings exist -> the dispositions file must be present, valid JSON, with a real findings ARRAY
+# (an object would let `.findings[]` iterate its values and slip a malformed schema through).
 [ -n "$DISP" ] && [ -f "$DISP" ] || block "HIGH findings present but dispositions file missing: ${DISP:-<none>}"
 jq -e . "$DISP" >/dev/null 2>&1 || block "dispositions file is not valid JSON: $DISP"
+jq -e '.findings | type == "array"' "$DISP" >/dev/null 2>&1 || block "dispositions .findings must be an array"
 
 altitude=$(jq -r '.altitude // "implementation"' "$DISP" 2>/dev/null)
 case "$altitude" in umbrella | implementation) ;; *) block "invalid altitude '${altitude:-<none>}' (expected umbrella|implementation)" ;; esac
 
 # Base ref for the `fixed`-in-PR-range check. Explicit override wins; else the merge-base with main.
+# Resolve to a concrete commit up front and FAIL CLOSED if a base is present but does not resolve — an
+# invalid base must never let the range check pass silently (merge-base would just error to "no block").
 BASE_REF=${DISPOSITION_BASE_REF:-}
 [ -n "$BASE_REF" ] || BASE_REF=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || true)
+if [ -n "$BASE_REF" ]; then
+  BASE_REF=$(git rev-parse --verify --quiet "${BASE_REF}^{commit}" 2>/dev/null) \
+    || block "base ref does not resolve to a commit: '${DISPOSITION_BASE_REF:-<auto-detected>}'"
+fi
 
 for id in "${high_ids[@]}"; do
   entry=$(jq -c --arg id "$id" '.findings[] | select(.id == $id)' "$DISP" 2>/dev/null)

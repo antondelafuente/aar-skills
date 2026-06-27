@@ -127,5 +127,18 @@ else
 fi
 chmod 644 "$unreadable" 2>/dev/null || true
 
+# 22. invalid DISPOSITION_BASE_REF must FAIL CLOSED for a `fixed` disposition (not fail open) -> BLOCK.
+d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
+out=$(DISPOSITION_BASE_REF="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$GATE" "$d" "$(find_ 'F1 HIGH')" 2>&1); rc=$?
+if [ "$rc" -ne 0 ]; then echo "ok   base-ref-invalid"; else echo "FAIL base-ref-invalid: want BLOCK got PASS :: $out"; fails=1; fi
+
+# 23. .findings as an OBJECT (not an array) must not slip through -> BLOCK.
+d=$(disp '{"altitude":"umbrella","findings":{"x":{"id":"F1","severity":"HIGH","status":"unresolved"}}}')
+expect BLOCK findings-not-array "$d" "$(find_ 'F1 HIGH')"
+
+# 24. deferral link with an invalid GitHub URL (whitespace in owner) -> BLOCK.
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"deferred_to_child_design","child_issue":"https://github.com/a b/c/issues/1"}]}')
+expect BLOCK defer-child-bad-url "$d" "$(find_ 'F1 HIGH')"
+
 if [ "$fails" -eq 0 ]; then echo "disposition_gate_smoke: ALL PASS"; else echo "disposition_gate_smoke: FAILURES"; fi
 exit "$fails"
