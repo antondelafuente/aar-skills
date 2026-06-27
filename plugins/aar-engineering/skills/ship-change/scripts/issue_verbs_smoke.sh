@@ -103,6 +103,11 @@ out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo --dupl
 echo "$out"
 check "bad --duplicate-of exits nonzero" "[ $rc -ne 0 ]"
 
+echo "=== close: --duplicate-of rejects a malformed issue URL (trailing junk) ==="
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo --duplicate-of "https://github.com/example/repo/issues/10abc" 2>&1); rc=$?
+echo "$out"
+check "malformed duplicate-of URL exits nonzero" "[ $rc -ne 0 ]"
+
 echo "=== label: add/remove route through the engineer token ==="
 : > "$GH_FAKE_LOG"
 out=$(env "${ENGENV[@]}" bash "$WF" issue codex label 42 -R example/repo --add-label ready --remove-label blocked 2>&1); rc=$?

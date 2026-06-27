@@ -686,7 +686,10 @@ issue_maintainer_verb(){
         # gh might reinterpret). gh derives reason=duplicate from it, so it composes with -r duplicate.
         case "$dupof" in
           ''|*[!0-9]*)
-            case "$dupof" in https://github.com/*/issues/[0-9]*) ;; *) die "wf.sh issue close: --duplicate-of must be an issue number or a https://github.com/<owner>/<repo>/issues/<n> URL (got '$dupof')" ;; esac ;;
+            # not a bare number → must be a well-formed issue URL with EXACTLY owner/repo/issues/<digits> and
+            # nothing trailing (a glob like .../issues/[0-9]* would accept '10abc' or extra path segments).
+            [[ "$dupof" =~ ^https://github\.com/[^/]+/[^/]+/issues/[0-9]+$ ]] \
+              || die "wf.sh issue close: --duplicate-of must be an issue number or a https://github.com/<owner>/<repo>/issues/<n> URL (got '$dupof')" ;;
         esac
         args+=(--duplicate-of "$dupof")
       fi
