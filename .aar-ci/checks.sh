@@ -191,6 +191,13 @@ if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-c
   else
     err "wf.sh changed but identity_smoke.sh missing — cannot verify strict identity behavior"
   fi
+  FD_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/fd_state_smoke.sh"
+  if [ -f "$FD_SMOKE" ]; then
+    echo "[checks] finding-disposition state smoke" >&2
+    bash "$FD_SMOKE" >&2 && ok "fd_state smoke" || err "fd_state smoke FAILED"
+  else
+    err "wf.sh changed but fd_state_smoke.sh missing — cannot verify the finding-disposition helpers"
+  fi
 fi
 
 # 8. disposition structural-gate smoke (#138): the deterministic gate that validates .aar-ci/dispositions.json
