@@ -487,6 +487,11 @@ fresh_sweep(){  # fresh_sweep <wt> <author> <mode> <target> <pr>  -> echoes the 
   grep -qE '^SUMMARY: high=[0-9]+ med=[0-9]+ low=[0-9]+' "$rev" 2>/dev/null \
     || { note "fresh-eyes sweep produced no parseable output"; rm -f "$rev"; return 1; }
   local h m l; h=$(count_high "$rev"); m=$(count_med "$rev"); l=$(count_low "$rev")
+  # If the SUMMARY claims findings but none are parseable as FINDING lines, the candidates would silently vanish
+  # from the adjudicator — treat that as a malformed (failed) sweep so the mandatory backstop holds.
+  if [ "$((h + m + l))" -gt 0 ] && ! grep -qE '^FINDING ' "$rev" 2>/dev/null; then
+    note "fresh-eyes sweep SUMMARY claims findings but no parseable FINDING lines — treating as malformed"; rm -f "$rev"; return 1
+  fi
   note "fresh-eyes sweep: $h HIGH / $m MED / $l LOW candidate(s) -> $rev"
   if [ -n "$pr" ]; then
     local repo rtok; repo=$(gh_repo "$wt"); rtok=$(reviewer_token "$author" 0)
