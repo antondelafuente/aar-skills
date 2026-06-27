@@ -77,8 +77,10 @@ the experiment-surface instance of the canonical rule, so the two don't drift.
   `fresh_sweep` through it. No verifier launch is unbounded.
 - **MED — silent unbounded fallback when `timeout` is absent.** With a nonzero cap but no `timeout` binary, the
   first cut ran unbounded while the docs promised a hard cap. **Accepted:** `run_verifier_bounded` now fails
-  **CLOSED** (rc 125, a clear BLOCKED message) when a cap is requested but no usable `timeout` exists — set
-  `WF_REVIEW_TIMEOUT=0` to disable the cap deliberately.
+  **CLOSED** (the dedicated sentinel `WF_VERIFIER_SETUP_RC`=3, a clear BLOCKED message) when a cap is requested
+  but the setup is unusable — no `timeout` binary, or a non-integer `WF_REVIEW_TIMEOUT`. The dedicated sentinel
+  (not `timeout`'s own 125/126/127) lets a caller tell the helper's precheck apart from timeout's "couldn't
+  start the command" failures. Set `WF_REVIEW_TIMEOUT=0` to disable the cap deliberately.
 
 This satisfies the acceptance criterion two ways: a fresh agent discovers the bounded-wait discipline **at
 point of need** (each waiting surface states the full minimal rule, not just the experiment skill, and not a
@@ -86,7 +88,7 @@ dangling pointer), and the changed surfaces are covered by the repo's existing d
 bumps on the three touched plugins; disposition-sync stays green since the `DISPOSITIONS` block is untouched;
 `bash -n` on the changed `wf.sh`; the `wf.sh`-triggered `locate_audit`/`identity`/`fd_state` smokes) plus the
 fake-HOME discovery smoke for each touched plugin. The bounded behavior (deadline→124, fast-completes→0,
-missing-`timeout`-with-cap→125 fail-closed, cap=0→unbounded) was verified directly against the helper.
+missing-`timeout`-or-bad-value-with-cap→3 fail-closed, cap=0→unbounded) was verified directly against the helper.
 
 ## Alternatives considered
 
