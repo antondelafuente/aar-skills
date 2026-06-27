@@ -15,11 +15,18 @@ set -uo pipefail
 
 block() { echo "DISPOSITION-GATE: BLOCK $*"; exit 2; }
 
+# A valid issue link is "#123" or a GitHub issue URL — guards against child_issue:true / whitespace.
+issue_link_ok() {
+  [[ "$1" =~ ^#[0-9]+$ ]] && return 0
+  [[ "$1" =~ ^https://github\.com/[^/]+/[^/]+/issues/[0-9]+$ ]] && return 0
+  return 1
+}
+
 DISP=${1:-}
 FIND=${2:-}
 
 command -v jq >/dev/null 2>&1 || block "jq not available"
-[ -n "$FIND" ] && [ -f "$FIND" ] || block "findings file missing: ${FIND:-<none>}"
+[ -n "$FIND" ] && [ -f "$FIND" ] && [ -r "$FIND" ] || block "findings file missing or unreadable: ${FIND:-<none>}"
 
 # Collect HIGH finding ids from the reviewer output. (MED/LOW never block.)
 high_ids=()
@@ -54,41 +61,42 @@ jq -e . "$DISP" >/dev/null 2>&1 || block "dispositions file is not valid JSON: $
 altitude=$(jq -r '.altitude // "implementation"' "$DISP" 2>/dev/null)
 case "$altitude" in umbrella | implementation) ;; *) block "invalid altitude '${altitude:-<none>}' (expected umbrella|implementation)" ;; esac
 
-allowed=' fixed refuted deferred_to_child_design deferred_out_of_scope unresolved '
+# Base ref for the `fixed`-in-PR-range check. Explicit override wins; else the merge-base with main.
+BASE_REF=${DISPOSITION_BASE_REF:-}
+[ -n "$BASE_REF" ] || BASE_REF=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || true)
 
 for id in "${high_ids[@]}"; do
   entry=$(jq -c --arg id "$id" '.findings[] | select(.id == $id)' "$DISP" 2>/dev/null)
   [ -n "$entry" ] || block "HIGH finding $id has no disposition entry"
 
   status=$(printf '%s' "$entry" | jq -r '.status // empty' 2>/dev/null)
-  case "$allowed" in *" $status "*) ;; *) block "finding $id: invalid status '${status:-<none>}'" ;; esac
-
+  # Exact-match dispatch with a default BLOCK — a malformed / multi-token status can never fall through.
   case "$status" in
     unresolved)
       block "finding $id is unresolved (HIGH)" ;;
+    refuted)
+      : ;; # reason is advisory context for the model reviewer; structurally complete
     deferred_to_child_design)
       [ "$altitude" = umbrella ] || block "finding $id: deferred_to_child_design only allowed at umbrella altitude (altitude=$altitude)"
       child=$(printf '%s' "$entry" | jq -r '.child_issue // empty' 2>/dev/null)
-      [ -n "$child" ] || block "finding $id: deferred_to_child_design requires a child_issue link" ;;
+      issue_link_ok "$child" || block "finding $id: deferred_to_child_design requires a child_issue link (#N or a GitHub issue URL), got '${child:-<none>}'" ;;
     deferred_out_of_scope)
       followup=$(printf '%s' "$entry" | jq -r '.followup_issue // empty' 2>/dev/null)
-      [ -n "$followup" ] || block "finding $id: deferred_out_of_scope requires a followup_issue link" ;;
+      issue_link_ok "$followup" || block "finding $id: deferred_out_of_scope requires a followup_issue link (#N or a GitHub issue URL), got '${followup:-<none>}'" ;;
     fixed)
       commit=$(printf '%s' "$entry" | jq -r '.commit // empty' 2>/dev/null)
       [ -n "$commit" ] || block "finding $id: fixed requires a commit"
       git rev-parse --verify --quiet "${commit}^{commit}" >/dev/null 2>&1 \
         || block "finding $id: fixed commit '$commit' not found in this repo"
-      # Must be IN this PR branch — an existing object from an unrelated branch must not satisfy `fixed`.
       git merge-base --is-ancestor "$commit" HEAD 2>/dev/null \
         || block "finding $id: fixed commit '$commit' is not reachable from HEAD"
-      # Must be IN THE PR RANGE (<base>..HEAD), not merely any ancestor — an old base/main commit is not a
-      # fix made in this PR.
-      base=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || true)
-      if [ -n "$base" ] && git merge-base --is-ancestor "$commit" "$base" 2>/dev/null; then
-        block "finding $id: fixed commit '$commit' is in the base branch, not a fix made in this PR (must be in <base>..HEAD)"
+      # Fail closed: without a base ref we cannot prove the fix is in THIS PR (<base>..HEAD).
+      [ -n "$BASE_REF" ] || block "finding $id: cannot verify 'fixed' is in the PR range — no base ref (set DISPOSITION_BASE_REF)"
+      if git merge-base --is-ancestor "$commit" "$BASE_REF" 2>/dev/null; then
+        block "finding $id: fixed commit '$commit' is in the base, not a fix made in this PR (must be in <base>..HEAD)"
       fi ;;
-    refuted)
-      : ;; # reason is advisory context for the model reviewer; structurally complete
+    *)
+      block "finding $id: invalid status '${status:-<none>}'" ;;
   esac
 done
 

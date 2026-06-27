@@ -109,5 +109,23 @@ fi
 d=$(disp '{not valid json')
 expect BLOCK malformed-file-no-high "$d" "$(find_ 'F1 MED')"
 
+# 19. multi-token / bogus status ("fixed refuted") must NOT slip through to a no-op -> BLOCK.
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"fixed refuted"}]}')
+expect BLOCK status-multi-token "$d" "$(find_ 'F1 HIGH')"
+
+# 20. deferral link that is not an issue ref (JSON true) -> BLOCK.
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"deferred_to_child_design","child_issue":true}]}')
+expect BLOCK defer-child-bad-link "$d" "$(find_ 'F1 HIGH')"
+
+# 21. findings file present but unreadable -> BLOCK (fail-closed, not a silent zero-HIGH pass).
+unreadable="$TMP/unreadable.txt"; printf 'F1 HIGH\n' > "$unreadable"; chmod 000 "$unreadable"
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
+if [ -r "$unreadable" ]; then
+  echo "skip findings-unreadable: cannot make file unreadable (running as root?)"
+else
+  expect BLOCK findings-unreadable "$d" "$unreadable"
+fi
+chmod 644 "$unreadable" 2>/dev/null || true
+
 if [ "$fails" -eq 0 ]; then echo "disposition_gate_smoke: ALL PASS"; else echo "disposition_gate_smoke: FAILURES"; fi
 exit "$fails"
