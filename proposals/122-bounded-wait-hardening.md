@@ -50,11 +50,30 @@ so its canonical home is the agent-facing constitution, `AGENTS.md`:
 `run-experiment` already carries the full discipline; it gets a one-line pointer that its self-wake section is
 the experiment-surface instance of the canonical rule, so the two don't drift.
 
+**Design-review resolution (two findings, both accepted):**
+
+- **HIGH — the rule alone doesn't bound `wf.sh`'s own reviewer wait.** The reviewer flagged that the
+  `ship-change` merge gate launches the verifier as an *unbounded blocking call* (`wf.sh` `run_review`), which
+  is the exact surface orchestrator#2 hung on — prose discipline doesn't bound a subprocess. **Accepted:** the
+  verifier subprocess is now hard-capped with `timeout -k 30 "$WF_REVIEW_TIMEOUT"` (default 1200s/20min, `0`
+  disables). A tripped deadline (rc 124) fails **CLOSED** as `BLOCKED`, never an indefinite park. So #122 ships
+  a concrete code-level deadline at the incident surface, not only a rule. This widens the blast radius to
+  include a behavior change in `wf.sh` (still fail-closed, still revertible).
+
+- **MED — pointers to `AGENTS.md` dangle on a plugin-only install.** The repo's own checks note plugin-only
+  installs can't rely on repo-root `AGENTS.md`. **Accepted:** each touched skill/RUNBOOK now states the **full
+  minimal rule inline** (deadline + liveness + failure-path) and *references* `AGENTS.md` as the editorial
+  home, rather than depending on it being installed. Rejected the heavier alternative (a synced
+  `references/BOUNDED_WAITS.md` + a drift-check like `DISPOSITIONS.md`): the rule is short prose stated at three
+  surfaces, so a packaged-and-drift-checked reference is more machinery than the rule warrants; inline
+  self-containment is the lighter fit.
+
 This satisfies the acceptance criterion two ways: a fresh agent discovers the bounded-wait discipline **at
-point of need** (each waiting surface now states or points at it, not just the experiment skill), and the
-changed surfaces are doc/prose in `AGENTS.md` + skills, covered by the repo's existing deterministic checks
-(disposition-sync stays green since the `DISPOSITIONS` block is untouched; version bumps on the touched
-plugins) and the fake-HOME discovery smoke for any touched plugin.
+point of need** (each waiting surface states the full minimal rule, not just the experiment skill, and not a
+dangling pointer), and the changed surfaces are covered by the repo's existing deterministic checks (version
+bumps on the three touched plugins; disposition-sync stays green since the `DISPOSITIONS` block is untouched;
+`bash -n` on the changed `wf.sh`; the `wf.sh`-triggered `locate_audit`/`identity`/`fd_state` smokes) plus the
+fake-HOME discovery smoke for each touched plugin.
 
 ## Alternatives considered
 
@@ -72,10 +91,14 @@ plugins) and the fake-HOME discovery smoke for any touched plugin.
 
 ## Blast radius
 
-Product, docs/prose only. `AGENTS.md` (constitution) + three skill SKILL.md files (`verify-claims`,
-`ship-change`) and `run-experiment` pointer + the `ship-change` RUNBOOK. No script/behavior change, no new
-code path, no manifest schema change beyond version bumps on the touched plugins. SWE pipeline unaffected
-(no `wf.sh` change). No instance coupling.
+Product. **Docs/prose:** `AGENTS.md` (constitution, editorial home of the rule) + the `verify-claims`,
+`ship-change`, and `run-experiment` SKILLs + the `ship-change` RUNBOOK. **One code change:** `wf.sh`
+`run_review` wraps the verifier subprocess in a `timeout` (the `WF_REVIEW_TIMEOUT` cap) — a fail-closed
+behavior change in the SWE pipeline (a stuck reviewer now BLOCKs at the deadline instead of parking). Version
+bumps on the three touched plugins (`aar-engineering`, `verify-claims`, `experiment-lifecycle`). No manifest
+schema change, no new code path beyond the timeout wrapper, no instance coupling. The cap is opt-out-able
+(`WF_REVIEW_TIMEOUT=0`) and its default (20min) sits above the documented suspicious-at-10min threshold so it
+only catches a true hang.
 
 ## Rollout + rollback
 

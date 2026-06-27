@@ -725,8 +725,21 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
       fi
     fi
   fi
-  env "${audit_env[@]}" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
-    || { echo "BLOCKED: reviewer process failed — tail of log:" >&2; tail -8 "$rev.run.log" >&2; exit 1; }
+  # Bounded wait (#122): the reviewer subprocess is a scaffold-provided background wait, and the orchestrator#2
+  # incident was exactly this call hanging forever (a codex review blocked on stdin, no deadline, no liveness
+  # — silence read as "still working"). Cap it with a hard deadline so a wedged verifier fails CLOSED (BLOCKED)
+  # instead of parking the whole workflow indefinitely. WF_REVIEW_TIMEOUT (seconds, default 1200=20min) tunes
+  # it; 0 disables the cap (deliberate). timeout's rc 124 = the deadline tripped (the stuck path).
+  local review_timeout=${WF_REVIEW_TIMEOUT:-1200} timeout_pfx=()
+  [ "$review_timeout" != 0 ] && command -v timeout >/dev/null 2>&1 && timeout_pfx=(timeout -k 30 "$review_timeout")
+  "${timeout_pfx[@]}" env "${audit_env[@]}" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
+    || { local rc=$?
+         if [ "$rc" = 124 ]; then
+           echo "BLOCKED: reviewer exceeded ${review_timeout}s deadline (#122 bounded wait) — treating a stuck reviewer as a FAIL, not waiting forever. Inspect $rev.run.log; re-run, or raise WF_REVIEW_TIMEOUT for a genuinely slow reviewer." >&2
+         else
+           echo "BLOCKED: reviewer process failed — tail of log:" >&2
+         fi
+         tail -8 "$rev.run.log" >&2; exit 1; }
   require_valid_review "$rev"
   local review_med review_low
   REVIEW_HIGH=$(count_high "$rev"); review_med=$(count_med "$rev"); review_low=$(count_low "$rev"); REVIEW_ALL=$(count_all "$rev")
