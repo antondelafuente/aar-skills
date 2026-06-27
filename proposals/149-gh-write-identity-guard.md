@@ -81,10 +81,17 @@ This is deliberately a **defense-in-depth pair**, not a single mechanism:
    **The `wf.sh`↔guard bypass contract (load-bearing — resolves the original HIGH).** Because a `GH_TOKEN`
    swap is invisible to a PATH wrapper, `wf.sh` must mark its own internal `gh` calls with an explicit
    signal the guard recognizes and lets straight through to the real `gh`. Child #1 owns BOTH halves of
-   this contract as one atomic unit: (i) `wf.sh`'s `gh_author` (and any other internal `gh` call site) set
-   a scoped marker — either an env var like `WF_GH_INTERNAL=1` exported only around the minted-token call,
-   or by invoking a resolved real-`gh` path directly — so the call is unambiguously the engineer path; and
-   (ii) the wrapper passes a call bearing that marker through untouched and never recurses.
+   this contract as one atomic unit: (i) **ALL** of `wf.sh`'s internal `gh` invocations are routed through
+   **one** marked real-`gh` helper that sets a scoped marker (e.g. `WF_GH_INTERNAL=1` around the call, or a
+   resolved real-`gh` path) — not just `gh_author`. Today `wf.sh` has **tokened `gh` calls outside
+   `gh_author`** (the review POST and PR-comment paths, the classify and finish paths all do
+   `GH_TOKEN="$tok" gh …` directly); each of those would break under a naive wrapper if left unmarked, so
+   the child must funnel **every** internal `gh` call site through the single marked helper. A **static
+   check** (a `.aar-ci` lint / grep gate) fails the build on any remaining unmarked `GH_TOKEN=… gh` /
+   `gh …` invocation in `wf.sh`, so a future call site can't silently regress the bypass. And (ii) the
+   wrapper passes a marked call through untouched and never recurses. The behavior smoke exercises **the
+   review / classify / finish paths under the wrapper**, not only `gh issue/comment`, so the full pipeline
+   is proven to survive the guard.
 
    **The contract MUST also cover the authenticated-`git push` credential-helper path.** `wf.sh`'s
    `gh_push`/`git_push_author` runs `GH_TOKEN="$tok" git push …`, and `git push` over HTTPS can invoke
@@ -160,12 +167,13 @@ and the instance applies the capability change to itself.
    credential + `.aar-ci` behavior smoke.** The wrapper classifies read-vs-write `gh` subcommands, passes
    reads through, blocks credential-mutating `gh auth` while whitelisting the non-mutating helper forms, and
    on a write emits the directed "use `wf.sh`" error. Bundled (atomically, because the contract ties them
-   together): the `wf.sh` call-site change that marks internal engineer-token `gh` calls with the
-   recognized bypass signal; the `git_push_author` change that **forces a one-shot engineer credential**
-   (tokenized remote / scoped askpass) so the push doesn't depend on an ambient owner Git credential;
-   and a behavior smoke asserting **all** directions (bare `gh` write blocked; credential-mutating
-   `gh auth` blocked; `wf.sh`-routed write AND full engineer push allowed). Owns the guard-specific
-   override flag.
+   together): routing **every** internal `gh` call site (not just `gh_author` — also the review POST,
+   PR-comment, classify, and finish paths) through one marked real-`gh` helper, plus a `.aar-ci` static
+   check that fails on any unmarked `gh` call in `wf.sh`; the `git_push_author` change that **forces a
+   one-shot engineer credential** (tokenized remote / scoped askpass) so the push doesn't depend on an
+   ambient owner Git credential; and a behavior smoke asserting **all** directions (bare `gh` write
+   blocked; credential-mutating `gh auth` blocked; `wf.sh`-routed write, **the review/classify/finish
+   paths**, AND full engineer push allowed under the wrapper). Owns the guard-specific override flag.
 
    **Packaging / install home (so the wrapper isn't a free-floating instance PATH hack).** The wrapper
    ships as **product code inside the ship-change skill's `scripts/` dir** (the Agent Skills layout —
@@ -179,33 +187,40 @@ and the instance applies the capability change to itself.
    branch.** The non-negotiable property: a `doctor` probe must be safe to run routinely against the live
    repo, so it must **not complete a write even when the ambient token is write-capable** (otherwise a
    write-capable owner token would edit a live PR/issue or land a commit before `doctor` reports FAIL —
-   exactly the failure a safety check cannot have). It probes the **actual write permission classes that
-   caused the incident — `issues`, `pull_requests`, `contents` — not repo administration** (a repo-admin
-   PATCH would falsely pass a token that can write issues/PRs but not admin), with the detection mapped onto
-   those fine-grained permissions: `pr review`/`pr merge`/PR comments ⇒ `pull_requests: write`; issue
-   create/comment/label/close ⇒ `issues: write`; pushes/content ⇒ `contents: write`. PASS only if **all
-   three** classes read as read-only; any one class showing write capability ⇒ FAIL.
+   exactly the failure a safety check cannot have).
 
-   **(a) API-permission probe — non-mutating on BOTH branches.** Two methods, in preference order:
-   - **Permission-metadata first (no write attempted at all).** Where the credential exposes its own
-     permissions, read and assert them: a GitHub App installation token's permissions object, or — for a
-     fine-grained PAT — the `x-accepted-github-permissions` / rate-limit-resource hints GitHub returns on a
-     cheap GET. If a permission surface is available, the probe is a pure read; no canary write.
-   - **403-only fallback (still no mutation).** Where no permission surface is exposed, issue a
-     write-method request **shaped so the *only* observable outcome that ever occurs is the read-only
-     token's 403** — i.e. the probe is validated by the **denied** path, not the allowed path. Concretely:
-     send the write with a body GitHub rejects at **validation before** it mutates (e.g. an empty/invalid
-     `PATCH` body that returns **422 Unprocessable** for a write-capable token and **403 Forbidden** for a
-     read-only one — 422 means "you may write but this body is invalid," so nothing is written; 403 means
-     "you may not write"). The signal is **403 ⇒ read-only (PASS) / 422 ⇒ write-capable (FAIL)** and
-     **neither outcome mutates** the target. This deliberately replaces the earlier identity-write canary,
-     which *did* complete a real (no-op) write on the writable branch and was unsafe.
+   **The guarantee is categorical: the credential must grant NO reachable `gh`/GitHub write permission —
+   not merely "the three incident classes are read-only."** `doctor` FAILS on *any* reachable write
+   permission category. The classes `issues`/`pull_requests`/`contents` are the **minimum probed floor**
+   (the incident's actual write surface) for the empirical fallback below, used when an authoritative
+   granted-permission list isn't available — a floor, not a redefinition of the guarantee. Repo
+   administration is excluded from the *floor* only because a token can be admin-less yet still write
+   issues/PRs (admin alone never certifies safety); but where an authoritative permission set is available
+   and shows *any* write category, `doctor` fails on it.
+
+   **(a) API-permission check — non-mutating on BOTH branches, authoritative-first.**
+   - **Authoritative granted-permission data first (no write attempted; covers ALL categories).** Where the
+     credential exposes its *granted* permissions authoritatively — a GitHub App **installation token's
+     permissions object** — `doctor` reads it and FAILS if any category is `write`/`admin`. This is the
+     only metadata path trusted, because it states what the token *was granted*. **`x-accepted-github-
+     permissions` and rate-limit hints are explicitly NOT used as proof** — they advertise what an *endpoint
+     requires*, not what the *token holds*, so they cannot certify read-only (they would false-pass a
+     write-capable fine-grained PAT). A fine-grained PAT exposes no authoritative granted-set over the API,
+     so it falls through to the empirical probe.
+   - **Empirical 403/422 denial probe (still no mutation) for any class lacking an authoritative set.**
+     Issue a write-method request **validated by the read-only token's 403**, not by an allowed write:
+     a body GitHub rejects at **validation before** it mutates — an invalid/empty `PATCH` body returns
+     **422 Unprocessable** for a write-capable token ("you may write but this body is invalid" — nothing
+     written) and **403 Forbidden** for a read-only one. Signal: **403 ⇒ read-only (PASS) / 422 ⇒
+     write-capable (FAIL)**, and **neither outcome mutates**. This replaces the earlier identity-write
+     canary, which completed a real (no-op) write on the writable branch and was unsafe. Run it for each of
+     the minimum `issues`/`pull_requests`/`contents` classes.
 
    No probe uses a guessed/provisioned resource id; targets are self-discovered from what the token can
    already GET, and the contents probe never carries a real `sha`+content (so it cannot create a commit).
-   **The child MUST empirically prove, per permission class, that the chosen probe distinguishes a
-   read-only from a write-capable token AND mutates nothing on either branch, before it is the rollout
-   gate** — verified mutation-freedom is part of the child's acceptance, not assumed.
+   **The child MUST empirically prove, per probed class, that the probe distinguishes a read-only from a
+   write-capable token AND mutates nothing on either branch, before it is the rollout gate** — verified
+   mutation-freedom is part of the child's acceptance, not assumed.
 
    **(b) Ambient-`git push` probe — `--dry-run`, never updates the remote.** A `git push --dry-run` to a
    disposable ref with **all credential prompts disabled** (`GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` to a
