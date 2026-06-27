@@ -46,6 +46,60 @@ PY
   fi
 fi
 
+# 1c. Disposition references and executable gate labels must stay synced with the canonical AGENTS.md section.
+#     Plugin-only installs cannot rely on repo-root AGENTS.md being present, but the product still needs one
+#     editorial home for the issue disposition contract. Dependent plugins therefore ship synced references, and
+#     wf.sh enforces the same label set at merge time.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(AGENTS\.md|plugins/[^/]+/skills/[^/]+/references/DISPOSITIONS\.md|plugins/aar-engineering/skills/ship-change/scripts/wf\.sh)$'; then
+  if CHECK_ROOT="$ROOT" python3 - <<'PY'
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+root = pathlib.Path(os.environ["CHECK_ROOT"])
+agents = (root / "AGENTS.md").read_text()
+start = "<!-- DISPOSITIONS:START -->"
+end = "<!-- DISPOSITIONS:END -->"
+
+def extract(text: str, label: str) -> str:
+    if text.count(start) != 1 or text.count(end) != 1:
+        print(f"{label} must contain exactly one disposition reference block", file=sys.stderr)
+        sys.exit(1)
+    body = text.split(start, 1)[1].split(end, 1)[0]
+    return f"{start}{body}{end}\n"
+
+canonical = extract(agents, "AGENTS.md")
+refs = sorted(root.glob("plugins/*/skills/*/references/DISPOSITIONS.md"))
+required = root / "plugins/aar-engineering/skills/ship-change/references/DISPOSITIONS.md"
+if required not in refs:
+    print(f"missing required packaged disposition reference: {required.relative_to(root)}", file=sys.stderr)
+    sys.exit(1)
+bad = []
+for ref in refs:
+    if ref.read_text() != canonical:
+        bad.append(str(ref.relative_to(root)))
+if bad:
+    print("packaged disposition reference drift: " + ", ".join(bad), file=sys.stderr)
+    sys.exit(1)
+labels = re.findall(r"^- \*\*`([^`]+)`\*\*", canonical, flags=re.M)
+wf = root / "plugins/aar-engineering/skills/ship-change/scripts/wf.sh"
+if wf.exists():
+    try:
+        wf_labels = subprocess.check_output(["bash", str(wf), "dispositions"], text=True).splitlines()
+    except subprocess.CalledProcessError as exc:
+        print(f"wf.sh dispositions failed with rc={exc.returncode}", file=sys.stderr)
+        sys.exit(1)
+    if wf_labels != labels:
+        print(f"wf.sh disposition labels {wf_labels} != AGENTS labels {labels}", file=sys.stderr)
+        sys.exit(1)
+PY
+  then ok "disposition references and gate labels match AGENTS.md"
+  else err "disposition reference / gate-label sync check failed"
+  fi
+fi
+
 # 2. shell syntax — *.sh AND extensionless shell scripts (e.g. .githooks/* hooks) detected by shebang
 for p in "${PATHS[@]}"; do
   [ -f "$p" ] || continue
