@@ -52,10 +52,11 @@ if [ "${#all_ids[@]}" -gt 0 ]; then
   [ -z "$dups" ] || block "duplicate finding id(s) in findings list: $(printf '%s ' "$dups" | tr -d '\n')"
 fi
 
-# A committed dispositions file must be valid JSON even when this round has no HIGHs — a malformed
+# A committed dispositions file must be STRUCTURALLY valid even when this round has no HIGHs — a malformed
 # committed file is invalid gate state and must not pass silently just because nothing blocks today.
 if [ -n "$DISP" ] && [ -f "$DISP" ]; then
   jq -e . "$DISP" >/dev/null 2>&1 || block "dispositions file is not valid JSON: $DISP"
+  jq -e '.findings | type == "array"' "$DISP" >/dev/null 2>&1 || block "dispositions .findings must be an array"
 fi
 
 # No HIGH findings -> nothing to gate. A missing dispositions file is acceptable ONLY in this case.
@@ -64,11 +65,9 @@ if [ "${#high_ids[@]}" -eq 0 ]; then
   exit 0
 fi
 
-# HIGH findings exist -> the dispositions file must be present, valid JSON, with a real findings ARRAY
-# (an object would let `.findings[]` iterate its values and slip a malformed schema through).
+# HIGH findings exist -> a dispositions file must be present (its JSON validity + findings-array are
+# already enforced above for any present file).
 [ -n "$DISP" ] && [ -f "$DISP" ] || block "HIGH findings present but dispositions file missing: ${DISP:-<none>}"
-jq -e . "$DISP" >/dev/null 2>&1 || block "dispositions file is not valid JSON: $DISP"
-jq -e '.findings | type == "array"' "$DISP" >/dev/null 2>&1 || block "dispositions .findings must be an array"
 
 altitude=$(jq -r '.altitude // "implementation"' "$DISP" 2>/dev/null)
 case "$altitude" in umbrella | implementation) ;; *) block "invalid altitude '${altitude:-<none>}' (expected umbrella|implementation)" ;; esac

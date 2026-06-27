@@ -3,6 +3,11 @@
 # Self-contained: builds fixtures in a tempdir; uses a real reachable commit for the `fixed` check.
 set -uo pipefail
 
+# Deterministic git identity so `git commit-tree` (the non-ancestor fixture) works in fresh CI / clones
+# that have no user.name/user.email configured.
+export GIT_AUTHOR_NAME=disposition-smoke GIT_AUTHOR_EMAIL=smoke@example.invalid
+export GIT_COMMITTER_NAME=disposition-smoke GIT_COMMITTER_EMAIL=smoke@example.invalid
+
 HERE=$(cd "$(dirname "$0")" && pwd)
 GATE="$HERE/disposition_gate.sh"
 [ -x "$GATE" ] || { echo "FAIL: disposition_gate.sh not executable at $GATE"; exit 1; }
@@ -155,6 +160,10 @@ expect BLOCK dup-finding-id "$d" "$TMP/dup.txt"
 # 26. two disposition entries for the same id -> BLOCK (expected exactly 1).
 d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"refuted","reason":"a"},{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
 expect BLOCK dup-disposition-entry "$d" "$(find_ 'F1 HIGH')"
+
+# 27. committed findings-as-object with NO current HIGH must still BLOCK (structural validity, not just JSON).
+d=$(disp '{"altitude":"umbrella","findings":{"x":1}}')
+expect BLOCK findings-object-no-high "$d" "$(find_ 'F1 MED')"
 
 if [ "$fails" -eq 0 ]; then echo "disposition_gate_smoke: ALL PASS"; else echo "disposition_gate_smoke: FAILURES"; fi
 exit "$fails"
