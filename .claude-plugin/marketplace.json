@@ -21,6 +21,11 @@
       "description": "Run GPU experiments like a researcher — the full lifecycle: design-experiment (pre-register a DESIGN.md, clear it with the human through cross-family validity gates, emit a START.md brief + CHECKLIST.md, dispatch to a fresh-context executor) and run-experiment (the zero-context executor: self-wake, acquire/provision/drive/collect/close). Instance specifics live in an execution profile; pairs with gpu-job and verify-claims."
     },
     {
+      "name": "feedback-loop",
+      "source": "./plugins/feedback-loop",
+      "description": "Keep the scaffold improving while agents use it: file-feedback routes product friction to the configured product Issue tracker or drafts deployment-only notes through instance guidance, and triage-feedback maintains dispositions and routes product fixes through ship-change when configured."
+    },
+    {
       "name": "aar-engineering",
       "source": "./plugins/aar-engineering",
       "description": "The SWE pipeline that builds the product itself: ship-change drives a scaffold change through a GitHub-backed lifecycle — Issue → worktree branch → namespaced design doc → draft PR → cross-family --scaffold design review → implement → cross-family --code review → mechanical/architectural classifier → tracked .aar-ci checks + behavior smoke → fail-closed merge-when-clean. The agents are the engineers; a change is authored by one model family and reviewed by the other. Enforced: the cross-family --code review posts a native GitHub review via a separate reviewer identity that branch protection requires before merge (falls back to comments if none is configured). Pairs with verify-claims and a per-repo .aar-ci/ profile."

@@ -175,9 +175,11 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Clear the self-wake.** Once the record exists, is committed + pushed, and compute is torn down: delete this
   experiment's recurring waker and its look-again marker. A finished run with a still-firing waker is a stale-waker
   footgun.
-- **Retro — file feedback** (you are the product's user): what cost you time → gotchas; what would have been smoother →
-  backlog; **and the design-feedback: list the gaps you hit** (mechanical defaults invented + load-bearing flags). Too
-  many = the brief was under-pinned → feeds back to `design-experiment`. A clean run files little.
+- **Retro — file feedback** (you are the product's user): file product/scaffold friction via feedback-loop's
+  `file-feedback` when installed/configured; record deployment-only incidents or ideas through the consuming instance's
+  feedback guidance. Include the design-feedback: list the gaps you hit (mechanical defaults invented +
+  load-bearing flags). Too many = the brief was under-pinned → feeds back to `design-experiment`. A clean run files
+  little.
 - **Self-audit the close (last step — verify state, not your memory of doing it).** Re-CHECK by inspection: artifacts
   listed in the store, ledger has BOTH launch + done events, compute gone per the control plane of the deploying
   account, `RESULTS.md` committed + pushed, waker + marker cleared. "I ran the step" ≠ "the state is right."
@@ -206,9 +208,11 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 
 ## Gotchas
 
-> Keep a living log of operational footguns for your instance — **read it at experiment start** (a parallel session may
-> have logged the wall you're about to hit); file new ones via `file-feedback`. Footguns that became code live in the
-> backend helpers — use them, don't re-derive fixes. One canonical home per fact (code > protocol step > gotcha log).
+> Keep a living log of operational footguns for your instance — **read the configured instance feedback guidance at
+> experiment start** (a parallel session may have logged the wall you're about to hit). File product/scaffold friction
+> via feedback-loop's `file-feedback` when installed/configured; route deployment-only notes through the consuming
+> instance's guidance. Footguns that became code live in the backend helpers — use them, don't re-derive fixes. One
+> canonical home per fact (code > protocol step > gotcha log).
 
 ## Invariants
 
