@@ -240,6 +240,13 @@ carry an open sub-decision, so they are `needs-design` — only the work that ca
   require an explicit runner/designer family and **fail closed on same-family**. Today only `--scaffold`/
   `--code` require explicit `AAR_SUBSTRATE`; the read-only rungs default to a substrate family with no check,
   so the four-rung cross-family promise is unbacked until this lands.
+- **Design-clearance artifact schema** — the design gate (decision 2) blocks the run on a human-arbitrated
+  design approval bound to the reviewed brief commit, but the umbrella only fixes that *model*; the concrete
+  **machine-readable clearance artifact** a zero-context executor reads before any spend is open design: its
+  path, the fields it must carry (approver, reviewed brief SHA, a response per surviving HIGH/MED finding),
+  the runner block/proceed condition, and the re-clearance trigger on any post-approval brief change. The
+  design-gate analogue of the close-gate's **Triage-artifact schema** child — neither exists in the lifecycle
+  yet, and the executor cannot verify clearance without it.
 
 **`ready` (no open design):** none stands fully independent. The record layout below *looked* ready but
 depends on where `experiments/<exp>/` lives (the worktree/profile contract), so it is `blocked-by`. Honest
@@ -261,8 +268,10 @@ result at umbrella altitude: every piece is a `needs-design` child or `blocked-b
 ## Rollout + rollback
 
 Doc-only design PR; lands the shape on `main` via the `--scaffold` gate, then the children above are filed:
-the four `needs-design` sub-designs first (they unblock the rest), the `ready` record-pushing piece anytime,
-and the `blocked-by` wiring once its parents land. Each is implemented as a normal `ship-change` run. Staged: pilot the flow on a single real experiment before making
+the `needs-design` sub-designs first (they unblock the rest), and the `blocked-by` wiring once its parent
+contracts land. There is **no** independent `ready` child — the decomposition concluded every piece is either
+a `needs-design` sub-design or `blocked-by` a parent (the record-layout work that once looked `ready` is
+`blocked-by` the worktree/profile contract). Each is implemented as a normal `ship-change` run. Staged: pilot the flow on a single real experiment before making
 the branch/PR path the default in `run-experiment`. Rollback is a normal revert of the spawned skill edits —
 the lifecycle falls back to the status-quo local-file gates with no data loss, since the audits themselves
 are unchanged.
