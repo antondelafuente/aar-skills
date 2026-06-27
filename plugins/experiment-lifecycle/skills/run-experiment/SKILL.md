@@ -128,6 +128,15 @@ Three obligations, maintained continuously (not at close):
   find it without you. (At close, clearing the record is a **post-audit finalizer**, not an early step — see
   Step 5.)
 
+**A `StopFailure`-style notifier is a signal, NOT recovery.** An instance may also wire a hook that *fires* when
+the agent process exits on an API error — to push-notify and/or wake the supervisor (and, where the relaunch
+supervisor's *needs-relaunch* marker exists, drop it). Such a hook **cannot itself resume** the session: it runs
+only *after* the process is already gone. Recovery stays the model-free supervisor's job
+(`resume_same_session` else `launch_successor`); the hook is a **signal into** that path, never a substitute for
+it — don't wire one expecting it to recover the run. (Raising the in-process API timeout so a *short* blip is
+ridden out without ever killing the session, and the concrete hook command, are instance settings, not this
+contract.)
+
 ## Topology: detached driver (default) vs on-compute agent (rare)
 
 - **Detached shell driver — THE DEFAULT.** scp a self-contained `*.sh`, run it detached (`setsid nohup`), poll a
