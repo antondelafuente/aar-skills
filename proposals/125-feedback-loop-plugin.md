@@ -39,12 +39,9 @@ The plugin uses the same Agent Skills layout as the existing modules. README and
 optional but recommended: it is how users report product friction and how maintainers process that friction.
 Codex installs symlink the two skill dirs independently.
 
-`feedback_loop_init.sh` must be discoverable from either skill. Keep one canonical implementation under
-`file-feedback/scripts/`. The `triage-feedback/scripts/feedback_loop_init.sh` file is a tiny wrapper that
-resolves its real source path (`readlink -f` / physical `pwd`) before delegating to the sibling source tree's
-canonical script. That works for plugin installs, where both skills are copied together, and for Codex symlink
-installs, where a symlinked skill still points into the source checkout. The wrapper contains no config logic, so
-there is no duplicated init implementation or bespoke drift check.
+`feedback_loop_init.sh` must be discoverable from either skill. Ship a full copy under both skill dirs and add a
+deterministic CI drift check, matching the existing `DISPOSITIONS.md` pattern. The check triggers when either
+copy changes and fails unless the two files are byte-identical.
 
 ### Local config
 
@@ -59,12 +56,16 @@ The config keys are:
   guidance. This is where an instance names its gotcha/backlog files, archive policy, peer-coordination channel,
   changelog, local helper/pipeline homes, and live-ownership conventions. The product skill surfaces this pointer
   when it needs deployment bookkeeping instead of freezing those slots into the product schema.
-- `FEEDBACK_ISSUE_COMMAND`: optional issue creation/comment command override.
 
 The initializer always requires `FEEDBACK_PRODUCT_REPO` through an environment preseed or an interactive prompt.
 It does not auto-detect or auto-suggest `antondelafuente/automated-researcher`; that avoids a fork/upstream
 ambiguity and removes the hidden "works on Anton's box" class entirely. A non-interactive run without
 `FEEDBACK_PRODUCT_REPO` exits with a clear message and leaves no partial config.
+
+When `FEEDBACK_INSTANCE_GUIDANCE` is configured, the product skill expects the target to answer four questions:
+where local incident notes go, where local idea/backlog notes go, how local entries are archived/closed, and how
+to coordinate before touching live-owned local files or helpers. The product does not prescribe filenames,
+markers, or a two-bucket taxonomy; it only requires the guidance to make those local decisions discoverable.
 
 The skills read `~/.config/feedback-loop/env` at point of need. If the config file or `FEEDBACK_PRODUCT_REPO` is
 missing, product feedback is not silently sent anywhere: the skill drafts the exact Issue/search/comment text for
@@ -88,11 +89,12 @@ The product skill keeps the routing judgment from the live skill:
 The productized skill removes Anton-specific commands. When `aar-engineering` is installed and the current host
 has an engineer identity, it prefers:
 
-`wf.sh issue <family> create|comment ...`
+`wf.sh issue <family> create|comment -R "$FEEDBACK_PRODUCT_REPO" ...`
 
-When that path is missing, it either uses `FEEDBACK_ISSUE_COMMAND` or drafts the exact issue/comment body for the
-researcher to submit. It never tells an outside user to call `gh-as-engineer`, never assumes Anton's owner token,
-and never writes to `/home/anton/...` unless the instance config explicitly points there.
+When that path is missing, it drafts the exact issue/comment body for the researcher to submit. It never tells an
+outside user to call `gh-as-engineer`, never assumes Anton's owner token, never runs raw `gh issue create` as a
+substitute for engineer identity, and never writes to `/home/anton/...` unless the instance guidance explicitly
+points there.
 
 For instance-only targets, the skill owns only the generic shape: symptom -> cause -> fix/cost for incidents,
 and what/why/take/next-step for ideas. It does not own local file edits, close-by-move, archive filenames, or
@@ -163,6 +165,9 @@ Update the lifecycle skills/templates so feedback has a concrete product pointer
   clearer, and cannot misroute an outside install's feedback to Anton's tracker.
 - **Require `aar-engineering` for issue filing.** Rejected: the integration is valuable when configured, but a
   product user should still get a safe draft/fallback when engineer Apps are not installed.
+- **Allow arbitrary `FEEDBACK_ISSUE_COMMAND`.** Rejected: a free-form command can reintroduce the raw-`gh`
+  owner-auth misattribution the product just fixed. The supported direct filing path is `wf.sh issue` with
+  `-R "$FEEDBACK_PRODUCT_REPO"`; otherwise the skill drafts the issue/comment text.
 - **Move instance file/archive procedure into product config.** Rejected: local buckets, filenames, archive
   history, coordination rules, marker vocabulary, and rich close policy are deployment-owned. The product
   surfaces one guidance pointer and drafts generic notes; the consuming instance decides where and how those
@@ -175,6 +180,7 @@ Update the lifecycle skills/templates so feedback has a concrete product pointer
 - Updates `experiment-lifecycle` prose/templates only where they currently assume the home-only feedback skills
   or Anton's feedback filenames.
 - Adds packaged disposition references under the new skills; existing CI drift checks cover them.
+- Adds a deterministic check that the two packaged `feedback_loop_init.sh` copies stay byte-identical.
 - Does not change `ship-change`, GitHub branch protection, GPU execution behavior, or research experiment method.
 - The product PR does not edit Anton's home directory, but same-day deployment is part of the release step:
   after merge, flip the local Claude/Codex wrapper skills for `file-feedback` and `triage-feedback` to point at
@@ -200,5 +206,7 @@ work session and keep instance-only file/archive details in `/home/anton` guidan
 If that instance flip cannot be completed immediately, open a tracked instance follow-up before marking this
 shipped; do not leave two independently-editable live copies as the steady state.
 
-Rollback is a normal revert of the merge commit. Because the plugin is additive and the lifecycle text degrades
-to neutral instance-feedback wording, rollback risk is low.
+Rollback is a normal revert of the merge commit plus reversing any deployment wrapper flip performed after merge
+(or temporarily restoring the pre-flip local skill bodies). Because the plugin is otherwise additive and the
+lifecycle text degrades to neutral instance-feedback wording, rollback risk is low once the instance wrapper
+state is handled.
