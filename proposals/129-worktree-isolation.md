@@ -41,7 +41,7 @@ Give every agent its **own git worktree** of research-lab, so no agent shares a 
 ### What gets built (spawned `ready` issues — not this PR)
 
 - **Launcher: per-worker worktree.** `new-claude.sh` ensures `~/ws/<name>` exists (reuse if present), launches the agent there. **cwd migration is fresh/handoff-only, never a silent break** *(review F5)*: a `restart --continue` keeps resuming the **old** `~/claude-N` cwd (its history slug is unchanged); a worker moves to a worktree only via an explicit fresh start or a one-time history shim — because changing the cwd silently changes the conversation-history slug and would orphan a continue-restart.
-- **Launcher: per-executor worktree + fail-closed reap.** `dispatch-claude.sh` creates `~/ws/run/<exp>` on `run/<exp>`, launches the executor, and at reap **verifies fail-closed before removing**: worktree clean, branch pushed at HEAD, required close evidence present — with an explicit `--force` override for genuine cleanup *(review F4)*. (The current draft's `worktree remove --force || rm -rf` is exactly the unguarded path this replaces.)
+- **Launcher: per-executor worktree + conservative reap.** `dispatch-claude.sh` creates `~/ws/run/<exp>` on `run/<exp>`, launches the executor, and at reap **guards before removing: worktree clean AND branch pushed at HEAD**, with an explicit `--force` override for genuine cleanup. (Replaces the current draft's unguarded `worktree remove --force || rm -rf`.) The **richer evidence-gated reap** (verifying close artifacts) waits for **#130** to define the close contract — #129 must not reap against an evidence contract that does not exist yet *(review F4)*.
 - **Slug contract.** A shared `aar_slug()` validates `<name>`/`<exp>` before they're used as paths, git refs, or tmux names — reject path separators, `..`, whitespace, and characters hostile to git-ref/tmux/filesystem *(review F6)*. Names that fail are rejected at create, never at `rm -rf`.
 - **Config seam.** `AAR_LAB`, `AAR_WS` with this-instance defaults.
 - **manage-aar** updates so a restarted worker re-attaches its existing worktree consistently with the F5 migration rule.
@@ -55,13 +55,18 @@ Give every agent its **own git worktree** of research-lab, so no agent shares a 
 
 ## Blast radius
 
-- **Instance / fleet-controller machinery**, not the shipped research product or experiment science. Touches the **launchers** (`new-claude.sh`, `dispatch-claude.sh`) and the **manage-aar** restart path.
+- **Instance / fleet-controller machinery**, not the shipped research product or experiment science. The change rewrites a core working-tree convention, so the spawned work MUST update **every surface that encodes the old one** — missing any leaves agents following stale guidance:
+  - **launchers:** `new-claude.sh`, `dispatch-claude.sh`.
+  - **restart machinery** *(review F3)*: `restart-fleet.sh`, `restart-self.sh`, `start-orchestrator.sh` — these hardcode `~/claude-N` cwd and would migrate workers *back* off their worktrees; `claude-0` (the always-on controller in `$HOME`) is explicitly exempted with a safe rule.
+  - **boot/constitution guidance** *(review F2 — load-bearing)*: `~/CLAUDE.md` ("all AARs share ONE working tree") and `~/AGENTS.md` ("all AARs share one `~` working tree and one staging index") must be rewritten to the per-worktree convention, or zero-context agents keep following the shared-tree contract after the launchers change.
+  - **skill + map docs** *(review F5)*: the `manage-aar` dispatch section (still describes `~/.aar-dispatch/<exp>-exec-<runid>/`) and the `README.md` box-machinery row.
 - Changes where an agent's **cwd** can live (`~/claude-N` → `~/ws/<name>`), which moves the conversation-history slug — handled fresh/handoff-only per F5 so a continue-restart never silently orphans a conversation. Existing `~/claude-N` histories are untouched.
 - **No change** to research-lab content, the registry schema, or any experiment.
 - **Seams:** `run/<exp>` is the interface to **#130** (which owns the close/review/reap *contract*); the product-vs-instance home of the launchers is **#136**. This proposal touches neither contract — only the mechanism.
 
 ## Rollout + rollback
 
-- **Staged.** Apply to NEW launches first so running sessions aren't disrupted. Pin `~/research-lab` to `main` as part of the cutover. Persistent-worker migration is fresh/handoff-only (F5), so no running conversation is broken.
+- **Cutover preflight (blocks the pin)** *(review F1)*: `~/research-lab` can only be pinned to a clean `main` once the **existing** dirty/ahead state is resolved — today it is `ahead 4` with modified `journal/writeup/*` and `registry/*`. The preflight must, for every dirty/ahead path, **attribute it, move it to an owner's worktree/branch, or merge it through the lab PR path** — and refuse to pin until the tree is clean and at `origin/main`. (This is the loose paper state we already flagged, now a hard gate.)
+- **Staged.** Apply to NEW launches first so running sessions aren't disrupted. Persistent-worker migration is fresh/handoff-only (F5), so no running conversation is broken.
 - **Smoke first.** Validate end-to-end with one trivial throwaway experiment (dispatch → worktree → records on `run/<exp>` → fail-closed reap) before the real wave.
 - **Rollback is cheap.** Revert the launchers to cwd-only behavior; worktrees are removable with no data loss *because the reap is fail-closed* (branch pushed before removal). No history migration to undo.
