@@ -45,6 +45,13 @@ experiment's duration — that long-lived draft PR *is* the in-flight visibility
 design→execute agent seam (different agents, opposite dispositions) maps cleanly onto "who pushes which
 commits to the one branch."
 
+**Canonical merged record path.** The branch/PR are the *process*; the durable home on `main` is a stable
+per-experiment directory — `experiments/<exp>/` (`DESIGN.md`, `START.md`, `RESULTS.md`, the four gate
+outputs + their triage responses, and artifact/R2 pointers) — mirroring the existing per-experiment dir
+convention (`~/orchestrator/<exp>/` today). Records are committed to that path so they survive branch
+deletion and never collide across experiments; the PR and its reviews are *pointers* to that path, not the
+only place the record lives.
+
 ### 2. The three-way gate model: design gates the run; teardown is immediate; close gates the merge
 
 The constitution already requires the design be **cleared before the run** ("clear the design with Anton
@@ -62,6 +69,12 @@ At the other end, separate **compute teardown** from **validity closure** — th
   to every HIGH/MED finding — mirroring ship-change's own fail-closed merge gate. An unresolved
   validity defect must not silently become a finished experiment. (This corrects an earlier framing that
   made the close review "non-blocking"; only *teardown* is non-blocking, not validity closure.)
+  - **"Unresolved" is machine-readable, not a raw count.** The research close protocol already permits a
+    HIGH to be *fixed OR explicitly justified*, so the gate cannot simply parse `high=0` (that would block a
+    legitimately-justified HIGH). The merge gate parses a **triage artifact** (one response per HIGH/MED:
+    fixed | justified-with-reason | deferred-with-issue) and fail-closes: a HIGH passes only with an explicit
+    justified/fixed response recorded; a HIGH with no response BLOCKS. Defining that schema is part of the
+    `run-experiment` child issue.
 
 So the principled asymmetry is **teardown (immediate) vs. validity closure (gated)** — not "close doesn't
 gate." The close audit keeps the output-side gate that `run-experiment` already enforces; it just moves it
@@ -97,8 +110,14 @@ GitHub-identity and review-posting machinery and guarantee drift.
 Decision: **extract the low-level primitives** (engineer-identity resolution, draft-PR open, cross-family
 review posting) into a small shared helper that *both* `ship-change` and the experiment flow consume. Each
 keeps its own gates on top — ship-change its disposition close-gate + classifier; the experiment flow its
-research audits + the zero-HIGH close gate — but neither re-implements the GitHub plumbing. This is the one
-decision that reaches back into `wf.sh`/`aar-engineering`; it is flagged for the PM's arbitration.
+research audits + the zero-HIGH close gate — but neither re-implements the GitHub plumbing.
+
+**The helper's home is a runtime layer, not the build plugin.** `aar-engineering` is the *build-the-product*
+plugin (installed only by scaffold developers), so the helper cannot live there or the research runtime would
+take a build-layer dependency. Its canonical home is the shared cross-family **runtime** that both flows
+already consume — `verify-claims` (already the shared audit engine) is the natural host, or a small dedicated
+runtime plugin. `ship-change`/`wf.sh` then consumes the same helper. The direction (extract to a runtime
+home) is PM-cleared; the exact host is settled in the helper child issue.
 
 ## Instance-profile contract (decoupling)
 
@@ -113,8 +132,10 @@ policy). The profile must declare, at minimum:
 - **branch-protection expectations** (what the merge gate may require);
 - **where the brief snapshots or links** these, so the executor never guesses.
 
-The `START.md` brief snapshots the resolved values so the run is reproducible even if instance config later
-changes.
+Today the execution profile is a **narrative** seam (prose in `run-experiment`), not a machine-discoverable
+config. This flow needs it as a **concrete discovery/init interface** the executor can read without guessing —
+delivered as a prerequisite child issue. The `START.md` brief then snapshots the resolved values, so the run
+is reproducible even if instance config later changes.
 
 ## Alternatives considered
 
@@ -136,8 +157,11 @@ changes.
 - **Product skills** (`automated-researcher`): `design-experiment` and `run-experiment` gain the
   branch/PR/review-posting steps and the four-gate record contract. No change to the `verify-claims` audit
   engine — reused as-is.
-- **Shared helper (decision 5):** extracting the GitHub-identity + review-posting primitives touches
-  `aar-engineering`/`wf.sh` so ship-change consumes the same helper. This is the one cross-cutting edit.
+- **Shared helper (decision 5):** the GitHub-identity + review-posting primitives are extracted to a neutral
+  **runtime** home (candidate: `verify-claims`), and `aar-engineering`/`wf.sh` is refactored to consume it —
+  so `experiment-lifecycle` never depends on the build plugin. This is the one cross-cutting edit.
+- **Canonical record path:** establishes `experiments/<exp>/` on the research repo's `main` as the durable
+  per-experiment home.
 - **Builds on** Step 1 (per-experiment worktrees; the `run/<exp>` branch) — a separate `needs-design` issue.
 - **Product/instance boundary:** the skill change is *product*; the experiment PRs it produces land in the
   **instance research repo** (e.g. `research-lab`), resolved via the instance-profile contract above —
@@ -146,10 +170,11 @@ changes.
 ## Rollout + rollback
 
 Doc-only design PR; lands the shape on `main` via the `--scaffold` gate, then **spawns `ready` issues** for
-the skill edits: (a) extract the shared GitHub helper from `wf.sh`; (b) `design-experiment` PR-open +
-design-review-posting + fact-record linking; (c) `run-experiment` records + teardown-on-upload + close-review
-+ zero-HIGH merge gate; (d) the instance-profile contract fields. Each is implemented as a normal
-`ship-change` run.
+the skill edits: (a) extract the shared GitHub helper from `wf.sh` into a runtime home (the host is settled
+here); (b) `design-experiment` PR-open + design-review-posting + fact-record linking; (c) `run-experiment`
+records + teardown-on-upload + close-review + the machine-readable triage artifact behind the merge gate;
+(d) the instance-profile **discovery/init** interface + the `experiments/<exp>/` canonical record path. Each
+is implemented as a normal `ship-change` run.
 
 Staged: pilot the flow on a single real experiment before making the branch/PR path the default in
 `run-experiment`. Rollback is a normal revert of the spawned skill edits — the lifecycle falls back to the
