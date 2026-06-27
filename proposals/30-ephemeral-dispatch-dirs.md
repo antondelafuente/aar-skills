@@ -29,10 +29,16 @@ supersession and specifies that residual.
 
 Make the executor, at the very end of its own Close, **self-mark its dispatch host reapable** rather than
 leave it running — but stop short of self-deletion. Concretely, once a run reaches any terminal state and the
-executor has already verified GPU teardown, pushed its `RESULTS.md`, and cleared its self-wake, it performs
-one final host-close: it records a **host-lifecycle** status where the dispatcher can read it, confirms its
-branch is committed and pushed (so nothing in the launch dir is the only copy), and then stops its own idle
-tmux session via a dedicated **non-destructive** dispatcher path. The marker is deliberately scoped to the
+executor has verified GPU teardown and pushed its `RESULTS.md`, it performs one final host-close: it records a
+**host-lifecycle** status where the dispatcher can read it, confirms its branch is committed and pushed (so
+nothing in the launch dir is the only copy), and then stops its own idle tmux session via a dedicated
+**non-destructive** dispatcher path. **The self-wake is cleared LAST — only after the host-close finalizer is
+durably in charge** (Finding-driven ordering): the self-wake is the one thing that would catch a *hung* (not
+exited) executor, and #54's relaunch supervisor acts on process *exit*, not a hang — so if the executor
+cleared its wake and then hung before the finalizer was durably launched, nothing would catch the live-idle
+host. So the order is: durably launch the host-close finalizer → *then* clear the self-wake. (Equivalently the
+self-wake clear can move into the finalizer step itself; either way no wake is cleared before the finalizer
+owns the host.) The marker is deliberately scoped to the
 *host* lifecycle only — `host_state=closing|closed` — and carries **no experiment-outcome semantics**:
 *whether the experiment concluded / was blocked / was abandoned* is the canonical-terminal-experiment-state
 question owned by the #130 design (`blocked` / `invalid` / `abandoned` / `null-conclusion`), and the host
@@ -165,11 +171,13 @@ layered above it.
 **Migration for pre-marker worktrees** (Finding-driven). Dispatch worktrees that already exist when
 `--host-close` ships have *no* marker, and a naive "no `closed` marker ⇒ refuse unless `--force`" would turn
 today's working clean+pushed `--reap` into forced cleanup for every legacy dispatch — a silent regression of
-the existing safe path. So an unmarked dispatch is classified **`legacy-unmarked`** (no marker file at all, as
-opposed to a present `closing`/`failed`), and for `legacy-unmarked` hosts `--reap`/`--reap-all` **preserve the
-existing clean+pushed-only behavior** (no `--force` required). New dispatches always get a marker, so
-`legacy-unmarked` is a shrinking one-time class, not a permanent fork; a host that has ever been through
-`--host-close` is never `legacy-unmarked`.
+the existing safe path. So an unmarked dispatch *predating a per-install **migration cutoff*** (a timestamp
+captured when `--host-close` first ships) is classified **`legacy-unmarked`** (no marker file at all, and older
+than the cutoff), and for those hosts `--reap`/`--reap-all` **preserve the existing clean+pushed-only behavior**
+(no `--force` required). A *post*-cutoff missing marker is **not** legacy — it is a suspected launcher bug and
+still requires `--force`/operator classification, so the fallback never fails open on a host that *should* have
+had a marker. New dispatches always get a marker, so `legacy-unmarked` is a shrinking, time-bounded one-time
+class, not a permanent fork; a host that has ever been through `--host-close` is never `legacy-unmarked`.
 
 For this to work for a *zero-context* executor — which reads ONLY the brief + scaffold + the machine-consumed
 records this contract already has it consult — the host-close handle must be **surfaced on a record the
@@ -365,12 +373,16 @@ substrate supplies the *mechanism* and the field's *values*.
   drop the call** (Finding-driven): once the dispatcher declares `persistent` (+ handle), the `[BLOCK]` gate
   *requires* the host-close call, so merely "stop calling it" would fail closed. So disabling the mechanism
   means **flipping the dispatcher's `dispatch_host` declaration back to the transitional/disabled state**
-  (`dispatch_host=none` with a disabled `reason`), which returns the gate to a declared N.A. — or, for a full product rollback, reverting the
-  checklist-gate clause itself. **A disabled declaration also reclassifies already-markered hosts:** any host
-  carrying a `running`/`closing` marker when the mechanism is disabled is treated like `legacy-unmarked` for
-  reap — clean+pushed cleanup, no `--force` needed — so flipping the declaration doesn't strand
-  mid-flight-markered hosts behind the marker-aware refusal path. (For a full product rollback, marker
-  creation + the marker-aware `--list`/reap semantics revert together as one instance change.) Either way the
-  world reverts to today's manual-reap behavior with no data at risk, because deletion was never automatic. The
-  standing escape hatch is unchanged: `dispatch-claude.sh
-  --reap <exp>` / `--reap-all` for manual cleanup, `--list` to see what's outstanding.
+  (`dispatch_host=none` with a disabled `reason`), which returns the gate to a declared N.A. — or, for a full
+  product rollback, reverting the checklist-gate clause itself. **A disabled declaration reclassifies only
+  *unmarked* hosts, and must NOT fail open on liveness** (Finding-driven): the `legacy-unmarked` fallback to
+  clean+pushed reap applies only to hosts with *no marker at all and predating the migration cutoff* — a
+  per-install timestamp captured when `--host-close` first ships, so a *post*-cutoff missing marker is a
+  suspected launcher bug, not legacy, and still requires `--force`/operator classification. Crucially, a host
+  carrying a live `running` or in-progress `closing` marker is **never** auto-downgraded to clean+pushed reap by
+  a rollback — it keeps the marker-aware refusal (reap needs `--force` or explicit operator classification),
+  because a live/mid-close run must not be reapable just because the *mechanism* was disabled. (For a full
+  product rollback, marker creation + the marker-aware `--list`/reap semantics revert together as one instance
+  change, which also drops the markers.) Either way the world reverts to today's manual-reap behavior with no
+  data at risk, because deletion was never automatic. The standing escape hatch is unchanged:
+  `dispatch-claude.sh --reap <exp>` / `--reap-all` for manual cleanup, `--list` to see what's outstanding.
