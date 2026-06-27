@@ -31,7 +31,7 @@ guarantee is: **no write-capable owner credential is reachable by an agent shell
 paths** — the exported token is read-only *and* no write-capable stored owner `gh auth` credential is
 present (or it is isolated out of the agent shell's `GH_CONFIG_DIR`).
 
-**The same closure applies to Git's own credential surface (Finding 2).** A `git push` to the GitHub
+**The same closure applies to Git's own credential surface.** A `git push` to the GitHub
 remote can authenticate via a stored Git credential helper (an owner HTTPS token in
 `~/.git-credentials` / the OS keychain) or an owner SSH key — entirely outside `GH_TOKEN` and `gh auth`.
 So the guarantee extends: an agent shell must hold **no write-capable owner Git credential for the GitHub
@@ -92,7 +92,7 @@ This is deliberately a **defense-in-depth pair**, not a single mechanism:
    would therefore intercept the credential-helper invocation mid-push and break the engineer push. So the
    wrapper must pass through a **narrow whitelist** of the *non-mutating* `gh auth` forms the workflow
    needs — `gh auth git-credential`, `gh auth status`, `gh auth token` — and **must NOT blanket-pass all
-   `gh auth …`** (Finding 3: `gh auth login`, `gh auth refresh`, `gh auth setup-git`, `gh auth logout`
+   `gh auth …`** (`gh auth login`, `gh auth refresh`, `gh auth setup-git`, `gh auth logout`
    *mutate the stored credential* and would re-open exactly the stored-credential path the capability layer
    removes). Those credential-mutating `gh auth` subcommands are guarded like any other write — blocked
    with the directed message, available only via the elevated maintenance path. The `.aar-ci` behavior
@@ -112,6 +112,20 @@ override** (`WF_GH_ALLOW_OWNER_WRITE=1`) so the wrapper emits a terminal note + 
 the call reach the (now write-capable) `gh`. The default agent shell holds neither, so it never writes as
 the owner by reflex. This *improves* the audit story — elevation becomes a visible, deliberate two-step
 act instead of the silent default.
+
+**Don't strand existing engineer writes that aren't `create`/`comment`.**
+Blocking bare `issue edit/close`, label edits, and `pr review/merge` would break a workflow that today
+*legitimately* needs them under an engineer/maintainer identity: `triage-feedback` does label edits and
+issue closes ("tracker maintenance … requires a configured maintainer identity"), and `wf.sh` itself does
+`pr review`/`pr merge`/issue-close — but `wf.sh issue` currently exposes only `create` and `comment`. So
+the design's guard cannot simply forbid these; it must point at an **engineer-identity replacement**. The
+decision (recorded here for the owner): **extend the one engineer path to cover the maintenance verbs the
+workflow actually uses** — add `wf.sh issue edit|close|label` (and confirm `pr review/merge` already run
+through the engineer token, which they do inside `finish`/the review path) so that every operation the
+guard blocks under the ambient owner token has a bot-identity equivalent. Operations with **no** workflow
+need (arbitrary owner-only admin) stay on the elevated maintenance path. `feedback-loop`/`triage-feedback`
+docs are updated to call the new engineer verbs instead of bare `gh`. This is its own product child
+(#4 below) so the guard never lands ahead of the replacement it requires.
 
 **Reuse, don't fork.** The engineer write path already exists and is the one canonical implementation
 (`WF_ENGINEER_TOKEN_CMD_*` → `gh_author`/`gh_push` in `wf.sh`, surfaced as `wf.sh issue|comment`). This
@@ -144,32 +158,43 @@ and the instance applies the capability change to itself.
    on a write emits the directed "use `wf.sh`" error. Bundled (atomically, because the contract ties them
    together): the `wf.sh` call-site change that marks internal engineer-token `gh` calls with the
    recognized bypass signal; the `git_push_author` change that **forces a one-shot engineer credential**
-   (tokenized remote / scoped askpass) so the push doesn't depend on an ambient owner Git credential
-   (Finding 2); and a behavior smoke asserting **all** directions (bare `gh` write blocked; credential-
-   mutating `gh auth` blocked; `wf.sh`-routed write AND full engineer push allowed). Owns the
-   guard-specific override flag.
+   (tokenized remote / scoped askpass) so the push doesn't depend on an ambient owner Git credential;
+   and a behavior smoke asserting **all** directions (bare `gh` write blocked; credential-mutating
+   `gh auth` blocked; `wf.sh`-routed write AND full engineer push allowed). Owns the guard-specific
+   override flag.
 2. **Read-only-ambient detector: `wf.sh doctor` check + a `.aar-ci` fake-`gh` smoke (product), covering
-   BOTH the `gh`/API surface AND the ambient `git push` surface (Finding 1).** Implements concrete,
+   BOTH the `gh`/API surface AND the ambient `git push` surface.** Implements concrete,
    non-mutating tests (this design picks the methods; it is not a placeholder), probing the **actual write
    permission classes that caused the incident — issues/PRs/comments/contents — not repo administration**
    (a repo-admin PATCH would falsely pass a token that can write issues/PRs but not admin).
 
-   **(a) API-write probe — against a REAL, existing resource so the only variable is the permission gate
-   (not GitHub's 403-vs-404 status ordering, which is not a documented contract — Finding 2).** Use an
-   **identity-write on an existing object the token can address**: `gh api --method PATCH
-   "repos/{owner}/{repo}/issues/comments/{id-of-a-known-existing-comment}" -f body="{its-current-body}"` —
-   an existing target with an identity body, so a write-capable token passes the permission gate and
-   *re-sets the body to itself* (semantic no-op, **2xx**), while a read-only token is blocked at the
-   permission layer (**403**). The signal is now a clean **403 ⇒ read-only (PASS) / 2xx ⇒ write-capable
-   (FAIL)** on a real resource, with no reliance on missing-resource status ordering. (If the instance
-   prefers zero writes whatsoever, the alternative is a `GET` of the token's *own* permission surface where
-   available, e.g. an installation token's permissions object; but the identity-write canary is the
-   portable default because fine-grained PATs don't expose `x-oauth-scopes` headers.)
-   **The child issue MUST empirically prove the 403/2xx matrix against both a read-only and a write-capable
-   token before this probe is treated as the rollout gate** — the validation is part of the child's
-   acceptance, not assumed.
+   **(a) API-write probe — one canary per fine-grained PERMISSION CLASS the workflow mutates, against a
+   REAL, self-discovered resource** The workflow's writes map onto a small set of
+   fine-grained permissions, not many endpoints: `pr review`/`pr merge`/PR comments ⇒ **`pull_requests:
+   write`**; issue create/comment/label/close ⇒ **`issues: write`**; pushes/content ⇒ **`contents:
+   write`**. So the detector probes **each of those three permission classes** with an identity-write
+   canary and passes only if **all** return 403 (read-only); a 2xx on *any* class ⇒ write-capable (FAIL).
+   This closes the scope gap where a single issue-comment canary would miss a PR-write-capable token.
 
-   **(b) Ambient-`git push` probe (Finding 1):** a **non-mutating `git push --dry-run`** to a disposable
+   Each canary is an **identity-write on a real object the token can already GET** — no bootstrap config,
+   the target is **self-discovered** at runtime so there is no "known comment id" to provision:
+   - `pull_requests`: GET the repo's most-recent PR the token can read, then `PATCH repos/{o}/{r}/pulls/{n}
+     -f title="{its-current-title}"` (identity title ⇒ no-op 2xx if writable, 403 if not).
+   - `issues`: same shape on the most-recent issue's title, or `PATCH .../issues/comments/{id-the-token-
+     just-read}` with its current body.
+   - `contents`: a `PUT .../contents/{path}` with the file's **current** sha + content (identity write ⇒
+     no-op), or, to avoid any commit, a `GET` of the contents-permission-gated `.../contents/` with a write
+     method that a read-only token 403s before any change.
+
+   The signal is a clean **403 ⇒ that class is read-only / 2xx ⇒ that class can write** on a real resource,
+   with **no reliance on missing-resource 403-vs-404 ordering**. (Where the token type *does* expose its
+   permission object directly — e.g. a GitHub App installation token — `doctor` may instead GET and assert
+   that object; the identity-write canary is the portable default because fine-grained PATs don't expose
+   `x-oauth-scopes`/a permissions object.) **The child issue MUST empirically prove the 403/2xx matrix for
+   each permission class against both a read-only and a write-capable token before this probe is the
+   rollout gate** — the validation is part of the child's acceptance, not assumed.
+
+   **(b) Ambient-`git push` probe** a **non-mutating `git push --dry-run`** to a disposable
    ref on the GitHub remote, with **all credential prompts disabled** (`GIT_TERMINAL_PROMPT=0`,
    `GIT_ASKPASS=/bin/false`/`true`, `core.askPass` empty, SSH `BatchMode=yes`) and the engineer credential
    explicitly absent, so it exercises only whatever **ambient** Git credential the shell resolves. If the
@@ -183,33 +208,45 @@ and the instance applies the capability change to itself.
    write-capable ambient credential on either surface, so a regression/rollback is caught instead of
    silently re-opening the footgun.
 3. **Codify the contract across ALL its canonical homes — one canonical reference, no duplicate live
-   contracts (product, doc-only; Finding 5).** Add the rule to `AGENTS.md` ("the ambient agent GitHub
+   contracts (product, doc-only).** Add the rule to `AGENTS.md` ("the ambient agent GitHub
    credential MUST be read-only; all writes go through the engineer token path"), next to the existing
    engineer-identity rule, AND update every point-of-use surface that currently advertises a write-capable
    ambient `GH_TOKEN` / owner-admin write path so they don't become a second, stale contract:
    ship-change `SKILL.md` ("Auth: … export `GH_TOKEN`"), `RUNBOOK.md` (the `GH_TOKEN` rotation note that
    says "repo: contents + pull_requests"), and any help/plugin metadata. Prefer a single canonical
    statement that the others reference over duplicated prose.
+4. **Extend the engineer path to the maintenance verbs the guard blocks, so no existing workflow is
+   stranded (product; the blast-radius dependency).** The guard forbids bare `issue edit/close`, label
+   edits, and PR review/merge under the ambient owner token, but `triage-feedback` (label edits + closes)
+   and `wf.sh` itself need them under the engineer/maintainer identity, and `wf.sh issue` currently exposes
+   only `create`/`comment`. Add `wf.sh issue edit|close|label` (engineer-token, same `gh_author` path) and
+   confirm/route `pr review`/`pr merge` through the engineer token; then update `feedback-loop`/
+   `triage-feedback` docs and any prose to call the new engineer verbs instead of bare `gh`. **This child
+   MUST land before (or with) child #1's guard** so the guard never blocks an operation that has no
+   engineer-identity replacement yet.
 
 **Instance rollout task (NOT a product ship-change child — applied to this deployment directly):**
 
 - **Demote this instance's ambient agent credential to read-only + wire the separate elevated owner
   token** in the auth-env loader / `~/.config`. This is the load-bearing capability change, but it is
   instance-owned credential config; it is tracked as an instance rollout task (and gated on product
-  children 1–2 being available), not as a product `ready` issue. Per Finding 1 it must close the **full**
+  children 1–2 being available), not as a product `ready` issue. It must close the **full**
   ambient write surface, not just the exported token: (a) the exported `GH_TOKEN`/`GITHUB_TOKEN` becomes
   read-only, AND (b) any write-capable stored owner `gh auth login` credential is removed from or isolated
   out of the agent shell's `GH_CONFIG_DIR` (so a stored-credential fallback can't re-open the hole). The
   product child #2's doctor check — which probes the *effective* resolved credential — is what verifies
-  this rollout actually took effect on any given install, covering both paths. Per Finding 2 the rollout
-  also covers the **Git** credential surface: ensure the agent shell holds no write-capable owner Git
-  credential for the GitHub remote (read-only fetch/clone is fine), so the only thing that can push is the
-  one-shot engineer credential `git_push_author` forces.
+  this rollout actually took effect on any given install, covering both paths. The rollout also covers the
+  **Git** credential surface: ensure the agent shell holds no write-capable owner Git credential for the
+  GitHub remote (read-only fetch/clone is fine), so the only thing that can push is the one-shot engineer
+  credential `git_push_author` forces.
 
-Sequencing: product children 1–3 land first (the guard, the detector, the contract). The instance then
-performs the capability demotion and runs `wf.sh doctor` to confirm the ambient token is read-only and a
-`wf.sh`-routed write still authors as the bot. The capability layer is what delivers the structural
-guarantee; the product children make it enforceable, detectable, and documented.
+Sequencing: **child #4 (the engineer maintenance verbs) lands first or with child #1**, so the guard never
+blocks an operation lacking an engineer-identity replacement. Then the rest of the product children land
+(child #1 guard + bypass + forced push cred; child #2 detector; child #3 contract). Only after the product
+children are available does the instance perform the capability demotion (token + stored `gh auth` + Git
+credential) and run `wf.sh doctor` to confirm every probed surface is read-only while a `wf.sh`-routed
+write/push still authors as the bot. The capability layer delivers the structural guarantee; the product
+children make it enforceable, ergonomic, detectable, non-stranding, and documented.
 
 ## Alternatives considered
 
