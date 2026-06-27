@@ -72,6 +72,10 @@ def extract(text: str, label: str) -> str:
 
 canonical = extract(agents, "AGENTS.md")
 refs = sorted(root.glob("plugins/*/skills/*/references/DISPOSITIONS.md"))
+required = root / "plugins/aar-engineering/skills/ship-change/references/DISPOSITIONS.md"
+if required not in refs:
+    print(f"missing required packaged disposition reference: {required.relative_to(root)}", file=sys.stderr)
+    sys.exit(1)
 bad = []
 for ref in refs:
     if ref.read_text() != canonical:
@@ -92,7 +96,7 @@ if wf.exists():
         sys.exit(1)
 PY
   then ok "disposition references and gate labels match AGENTS.md"
-  else err "packaged disposition reference drift"
+  else err "disposition reference / gate-label sync check failed"
   fi
 fi
 
