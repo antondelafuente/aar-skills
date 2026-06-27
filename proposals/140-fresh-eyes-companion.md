@@ -14,23 +14,29 @@ stateful gate alone can silently trust past a pre-existing hole.
 
 ## Approach
 
-At **`finish`**, for a disposition-aware PR, run ONE **fresh stateless sweep** *before* the structural gate,
-and fold its findings into the canonical state. Concretely:
+At **`finish`**, for a disposition-aware PR, run ONE **fresh stateless sweep** *before* the disposition-aware
+merge review, and let the **model** (not a hash) decide which of its findings are genuinely new. Novelty is
+SEMANTIC, not textual — a rephrased version of an already-dispositioned finding must NOT block (design-review
+F1). Concretely:
 
-1. **Force-stateless review.** `run_review` gains `WF_STATELESS_REVIEW=1`, which skips the disposition
-   injection so the reviewer does a full, amnesiac dimensional read (it re-raises *everything*, including
-   already-dispositioned findings). Run it with an empty PR arg so it produces findings without posting.
-2. **Seed the gaps.** `fd_seed` folds the sweep's findings into the state — and by construction only *new*
-   ids (findings never seen before = the pre-existing holes) are added, as `unresolved`; already-dispositioned
-   findings keep their disposition (same content → same id → not re-added).
-3. **The sweep's findings become the structural gate's trusted list.** The existing #139 structural gate then
-   runs over the **complete** reviewer-derived HIGH set (the fresh sweep), so a pre-existing HIGH that is now
-   `unresolved` BLOCKS — the author must disposition it. This also *strengthens* #139: the trusted list is now
-   the full current findings, not just the last code-review round's.
-4. The disposition-aware merge review (the model gate) then runs as today and blocks on residual HIGH.
+1. **Force-stateless un-anchored sweep.** `run_review` gains `WF_STATELESS_REVIEW=1`, which skips the
+   disposition injection so the reviewer does a full, amnesiac holistic read (re-raises *everything*, anchored
+   to nothing). This un-anchored read is exactly what caught #132's pre-existing hole that the
+   disposition-anchored review trusted past. **Its output is POSTED as a durable PR comment** (design-review
+   F2), so a fresh agent can triage it from GitHub, not just a `/tmp` file.
+2. **Semantic adjudication by the merge review, not hashing.** The disposition-aware merge review is given the
+   sweep's findings as candidate items and asked to surface any HIGH **not semantically covered** by a valid
+   disposition — including a pre-existing hole no prior finding named. Rephrasings of dispositioned findings
+   are recognized and suppressed by the model; genuinely-new holes become **residual HIGH** and block via the
+   existing gate. The author then dispositions the real ones.
+3. No hash-based auto-seeding of the sweep into the state (that equated textual novelty with real novelty —
+   F1). The author may still `fdispo seed` to record a confirmed-new finding; the *gate* relies on the model's
+   semantic judgment, backstopped deterministically by #139's structural gate over whatever the author did
+   disposition.
 
-So the pair is: **stateful gate for convergence + a mandatory fresh stateless sweep at the merge checkpoint
-for completeness.** No state on a PR → no sweep (today's stateless behavior is already "all fresh").
+So the pair is: **stateful gate for convergence + a mandatory un-anchored fresh sweep at the merge checkpoint
+for completeness, reconciled semantically by the model.** No state on a PR → no sweep (today's stateless
+behavior is already "all fresh").
 
 ### Cadence
 
@@ -52,10 +58,13 @@ sound rather than self-referential.
 
 ## Blast radius
 
-- **`aar-engineering`** (`wf.sh`): `run_review` honors `WF_STATELESS_REVIEW`; `finish` runs the fresh sweep +
-  seed before the structural gate for disposition-aware PRs. No-state path unchanged. Version bump + a smoke.
-- No change to `verify-claims` (reuses the existing review engine, just invoked stateless).
-- Strengthens #139's structural gate (complete trusted list) — no behavior change for non-disposition PRs.
+- **`aar-engineering`** (`wf.sh`): `run_review` honors `WF_STATELESS_REVIEW`; `finish` runs the fresh sweep,
+  posts it durably, and passes its findings to the disposition-aware merge review for semantic adjudication —
+  only for disposition-aware PRs. No-state path byte-identical. Version bump + a smoke.
+- **`verify-claims`** (`audit_experiment.sh`): the disposition-aware prompt gains an optional "candidate
+  fresh-sweep findings — surface any HIGH not semantically covered by the dispositions" section, fed via an
+  env/file when present. Absent → unchanged.
+- No behavior change for non-disposition PRs.
 
 ## Rollout + rollback
 
