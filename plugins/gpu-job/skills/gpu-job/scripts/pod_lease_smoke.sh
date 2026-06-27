@@ -89,10 +89,14 @@ P=$(run intent RUNPOD_API_KEY)            # pending intent (no pod bound)
 [ "$(run find-nonce "$P")" = "$P" ] && ok findnonce-exact || no findnonce-exact
 [ -z "$(run find-nonce "my-pod-name")" ] && ok findnonce-unknown-empty || no findnonce-unknown-empty
 [ -z "$(run find-nonce "${P}x")" ] && ok findnonce-no-substring || no findnonce-no-substring
-# ambiguous: two leases with the same nonce field -> empty
+# ambiguous: two PENDING-INTENT leases with the same nonce field -> empty
 cp "$TMP/$P.json" "$TMP/gpujob-dupe.json"   # second file carries the SAME nonce value
 [ -z "$(run find-nonce "$P")" ] && ok findnonce-ambiguous-empty || no findnonce-ambiguous-empty
 rm -f "$TMP/gpujob-dupe.json"
+# find-nonce returns ONLY pending intents: once a pod is bound (provisional), it no longer matches
+# (Finding 4 — a registered lease is accounted for by its pod id, not by name-matching).
+run provisional "$P" pod-bound >/dev/null
+[ -z "$(run find-nonce "$P")" ] && ok findnonce-skips-provisional || no findnonce-skips-provisional
 
 # --- validation: bad id rejected, empty option rejected, surplus args rejected ---
 if run provisional '../evil' pod >/dev/null 2>&1; then no reject-traversal; else ok reject-traversal; fi

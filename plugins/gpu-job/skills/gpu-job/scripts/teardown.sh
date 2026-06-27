@@ -19,14 +19,36 @@ KEY=$(grep -E "^$KEY_NAME=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2- || 
 curl -s -X DELETE -H "Authorization: Bearer $KEY" -H "User-Agent: gpu-job" \
   "https://rest.runpod.io/v1/pods/$PID" >/dev/null && echo "deleted $PID"
 
-# Close the lease ONLY after verifying the pod is actually gone on the control plane.
+# Close the lease ONLY after verifying the pod is actually gone on the control plane. FAIL-CLOSED:
+# close only on a 404 or a parseable 200 showing NOT-RUNNING; a transient curl/HTTP/JSON failure is
+# INCONCLUSIVE and leaves the lease open for the standing reaper to retry (never closes a still-billing
+# pod on an unreadable response).
 if [ -n "$NONCE" ] && [ -f "$HERE/pod_lease.sh" ]; then
-  still=$(curl -s -H "Authorization: Bearer $KEY" -H "User-Agent: gpu-job" \
-            "https://rest.runpod.io/v1/pods/$PID" 2>/dev/null | grep -c '"desiredStatus":[[:space:]]*"RUNNING"' || true)
-  if [ "${still:-0}" = 0 ]; then
-    bash "$HERE/pod_lease.sh" close "$NONCE" >/dev/null && echo "lease $NONCE closed (delete verified)"
+  body=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $KEY" -H "User-Agent: gpu-job" \
+           "https://rest.runpod.io/v1/pods/$PID" 2>/dev/null) || body=""
+  verdict=$(printf '%s' "$body" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+if not raw.strip():
+    print("inconclusive"); sys.exit(0)
+lines = raw.splitlines()
+http = lines[-1].strip() if lines else ""
+payload = "\n".join(lines[:-1])
+if http == "404":
+    print("gone"); sys.exit(0)
+if http in ("200", "201"):
+    try:
+        d = json.loads(payload)
+    except Exception:
+        print("inconclusive"); sys.exit(0)
+    print("present" if (isinstance(d, dict) and d.get("desiredStatus") == "RUNNING") else "gone")
+else:
+    print("inconclusive")
+' 2>/dev/null || echo inconclusive)
+  if [ "$verdict" = gone ]; then
+    bash "$HERE/pod_lease.sh" close "$NONCE" >/dev/null && echo "lease $NONCE closed (delete verified gone)"
   else
-    echo "WARNING: pod $PID still RUNNING after DELETE — lease $NONCE left for the reaper to retry (NOT closed)" >&2
+    echo "WARNING: pod $PID delete NOT verified gone ($verdict) — lease $NONCE left for the reaper to retry (NOT closed)" >&2
   fi
 fi
 

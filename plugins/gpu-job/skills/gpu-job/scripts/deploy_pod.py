@@ -305,12 +305,16 @@ if __name__ == "__main__":
     if _SELFTEST:
         _selftest(); raise SystemExit(0)
     # INTENT (pre-deploy): mint the lease BEFORE deploy() so even a created-but-id-never-returned pod
-    # is covered (the reaper matches it to the pending intent by nonce and reaps it on the short
-    # default expiry). The intent records the KEY REFERENCE the reaper resolves on its own (the
-    # API_KEY_ENV var name, not the secret), validated as resolvable now.
-    nonce = lease("intent", KEY_NAME) if _LEASE_ON else None
+    # is covered (the reaper matches it to the pending intent by nonce and reaps it on the intent
+    # expiry). The intent records the KEY REFERENCE the reaper resolves on its own (the API_KEY_ENV var
+    # name, not the secret). The intent expiry must cover the WHOLE acquire window — RETRY_MINUTES of
+    # deploy retries + wait_ssh (~5min) + a cushion — or a pod created LATE in a long retry loop could
+    # be reaped before enrich extends it (code-review Finding 1). enrich resets it to the run's real
+    # expiry once SSH is up.
+    intent_min = int(env("RETRY_MINUTES", "0")) + 20
+    nonce = lease("intent", KEY_NAME, "--expiry-min", str(intent_min)) if _LEASE_ON else None
     if nonce:
-        print(f"[lease] intent {nonce} (key_ref={KEY_NAME})", flush=True)
+        print(f"[lease] intent {nonce} (key_ref={KEY_NAME}, expiry +{intent_min}min covers the acquire window)", flush=True)
     pid = deploy(nonce)
     ip, port, cost = wait_ssh(pid)
     # ENRICH: SSH endpoint + the run's real expiry (default 12h; a long run REFRESHes via

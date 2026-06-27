@@ -46,11 +46,17 @@ cat > "$TMP/verify.sh" <<EOF
 #!/bin/bash
 [ -f "$GONE/\$2" ]            # exit 0 iff gone
 EOF
-cat > "$TMP/resolve.sh" <<EOF
+cat > "$TMP/resolve.sh" <<'EOF'
 #!/bin/bash
-# resolve every key_ref EXCEPT the literal UNRESOLVABLE
-[ "\$1" = UNRESOLVABLE ] && exit 0
-echo "secret-for-\$1"
+# Mirror the real resolve_key contract: UNRESOLVABLE and any non-identifier key_ref -> empty (the real
+# resolve_key validates the ref is a shell identifier before indirect expansion; a malformed ref is
+# unresolvable, never fatal/injected). A valid identifier resolves to a fake secret.
+[ "$1" = UNRESOLVABLE ] && exit 0
+# valid shell identifier only (explicit negative test — a case glob's trailing * over-matches)
+if [ -n "$1" ] && [ -z "${1//[A-Za-z0-9_]/}" ] && [[ "$1" != [0-9]* ]]; then
+  echo "secret-for-$1"
+fi
+exit 0
 EOF
 cat > "$TMP/keepalive.sh" <<EOF
 #!/bin/bash
@@ -93,12 +99,20 @@ PEND=$(lease intent RUNPOD_API_KEY --expiry-min 15)
 PEXP=$(lease intent RUNPOD_API_KEY --expiry-min -1)
 # === fixture 6: an expired lease whose DELETE can't be verified -> lease REOPENED for retry (Finding 2) ===
 NOV=$(mk_lease pod-nov -1 RUNPOD_API_KEY); echo pod-nov >> "$TMP/nogone"
+# === fixture 7: a MALFORMED key_ref must NOT abort the reaper (Finding 3) — report-only, not fatal ===
+BADK=$(mk_lease pod-badk -1 'bad key$(touch /tmp/PWNED)')
+# === fixture 8: an unknown pod whose name == a REGISTERED (provisional) lease nonce must NOT be reaped
+#     by name-matching (Finding 4); find-nonce only matches pending intents ===
+REGN=$(mk_lease pod-regn 120 RUNPOD_API_KEY)   # provisional, fresh; its nonce is REGN
+# a DIFFERENT live pod carrying REGN as its name (a collision/spoof) must be report-only, never reaped
 # === fixture 5: legacy contract-1 leases, keepalive future / inconclusive / past ===
 LF=$(mk_lease pod-lf -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo future       > "$TMP/keepalive_pod-lf"
 LI=$(mk_lease pod-li -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo ""           > "$TMP/keepalive_pod-li"
 LP=$(mk_lease pod-lp -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo past         > "$TMP/keepalive_pod-lp"
 
 # the "live" pod list the stub returns (pod-id name)
+# Two live pods sharing the SAME name (an ambiguous name) -> both report-only, never reaped (Finding 4).
+DUPNAME="gpujob-dupedupedupedupedupedupedupe"
 cat > "$TMP/pods.txt" <<EOF
 pod-exp $EXP
 pod-fresh $FRESH
@@ -107,6 +121,10 @@ pod-unknown some-user-name
 $PEND $PEND
 pod-pexp $PEXP
 pod-nov $NOV
+pod-badk $BADK
+pod-regn-spoof $REGN
+pod-dup1 $DUPNAME
+pod-dup2 $DUPNAME
 pod-lf $LF
 pod-li $LI
 pod-lp $LP
@@ -136,6 +154,16 @@ case "$nov_state" in
   *) no "nov-reopened-for-retry (state=$nov_state)" ;;
 esac
 if lease is-reapable "$NOV"; then ok nov-reapable-again || true; else no nov-reapable-again; fi
+# Finding 3: a malformed key_ref is report-only, NOT fatal, and never executes shell injection
+deleted pod-badk && no badk-deleted || ok badk-report-only
+[ -e /tmp/PWNED ] && { no badk-no-injection; rm -f /tmp/PWNED; } || ok badk-no-injection
+echo "$OUT" | grep -q "unresolved key_ref" && ok badk-unresolved-logged || no badk-unresolved-logged
+# Finding 4: an unknown pod spoofing a REGISTERED (provisional) nonce as its name is NOT reaped
+deleted pod-regn-spoof && no regn-spoof-deleted || ok regn-spoof-report-only
+# Finding 4: two live pods sharing a name are AMBIGUOUS -> both report-only
+deleted pod-dup1 && no dup1-deleted || ok dup1-report-only
+deleted pod-dup2 && no dup2-deleted || ok dup2-report-only
+echo "$OUT" | grep -q "AMBIGUOUS" && ok ambiguous-name-logged || no ambiguous-name-logged
 
 # === locked-reap race (Finding 1): a refresh that lands before the reaper's in-lock recheck SAVES
 #     the pod. Simulate by refreshing the expired lease to a future expiry, THEN sweeping. ===

@@ -57,11 +57,19 @@ cfg_get(){ grep -E "^$1=" "$CFG" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"
 
 # Resolve a key_ref (an API_KEY_ENV var NAME) to its secret: process env wins, else the gpu-job config
 # (the same indirection deploy_pod.py uses). Empty output = unresolved -> the caller reports the lease.
+# A malformed key_ref (not a valid shell identifier) must NOT abort the reaper via a fatal indirect
+# expansion (code-review Finding 3): it's just unresolvable -> empty -> report-only.
 resolve_key(){ # <key-ref>
   if [ -n "${GPU_JOB_RESOLVE_KEY_CMD:-}" ]; then $GPU_JOB_RESOLVE_KEY_CMD "$1"; return; fi
-  local ref=$1 v
-  v=${!ref:-}
-  [ -n "$v" ] || v=$(cfg_get "$ref")
+  local ref=$1 v=""
+  # Valid shell identifier ONLY (reject anything with a non-[A-Za-z0-9_] char or a leading digit). A
+  # `case` glob like [A-Za-z_][A-Za-z0-9_]* does NOT do this (its trailing * matches ANY chars), so use
+  # an explicit negative test: a ref that still contains a disallowed char after stripping the allowed
+  # set, or starts with a digit, is malformed -> unresolvable, NEVER indirect-expanded.
+  if [ -n "$ref" ] && [ -z "${ref//[A-Za-z0-9_]/}" ] && [[ "$ref" != [0-9]* ]]; then
+    v=${!ref:-}
+    [ -n "$v" ] || v=$(cfg_get "$ref")
+  fi
   printf '%s' "$v"
 }
 
@@ -203,28 +211,48 @@ for nonce in "${!LEASE_POD[@]}"; do
   consider_lease "$nonce"
 done
 
-# 2. report-only over live pods that no lease accounts for (unknown / ambiguous-nonce). We list pods
-#    per resolved key seen in the registry; a pod with no lease and no matching pending-intent nonce
-#    is REPORTED, never deleted.
-declare -A SEEN_KEY
+# Resolve the DISTINCT set of keys referenced by the registry (so we list each provider key once).
+declare -A SEEN_KEY KEY_FOR_REF
 for nonce in "${!LEASE_POD[@]}"; do
   kr=$(bash "$LEASE" show "$nonce" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("key_ref",""))' 2>/dev/null)
   [ -n "$kr" ] || continue
   [ -n "${SEEN_KEY[$kr]:-}" ] && continue
   SEEN_KEY["$kr"]=1
   key=$(resolve_key "$kr")
-  [ -n "$key" ] || continue
+  [ -n "$key" ] && KEY_FOR_REF["$kr"]="$key"
+done
+
+# Pre-count live pod-NAME occurrences across all resolved keys (code-review Finding 4): a name that
+# appears on more than one live pod is AMBIGUOUS and must be report-only, never reaped — even if it
+# matches a pending-intent nonce. Counting first means the iteration order can't let "the first of two
+# duplicate names" be deleted.
+declare -A NAME_COUNT
+for kr in "${!KEY_FOR_REF[@]}"; do
+  while read -r pod name; do
+    [ -n "${name:-}" ] || continue
+    NAME_COUNT["$name"]=$(( ${NAME_COUNT["$name"]:-0} + 1 ))
+  done < <(list_pods "${KEY_FOR_REF[$kr]}")
+done
+
+# 2. report-only over live pods that no lease accounts for. A pod with no lease and no UNIQUE matching
+#    pending-intent nonce is REPORTED, never deleted.
+for kr in "${!KEY_FOR_REF[@]}"; do
+  key=${KEY_FOR_REF[$kr]}
   while read -r pod name; do
     [ -n "${pod:-}" ] || continue
     [ -n "${POD_TO_NONCE[$pod]:-}" ] && continue          # accounted for by a lease
-    # try to match an unknown pod to a PENDING INTENT by nonce (exact, ambiguous->empty=report)
+    # A duplicated live name is ambiguous -> report-only, never reap (Finding 4).
+    if [ "${NAME_COUNT[$name]:-0}" -gt 1 ]; then
+      log "report-only (AMBIGUOUS — $name on >1 live pod): pod=$pod"; reported=$((reported+1)); continue
+    fi
+    # match an unknown pod to a UNIQUE PENDING INTENT by nonce (find-nonce returns only intent leases
+    # with no pod_id; ambiguous-intent -> empty=report)
     m=$(bash "$LEASE" find-nonce "$name")
     if [ -n "$m" ]; then
-      # The created-but-id-never-returned case (Finding 4): a live pod whose NAME is an intent nonce.
-      # If that intent is EXPIRED, this pod is the half-born pod the intent exists to catch — bind the
-      # discovered id and reap it under the same locked claim. If not yet expired, just report.
+      # The created-but-id-never-returned case: a live pod whose NAME is an EXPIRED intent nonce — the
+      # half-born pod the intent exists to catch. Bind the discovered id + reap under the locked claim.
       if bash "$LEASE" is-reapable "$m"; then
-        bash "$LEASE" provisional "$m" "$pod" >/dev/null 2>&1 || true   # bind the discovered id
+        bash "$LEASE" provisional "$m" "$pod" >/dev/null 2>&1 || true
         log "pending-intent EXPIRED — reaping half-born pod: pod=$pod nonce=$m"
         reap_lease "$m" "$key" "$pod"
       else

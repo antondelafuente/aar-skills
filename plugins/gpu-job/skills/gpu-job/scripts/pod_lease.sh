@@ -408,9 +408,11 @@ PY
   done
 }
 
-# find-nonce: map a pod NAME back to a PENDING-INTENT lease. EXACT whole-string match only (the pod
-# name IS the nonce for a pending intent). >1 match -> empty output (ambiguous; the reaper treats
-# that as report-only, never reaps). A name that is not a `gpujob-` nonce -> empty (unknown pod).
+# find-nonce: map a pod NAME back to a PENDING-INTENT lease. EXACT whole-string match only, and ONLY a
+# lease that is still a PENDING INTENT — state=intent with NO bound pod_id (code-review Finding 4). A
+# lease that already has a pod_id is accounted for by the step-1 pod-id path, not by name-matching, so
+# matching it here could double-reap or reap an unknown pod sharing a registered nonce. >1 matching
+# pending intent -> empty (ambiguous; report-only). A name that is not a `gpujob-` nonce -> empty.
 cmd_find_nonce(){
   local name=$1
   require_val "<name>" "$name"
@@ -419,8 +421,15 @@ cmd_find_nonce(){
   local f match="" count=0
   for f in "$ROOT"/*.json; do
     [ -e "$f" ] || continue
-    local n; n=$(get_field "$f" nonce)
-    if [ "$n" = "$name" ]; then match=$n; count=$((count+1)); fi
+    local n st pod
+    n=$(get_field "$f" nonce)
+    [ "$n" = "$name" ] || continue
+    st=$(get_field "$f" state)
+    pod=$(get_field "$f" pod_id)
+    # pending intent ONLY: state=intent AND no pod bound
+    if [ "$st" = intent ] && { [ -z "$pod" ] || [ "$pod" = None ]; }; then
+      match=$n; count=$((count+1))
+    fi
   done
   [ "$count" = 1 ] && printf '%s\n' "$match"   # 0 or >1 -> nothing (report-only)
   return 0
