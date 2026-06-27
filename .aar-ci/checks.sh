@@ -46,14 +46,15 @@ PY
   fi
 fi
 
-# 1c. Packaged disposition references must stay synced with the canonical AGENTS.md section. Plugin-only installs
-#     cannot rely on repo-root AGENTS.md being present, but the product still needs one editorial home for the
-#     issue disposition contract. Dependent plugins therefore ship generated/synced references, and this check
-#     prevents drift.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(AGENTS\.md|plugins/.*/references/DISPOSITIONS\.md)$'; then
+# 1c. Disposition references and executable gate labels must stay synced with the canonical AGENTS.md section.
+#     Plugin-only installs cannot rely on repo-root AGENTS.md being present, but the product still needs one
+#     editorial home for the issue disposition contract. Dependent plugins therefore ship synced references, and
+#     wf.sh enforces the same label set at merge time.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(AGENTS\.md|plugins/[^/]+/skills/[^/]+/references/DISPOSITIONS\.md|plugins/aar-engineering/skills/ship-change/scripts/wf\.sh)$'; then
   if CHECK_ROOT="$ROOT" python3 - <<'PY'
 import os
 import pathlib
+import re
 import sys
 
 root = pathlib.Path(os.environ["CHECK_ROOT"])
@@ -70,9 +71,6 @@ def extract(text: str, label: str) -> str:
 
 canonical = extract(agents, "AGENTS.md")
 refs = sorted(root.glob("plugins/*/skills/*/references/DISPOSITIONS.md"))
-if not refs:
-    print("no packaged DISPOSITIONS.md references found", file=sys.stderr)
-    sys.exit(1)
 bad = []
 for ref in refs:
     if ref.read_text() != canonical:
@@ -80,8 +78,20 @@ for ref in refs:
 if bad:
     print("packaged disposition reference drift: " + ", ".join(bad), file=sys.stderr)
     sys.exit(1)
+labels = re.findall(r"^- \*\*`([^`]+)`\*\*", canonical, flags=re.M)
+wf = root / "plugins/aar-engineering/skills/ship-change/scripts/wf.sh"
+if wf.exists():
+    text = wf.read_text()
+    match = re.search(r"^DISPO_RE='\^\(([^']+)\)\$'$", text, flags=re.M)
+    if not match:
+        print("wf.sh DISPO_RE not found in expected format", file=sys.stderr)
+        sys.exit(1)
+    wf_labels = match.group(1).split("|")
+    if wf_labels != labels:
+        print(f"wf.sh DISPO_RE labels {wf_labels} != AGENTS labels {labels}", file=sys.stderr)
+        sys.exit(1)
 PY
-  then ok "packaged disposition references match AGENTS.md"
+  then ok "disposition references and gate labels match AGENTS.md"
   else err "packaged disposition reference drift"
   fi
 fi

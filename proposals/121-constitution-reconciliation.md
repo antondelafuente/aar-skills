@@ -8,10 +8,10 @@
 "the lab's orchestrator repo" and `orchestrator/PRODUCT_TRANSITION.md`. That keeps a reusable product
 constitution pointing at a private deployment surface.
 
-#111 also made the disposition vocabulary a cross-plugin contract: `aar-engineering`, `experiment-lifecycle`,
-and the future `feedback-loop` plugin all consume the same issue disposition semantics. The vocabulary belongs
-editorially in the product constitution, but plugin-only installs need a packaged reference they can read without
-falling back to repo-root context.
+#111 also made the disposition vocabulary an explicit repo-wide contract. Today `ship-change` is the executable
+consumer: it reads disposition labels at merge time and fails closed when a PR closes the wrong issue class. The
+vocabulary belongs editorially in the product constitution, but plugin-only installs need a packaged reference
+they can read without falling back to repo-root context.
 
 ## Approach
 
@@ -20,19 +20,21 @@ falling back to repo-root context.
 - Reconcile the disposition preface so reusable feedback machinery can live in product skills while
   deployment-only file bookkeeping remains instance guidance.
 - Mark the disposition section with stable sync markers.
-- Add `ship-change/references/DISPOSITIONS.md` as a packaged reference generated from that AGENTS section.
-- Add a deterministic check that every packaged `DISPOSITIONS.md` exactly matches the canonical AGENTS section.
+- Add `ship-change/references/DISPOSITIONS.md` as a packaged reference synced from that AGENTS section.
+- Add a deterministic check that every packaged `DISPOSITIONS.md` and `wf.sh`'s executable label set exactly
+  match the canonical AGENTS section.
 - Point the `ship-change` close-gate docs at its packaged reference and bump `aar-engineering` for the plugin
   behavior/docs change.
 
 ## Alternatives considered
 
-- **Make `feedback-loop` the canonical disposition home.** Rejected by #111 review: dispositions are consumed by
-  the SWE pipeline and experiment lifecycle too, so an optional feedback plugin is the wrong source of truth.
+- **Make `feedback-loop` the canonical disposition home.** Rejected by #111 review: dispositions are enforced by
+  the SWE pipeline and describe the whole repo's issue lifecycle, so an optional feedback plugin is the wrong
+  source of truth.
 - **Leave plugin-only installs to read repo-root `AGENTS.md`.** Rejected: plugin-only installs may not have that
   file. Packaged references are the concrete install surface.
 - **Hand-copy the vocabulary into each plugin.** Rejected: that recreates drift. The check makes packaged copies
-  generated/synced artifacts of the AGENTS section.
+  synced artifacts of the AGENTS section.
 
 ## Blast radius
 

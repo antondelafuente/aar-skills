@@ -140,7 +140,7 @@ normal single-phase ship-change runs.
 - A **cross-repo** closing ref (a `Closes` of an issue in another repo) fails closed — drop the keyword to a
   plain mention for cross-repo refs.
 
-The disposition vocabulary is packaged for this plugin at `references/DISPOSITIONS.md`; it is generated from the
+The disposition vocabulary is packaged for this plugin at `references/DISPOSITIONS.md`; it is synced from the
 canonical product constitution section in `AGENTS.md` and checked for drift by `.aar-ci/checks.sh`.
 
 So you can't merge code that closes a `needs-design` (or untriaged/mislabelled) issue — a `needs-design` issue
