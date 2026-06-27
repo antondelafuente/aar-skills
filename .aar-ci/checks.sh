@@ -103,8 +103,8 @@ fi
 # 1d. feedback-loop exposes two independently installed skills, so its init helper is packaged in both skill dirs.
 #     Keep the copies byte-identical; unlike DISPOSITIONS.md there is no separate editorial source.
 if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/feedback-loop/skills/(file-feedback|triage-feedback)/scripts/feedback_loop_init\.sh$'; then
-  FF_INIT="plugins/feedback-loop/skills/file-feedback/scripts/feedback_loop_init.sh"
-  TF_INIT="plugins/feedback-loop/skills/triage-feedback/scripts/feedback_loop_init.sh"
+  FF_INIT="$ROOT/plugins/feedback-loop/skills/file-feedback/scripts/feedback_loop_init.sh"
+  TF_INIT="$ROOT/plugins/feedback-loop/skills/triage-feedback/scripts/feedback_loop_init.sh"
   if [ -f "$FF_INIT" ] && [ -f "$TF_INIT" ] && cmp -s "$FF_INIT" "$TF_INIT"; then
     ok "feedback-loop init copies match"
   else
