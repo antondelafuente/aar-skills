@@ -63,10 +63,18 @@ before running it"; the design-audit is the last step of DESIGN-together). #130 
 the PR, the design-approver arbitrates the survivors, and only then is the zero-context executor handed
 `START.md` and spawned. **Design approval blocks the run.**
 
+**The design review is NOT merge-satisfying.** It gates the *run*, never the PR merge. Only the **close**
+gate posts the final merge-satisfying native APPROVE, bound to the reviewed head SHA, after the run +
+records + close audit + triage. Otherwise a design APPROVE could satisfy branch protection and merge an
+*un-run* experiment — defeating the close gate and the "main only receives closed experiments" promise. So
+the experiment PR carries at most one merge-satisfying review, and it is the close one.
+
 **Clearance binds to the reviewed commit.** The full brief (`DESIGN.md` + `START.md` + `CHECKLIST.md`) is
-committed *before* the design audit (see decision 3), so approval records their exact commit SHAs as a
-clearance artifact; `run-experiment` verifies those SHAs before any spend, and **any later change to the
-design or the executor brief forces re-clearance** before the run. This is the same integrity property
+committed *before* the design audit (see decision 3), so approval records the brief **commit** SHA — one
+commit containing all three files — as the clearance artifact. The design audit reviews `DESIGN.md`, but the
+executor verifies that whole brief commit before any spend, and **any later change to the design or the
+executor brief forces re-clearance** before the run. (So the audit interface need only name `DESIGN.md`;
+clearance binds the commit that carries the full brief.) This is the same integrity property
 ship-change's merge gate already has (re-review the final diff) — the reviewed design must be the *run*
 design, not whatever the branch drifted to after approval.
 
@@ -139,10 +147,13 @@ another existing runtime home) is the helper child's first decision — which is
 established for `wf.sh`: design/close reviews take an **explicit** runner/designer family — no silent
 `AAR_SUBSTRATE` default — and **fail closed unless the verifier is the opposite family**. This is what stops
 a Codex-run experiment from being reviewed by Codex (same-family), the exact failure the cross-family
-guarantee exists to prevent. This explicit-family, fail-closed contract covers **all four model-judged
-rungs** — `verify_claim`, `--design`, `--data`, and close — not only design/close: a same-family judgment on
-*any* rung would taint the four-gate record, so the legacy per-script substrate defaults are superseded by
-the helper's explicit-family requirement for the experiment-PR path.
+guarantee exists to prevent. The explicit-family, fail-closed requirement applies to **all four
+model-judged rungs** (`verify_claim`, `--design`, `--data`, close) — a same-family judgment on *any* would
+taint the record — but it is **enforced in the right place**: the read-only audit rungs (`verify_claim`,
+`--data`) enforce family in `verify-claims` / the audit-runner contract where they actually run; the GitHub
+helper enforces it on the rungs it runs (`--design`, close) and otherwise only **posts/merges** already-
+produced audit outputs. The helper does not own the read-only audit contract — it must not become a second
+home for cross-family enforcement.
 
 **Merge-authority code loads from a trusted source, never the branch under review.** Because the helper now
 carries *write/merge* authority, an experiment PR that edited the helper could otherwise run its own
@@ -224,15 +235,17 @@ carry an open sub-decision, so they are `needs-design` — only the work that ca
 - **Instance-profile discovery/init interface** — the concrete config path, schema, init owner, and brief
   snapshot rules. Today it is only a narrative seam.
 
-**`ready` (no open design):**
-- **Canonical-path record layout (local writes only):** `design-experiment` snapshots the *locked brief*
-  (`DESIGN.md`/`START.md`/`CHECKLIST.md`) into `experiments/<exp>/` at clearance; `run-experiment` appends
-  only execution records, audit outputs, `RESULTS.md`, and artifact-store pointers — it **never authors the
-  brief** ("your brief is your world"). Pure local writes, no PR/repo-resolution assumptions, so independent
-  of everything below. (Writing the **triage** record is *not* part of this `ready` work — its schema is
-  deferred, so triage-writing is `blocked-by` the triage-schema child.)
+**`ready` (no open design):** none stands fully independent. The record layout below *looked* ready but
+depends on where `experiments/<exp>/` lives (the worktree/profile contract), so it is `blocked-by`. Honest
+result at umbrella altitude: every piece is a `needs-design` child or `blocked-by` a parent.
 
 **`blocked-by` (file once parents land):**
+- **Canonical-path record layout:** `design-experiment` snapshots the *locked brief* (`DESIGN.md`/`START.md`/
+  `CHECKLIST.md`) into the experiment's canonical working dir `experiments/<exp>/` at clearance; `run-experiment`
+  appends only execution records, audit outputs, `RESULTS.md`, and artifact-store pointers — never the brief
+  ("your brief is your world"). `experiments/<exp>/` is the *actual* working dir, not a second copy. Blocked-by
+  the worktree/profile contract (which defines where `experiments/<exp>/` lives) and the triage-schema child
+  (for the triage record).
 - `design-experiment` PR-open + `--design` review posting + fact-record linking — blocked-by the helper, the
   per-experiment worktree/branch contract (Step 1), **and the instance-profile interface** (repo / base
   branch / identity resolution it needs to open the PR).
