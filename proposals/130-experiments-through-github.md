@@ -22,7 +22,10 @@ outputs **and their triage responses** are committed or PR-linked as first-class
 genuine human-facing checkpoints — the **design** audit (before the run) and the **close** audit (at the
 end) — are additionally posted as **PR reviews**. The PR reuses the existing cross-family research-audit
 engine (`audit_experiment --design` / close). `main` of the instance's research repo only ever receives
-finished, reviewed experiments.
+**closed** experiments — successful *or* terminal (blocked / invalid / abandoned / null-conclusion). A failed
+or abandoned run is still a first-class record that merges with "no valid conclusion" recorded, never a
+record stranded in a perpetually-open PR (the terminal-state contract is a spawned `needs-design` child —
+see Decomposition).
 
 This is **distinct from `ship-change`'s gates** — it borrows the cross-family review *engine* and the
 branch/PR/posting *mechanics*, but it is the research lifecycle, not a scaffold change. It is not governed
@@ -114,10 +117,15 @@ research audits + the zero-HIGH close gate — but neither re-implements the Git
 
 **The helper's home is a runtime layer, not the build plugin.** `aar-engineering` is the *build-the-product*
 plugin (installed only by scaffold developers), so the helper cannot live there or the research runtime would
-take a build-layer dependency. Its canonical home is the shared cross-family **runtime** that both flows
-already consume — `verify-claims` (already the shared audit engine) is the natural host, or a small dedicated
-runtime plugin. `ship-change`/`wf.sh` then consumes the same helper. The direction (extract to a runtime
-home) is PM-cleared; the exact host is settled in the helper child issue.
+take a build-layer dependency. Its canonical home is **`verify-claims`** — already the shared
+cross-family runtime both flows consume — and `ship-change`/`wf.sh` is refactored to consume the same helper.
+(Resolved here, not deferred: a `ready` extraction child cannot carry an undecided home.)
+
+**The helper enforces the cross-family contract mechanically**, inheriting the discipline #134 just
+established for `wf.sh`: design/close reviews take an **explicit** runner/designer family — no silent
+`AAR_SUBSTRATE` default — and **fail closed unless the verifier is the opposite family**. This is what stops
+a Codex-run experiment from being reviewed by Codex (same-family), the exact failure the cross-family
+guarantee exists to prevent.
 
 ## Instance-profile contract (decoupling)
 
@@ -157,9 +165,9 @@ is reproducible even if instance config later changes.
 - **Product skills** (`automated-researcher`): `design-experiment` and `run-experiment` gain the
   branch/PR/review-posting steps and the four-gate record contract. No change to the `verify-claims` audit
   engine — reused as-is.
-- **Shared helper (decision 5):** the GitHub-identity + review-posting primitives are extracted to a neutral
-  **runtime** home (candidate: `verify-claims`), and `aar-engineering`/`wf.sh` is refactored to consume it —
-  so `experiment-lifecycle` never depends on the build plugin. This is the one cross-cutting edit.
+- **Shared helper (decision 5):** the GitHub-identity + review-posting primitives are extracted into
+  **`verify-claims`** (the shared cross-family runtime), and `aar-engineering`/`wf.sh` is refactored to
+  consume it — so `experiment-lifecycle` never depends on the build plugin. This is the one cross-cutting edit.
 - **Canonical record path:** establishes `experiments/<exp>/` on the research repo's `main` as the durable
   per-experiment home.
 - **Builds on** Step 1 (per-experiment worktrees; the `run/<exp>` branch) — a separate `needs-design` issue.
@@ -167,15 +175,34 @@ is reproducible even if instance config later changes.
   **instance research repo** (e.g. `research-lab`), resolved via the instance-profile contract above —
   never hardcoded.
 
+## Decomposition (spawned issues)
+
+This is the **umbrella/shape** design: it fixes the lifecycle shape and the decisions that are genuinely
+settled, and decomposes the rest. Two sub-decisions are still genuinely open, so they spawn as
+`needs-design` children (not `ready` — a `ready` child must carry no open design):
+
+**`needs-design` children (open sub-designs):**
+- **Triage-artifact schema** — the machine-readable close-gate artifact (path, finding identifiers, allowed
+  statuses {fixed | justified-with-reason | deferred}, pass/fail rules). No such schema exists in the
+  lifecycle yet, so it needs its own pass.
+- **Terminal experiment states** — the contract for blocked / invalid / abandoned / null-conclusion runs:
+  which states exist, what evidence each requires, and when such a record may merge as "no valid conclusion."
+
+**`ready` children (settled — implementable directly):**
+- Extract the shared GitHub helper (identity + fail-closed cross-family posting) into **`verify-claims`**;
+  refactor `wf.sh` to consume it.
+- `design-experiment`: open the `run/<exp>` PR, post the `--design` review, link the `verify_claim` record,
+  hand off on clearance.
+- `run-experiment`: push records to `experiments/<exp>/`, teardown on verified upload, post the close review,
+  merge on the triage gate (consuming the schema from its `needs-design` parent).
+- Instance-profile **discovery/init** interface (per the field list above) + the `experiments/<exp>/`
+  canonical record path.
+
 ## Rollout + rollback
 
-Doc-only design PR; lands the shape on `main` via the `--scaffold` gate, then **spawns `ready` issues** for
-the skill edits: (a) extract the shared GitHub helper from `wf.sh` into a runtime home (the host is settled
-here); (b) `design-experiment` PR-open + design-review-posting + fact-record linking; (c) `run-experiment`
-records + teardown-on-upload + close-review + the machine-readable triage artifact behind the merge gate;
-(d) the instance-profile **discovery/init** interface + the `experiments/<exp>/` canonical record path. Each
-is implemented as a normal `ship-change` run.
-
-Staged: pilot the flow on a single real experiment before making the branch/PR path the default in
-`run-experiment`. Rollback is a normal revert of the spawned skill edits — the lifecycle falls back to the
-status-quo local-file gates with no data loss, since the audits themselves are unchanged.
+Doc-only design PR; lands the shape on `main` via the `--scaffold` gate, then the children above are filed
+(`needs-design` first, since the `ready` run-experiment child consumes the triage schema). Each is
+implemented as a normal `ship-change` run. Staged: pilot the flow on a single real experiment before making
+the branch/PR path the default in `run-experiment`. Rollback is a normal revert of the spawned skill edits —
+the lifecycle falls back to the status-quo local-file gates with no data loss, since the audits themselves
+are unchanged.
