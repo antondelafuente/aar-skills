@@ -27,6 +27,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 root = pathlib.Path(os.environ["CHECK_ROOT"])
@@ -55,6 +56,7 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(AGENTS\.md|plugins/[^/]+/skills/[^/
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 root = pathlib.Path(os.environ["CHECK_ROOT"])
@@ -81,14 +83,13 @@ if bad:
 labels = re.findall(r"^- \*\*`([^`]+)`\*\*", canonical, flags=re.M)
 wf = root / "plugins/aar-engineering/skills/ship-change/scripts/wf.sh"
 if wf.exists():
-    text = wf.read_text()
-    match = re.search(r"^DISPO_RE='\^\(([^']+)\)\$'$", text, flags=re.M)
-    if not match:
-        print("wf.sh DISPO_RE not found in expected format", file=sys.stderr)
+    try:
+        wf_labels = subprocess.check_output(["bash", str(wf), "dispositions"], text=True).splitlines()
+    except subprocess.CalledProcessError as exc:
+        print(f"wf.sh dispositions failed with rc={exc.returncode}", file=sys.stderr)
         sys.exit(1)
-    wf_labels = match.group(1).split("|")
     if wf_labels != labels:
-        print(f"wf.sh DISPO_RE labels {wf_labels} != AGENTS labels {labels}", file=sys.stderr)
+        print(f"wf.sh disposition labels {wf_labels} != AGENTS labels {labels}", file=sys.stderr)
         sys.exit(1)
 PY
   then ok "disposition references and gate labels match AGENTS.md"

@@ -21,8 +21,8 @@ they can read without falling back to repo-root context.
   deployment-only file bookkeeping remains instance guidance.
 - Mark the disposition section with stable sync markers.
 - Add `ship-change/references/DISPOSITIONS.md` as a packaged reference synced from that AGENTS section.
-- Add a deterministic check that every packaged `DISPOSITIONS.md` and `wf.sh`'s executable label set exactly
-  match the canonical AGENTS section.
+- Add `wf.sh dispositions` and a deterministic check that every packaged `DISPOSITIONS.md` plus the executable
+  close-gate label set exactly match the canonical AGENTS section.
 - Point the `ship-change` close-gate docs at its packaged reference and bump `aar-engineering` for the plugin
   behavior/docs change.
 

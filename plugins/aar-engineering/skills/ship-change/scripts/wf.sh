@@ -65,6 +65,7 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh finish <worktree> <author> --design   two-phase DESIGN merge: gate on --scaffold (doc-only PR), spawn ready issues after
   wf.sh doctor <author> [repo-or-worktree] report ambient + engineer identity readiness without printing tokens
   wf.sh locate-audit [repo]               print the verify-claims reviewer that would run (introspection/test)
+  wf.sh dispositions                       print close-gate disposition labels (one per line)
   wf.sh help                              this message
 
 <author> = claude | codex (the OPPOSITE family reviews). If an engineer identity is configured for that author,
@@ -632,6 +633,10 @@ CMD=${1:-}; shift || true
 case "$CMD" in
 
 help|-h|--help|"")  usage; exit 0 ;;
+
+dispositions)  # wf.sh dispositions — print close-gate disposition labels (introspection/test)
+  sed -E 's/^\^\((.*)\)\$/\1/' <<<"$DISPO_RE" | tr '|' '\n'
+  ;;
 
 locate-audit)  # wf.sh locate-audit [context-repo] — print the verify-claims reviewer wf.sh would run (introspection/test)
   locate_audit "${1:-}" ;;
