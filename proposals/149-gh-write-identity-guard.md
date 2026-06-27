@@ -189,38 +189,40 @@ and the instance applies the capability change to itself.
    write-capable owner token would edit a live PR/issue or land a commit before `doctor` reports FAIL —
    exactly the failure a safety check cannot have).
 
-   **The guarantee is categorical: the credential must grant NO reachable `gh`/GitHub write permission —
-   not merely "the three incident classes are read-only."** `doctor` FAILS on *any* reachable write
-   permission category. The classes `issues`/`pull_requests`/`contents` are the **minimum probed floor**
-   (the incident's actual write surface) for the empirical fallback below, used when an authoritative
-   granted-permission list isn't available — a floor, not a redefinition of the guarantee. Repo
-   administration is excluded from the *floor* only because a token can be admin-less yet still write
-   issues/PRs (admin alone never certifies safety); but where an authoritative permission set is available
-   and shows *any* write category, `doctor` fails on it.
-
-   **(a) API-permission check — non-mutating on BOTH branches, authoritative-first.**
-   - **Authoritative granted-permission data first (no write attempted; covers ALL categories).** Where the
-     credential exposes its *granted* permissions authoritatively — a GitHub App **installation token's
-     permissions object** — `doctor` reads it and FAILS if any category is `write`/`admin`. This is the
-     only metadata path trusted, because it states what the token *was granted*. **`x-accepted-github-
-     permissions` and rate-limit hints are explicitly NOT used as proof** — they advertise what an *endpoint
-     requires*, not what the *token holds*, so they cannot certify read-only (they would false-pass a
-     write-capable fine-grained PAT). A fine-grained PAT exposes no authoritative granted-set over the API,
-     so it falls through to the empirical probe.
-   - **Empirical 403/422 denial probe (still no mutation) for any class lacking an authoritative set.**
-     Issue a write-method request **validated by the read-only token's 403**, not by an allowed write:
-     a body GitHub rejects at **validation before** it mutates — an invalid/empty `PATCH` body returns
-     **422 Unprocessable** for a write-capable token ("you may write but this body is invalid" — nothing
-     written) and **403 Forbidden** for a read-only one. Signal: **403 ⇒ read-only (PASS) / 422 ⇒
-     write-capable (FAIL)**, and **neither outcome mutates**. This replaces the earlier identity-write
-     canary, which completed a real (no-op) write on the writable branch and was unsafe. Run it for each of
-     the minimum `issues`/`pull_requests`/`contents` classes.
+   **The guarantee is categorical AND verified by PROVENANCE, not by enumerating probes.** The contract is
+   "the ambient token grants NO reachable `gh`/GitHub write permission." You cannot *prove* that for an
+   arbitrary opaque token by probing a finite set of endpoints — a fine-grained PAT could hold some *other*
+   write scope (`workflow`, `actions`, `deployments`, `pages`, …) that an issues/PRs/contents probe never
+   touches and would still false-pass. So `doctor` does **not** try to enumerate every write surface.
+   Instead it **fails closed on any token whose read-only-ness is not AUTHORITATIVELY confirmable**, and
+   the contract requires the ambient token to come from a **controlled read-only minter** so its scope is
+   read-only *by construction*:
+   - **Authoritative read-only confirmation ⇒ PASS.** `doctor` PASSES only when it can read the token's
+     *granted* permissions authoritatively and they contain **no** `write`/`admin` category: a GitHub App
+     **installation token's permissions object**, or a fine-grained PAT/token from the instance's
+     **read-only minter** whose authoritative scope the instance attests (the contract child #3 defines this
+     "ambient = minted read-only" requirement; the instance rollout supplies the minter). Any write
+     category present ⇒ FAIL.
+   - **Uninspectable / unattested token ⇒ FAIL CLOSED.** If `doctor` cannot authoritatively confirm the
+     ambient token is read-only (an opaque PAT with no exposed granted-set and no read-only-minter
+     provenance), it **FAILS** — it never certifies safety it cannot prove. This is the resolution of "a
+     finite probe set can't cover every write scope": uncovered scopes don't slip through, because an
+     unprovable token is a failure, not a pass.
+   - **Empirical 403/422 probe is ADVISORY ONLY, never the certifier.** As an *extra* alarm (not the gate),
+     `doctor` may run the non-mutating denial probe on the `issues`/`pull_requests`/`contents` floor — a
+     write-method request with a body GitHub rejects at **validation before** it mutates (invalid/empty
+     `PATCH` ⇒ **403** for read-only, **422** for write-capable; neither mutates). A 422 here is a loud
+     "definitely write-capable" signal, but a 403 across the floor does **not** upgrade an unattested token
+     to PASS — provenance does. Because it's advisory, it no longer depends on the fragile 422-before-
+     mutation behavior as the trust path; **`x-accepted-github-permissions`/rate-limit hints are NOT used as
+     proof** (they describe endpoint requirements, not granted scope).
 
    No probe uses a guessed/provisioned resource id; targets are self-discovered from what the token can
    already GET, and the contents probe never carries a real `sha`+content (so it cannot create a commit).
-   **The child MUST empirically prove, per probed class, that the probe distinguishes a read-only from a
-   write-capable token AND mutates nothing on either branch, before it is the rollout gate** — verified
-   mutation-freedom is part of the child's acceptance, not assumed.
+   The child's acceptance is: **(1) authoritative-confirm-or-fail-closed is the gate; (2) any advisory
+   write-method probe is proven (with disposable-repo evidence, both token types) to be non-mutating on
+   both branches before it ships** — verified mutation-freedom and fail-closed-on-uninspectable are part of
+   the child's acceptance, not assumed.
 
    **(b) Ambient-`git push` probe — `--dry-run`, never updates the remote.** A `git push --dry-run` to a
    disposable ref with **all credential prompts disabled** (`GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` to a
@@ -234,12 +236,15 @@ and the instance applies the capability change to itself.
    **independently** (clearing/isolating the others per check), so it proves *no* reachable source is
    write-capable rather than only whichever one `gh` happens to resolve first; and it invokes the real `gh`
    directly (the internal-bypass marker) so the ergonomic wrapper can never mask a write-capable source and
-   falsely certify safety. The `.aar-ci` fake-`gh`/fake-`git` smoke supplies stubs for the read-only fixture
-   (403 / push-rejected) and the write-capable fixture (422 / push-accepted) and asserts `doctor` reports
-   read-only vs write-capable per source and per surface, and that no fixture path performs a mutation.
+   falsely certify safety. The `.aar-ci` fake-`gh`/fake-`git` smoke supplies three fixtures — an
+   **authoritatively-read-only** token (PASS), a **write-capable** token (FAIL), and an
+   **uninspectable/unattested** token (FAIL CLOSED, not PASS) — for both the API and Git surfaces, and
+   asserts `doctor`'s verdict per source and per surface and that no fixture path performs a mutation.
 3. **Codify the contract across ALL its canonical homes — one canonical reference, no duplicate live
-   contracts (product, doc-only).** Add the rule to `AGENTS.md` ("the ambient agent GitHub
-   credential MUST be read-only; all writes go through the engineer token path"), next to the existing
+   contracts (product, doc-only).** Add the rule to `AGENTS.md`: "the ambient agent GitHub credential MUST
+   be **minted read-only by a controlled minter** (so its read-only scope is authoritative by
+   construction); all writes go through the engineer token path; `doctor` **fails closed** on any ambient
+   token whose read-only-ness it cannot authoritatively confirm." Place it next to the existing
    engineer-identity rule, AND update every point-of-use surface that currently advertises a write-capable
    ambient `GH_TOKEN` / owner-admin write path so they don't become a second, stale contract:
    ship-change `SKILL.md` ("Auth: … export `GH_TOKEN`"), `RUNBOOK.md` (the `GH_TOKEN` rotation note that
@@ -259,10 +264,12 @@ and the instance applies the capability change to itself.
 
 **Instance rollout task (NOT a product ship-change child — applied to this deployment directly):**
 
-- **Demote this instance's ambient agent credential to read-only + wire the separate elevated owner
-  token** in the auth-env loader / `~/.config`. This is the load-bearing capability change, but it is
-  instance-owned credential config; it is tracked as an instance rollout task (and gated on product
-  children 1–2 being available), not as a product `ready` issue. It must close the **full**
+- **Demote this instance's ambient agent credential to a read-only credential MINTED BY A CONTROLLED
+  read-only minter + wire the separate elevated owner token** in the auth-env loader / `~/.config`. The
+  read-only minter is what makes the token's scope authoritative-by-construction, so `doctor` can confirm
+  it (rather than fail closed). This is the load-bearing capability change, but it is instance-owned
+  credential config; it is tracked as an instance rollout task (and gated on product children 1–2 being
+  available), not as a product `ready` issue. It must close the **full**
   ambient write surface, not just the exported token: (a) the exported `GH_TOKEN`/`GITHUB_TOKEN` becomes
   read-only, AND (b) any write-capable stored owner `gh auth login` credential is removed from or isolated
   out of the agent shell's `GH_CONFIG_DIR` (so a stored-credential fallback can't re-open the hole). The
