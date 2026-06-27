@@ -192,6 +192,19 @@ reason, and `--list` plus any TTL sweep
 state**, never silently. `failed`/stale-`closing` hosts are *not* auto-reaped (they're the ones a human must
 look at); the marker turns a stuck close into a flagged item rather than an invisible orphaned session.
 
+**Host-close is an idempotent, externally-supervised state — not a single fragile process** (Finding-driven).
+The closer is one process, so if it *itself* dies mid-step (after clearing wake/`desired-active`, before the
+kill or the `closed` write), its own `deadline` can't fire — a dead process writes nothing. The robustness
+property that closes this: the **`closing` marker (with its `deadline` + closer `pid`) is the supervised state,
+and an *external* check — the same model-free sweep that already lists/reaps, and/or #54's supervisor reading
+`closing` — detects a `closing` whose `deadline` has passed or whose `pid` is dead, independent of the closer
+process.** On detection it **re-runs the close idempotently** (host-close is safe to repeat: clearing an
+already-clear wake, killing an already-dead session, and re-asserting `closed` are all no-ops) or marks
+`failed` for an operator. So no single process death strands a host invisibly: the durable `closing` state plus
+an external detector — not the closer's own liveness — is what guarantees a host reaches `closed` or a flagged
+`failed`. (This is the controller-side, model-free supervision pattern #54 already establishes; #30's host-close
+plugs into it rather than inventing a second watcher.)
+
 To make the host-state marker actually *load-bearing* — the signal that a host is safe to remove — the
 dispatcher's destructive and listing paths must consult it, not just the existing clean+pushed guard.
 `--host-close` makes the marker the single source of host liveness; in turn `--list` shows **`running` vs
@@ -217,6 +230,18 @@ freshly-reused path — is post-migration, so a missing marker there is a **susp
 `--force`/operator classification, never lax reap. New dispatches always get a marker, so `legacy-unmarked` is a
 fixed, inventory-bounded one-time set that only shrinks; a host that has ever been through `--host-close`, or
 whose birth identity isn't in the migration inventory, is never `legacy-unmarked`.
+
+**The fail-closed fallback makes this safe to specify now, even though the current dispatcher persists no birth
+identity** (Finding-driven). Today's dispatcher keys only on the reused slug/path and writes no per-spawn birth
+record, so a birth identity must be *added* by the instance child that builds the marker (e.g. the worktree's
+git-creation reflog entry, a spawn-nonce written at `worktree add`, or the inventory's own recorded fingerprint
+— the exact field is an instance-child implementation choice, since it builds the marker + inventory anyway).
+The design-level guarantee that makes this safe regardless of which field is chosen: **`legacy-unmarked` is
+opt-in by *proof*, fail-closed by default** — a worktree is treated as legacy *only* when its birth identity is
+present and provably matches an inventory entry; for any worktree where a stable birth identity **cannot be
+proven** (no record, ambiguous, or post-cutoff), reap is **force-only**. So the worst case of a missing/weak
+birth identity is "an operator must pass `--force`," never "a live or re-dispatched run is silently reaped under
+the lax rule." The instance child picks the identity field; the fail-closed posture is fixed here.
 
 For this to work for a *zero-context* executor — which reads ONLY the brief + scaffold + the machine-consumed
 records this contract already has it consult — the host-close handle must be **surfaced on a record the
