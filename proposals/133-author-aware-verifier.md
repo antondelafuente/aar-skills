@@ -19,25 +19,27 @@ environment into the audit subprocess.
 
 Make `wf.sh` author-aware when invoking `verify-claims`:
 
-- For `author=codex`, keep the current requirement: `AUDIT_VERIFIER_CMD` must be set to a
-  Claude-family verifier, because the default verifier is Codex and would be same-family.
-- For `author=claude`, ignore an inherited Claude-family `AUDIT_VERIFIER_CMD` and let
-  `verify-claims` use its default Codex verifier.
-- Preserve explicit non-Claude overrides for `author=claude` (for example a future Codex or
-  custom verifier command). The driver should only discard the known-wrong inherited value,
-  not every override.
+- For `author=codex`, strengthen the current requirement: `AUDIT_VERIFIER_CMD` must be set
+  to a Claude-family verifier, because the default verifier is Codex and would be
+  same-family. `doctor` should not give a false green for `AUDIT_VERIFIER_CMD='codex ...'`.
+- For `author=claude`, drop any Claude-family `AUDIT_VERIFIER_CMD` before invoking the
+  audit subprocess and let `verify-claims` use its default Codex verifier. Same-family is
+  wrong whether the value came from ambient startup or from an explicit shell assignment.
+- Preserve non-Claude overrides for `author=claude` (for example a future Codex or custom
+  verifier command).
 
 Implementation shape:
 
-- Add a small helper in `wf.sh` that builds the environment prefix for audit subprocesses.
-  It should inspect `AUDIT_VERIFIER_CMD` with the same coarse family inference used by
-  `verify-claims`: `*claude*` = Claude, `*codex*` = Codex, otherwise custom.
+- Add a small helper in `wf.sh` that recognizes the only same-family override this driver
+  must actively strip: an `AUDIT_VERIFIER_CMD` containing `claude` for `author=claude`.
+  Leave the broader verifier-family inference canonical in `verify-claims`.
 - Use that helper in `run_review` instead of blindly inheriting `AUDIT_VERIFIER_CMD`.
 - Add smoke coverage to `identity_smoke.sh` with a fake audit script that records whether
   `AUDIT_VERIFIER_CMD` reached the subprocess. The regression case is
   `author=claude` + ambient `AUDIT_VERIFIER_CMD='claude ...'`: the fake audit should see
   `AAR_SUBSTRATE=claude` and no `AUDIT_VERIFIER_CMD`. A companion case should show
-  `author=codex` keeps the Claude verifier.
+  `author=codex` keeps the Claude verifier, and `doctor codex` rejects a Codex-family
+  verifier.
 - Update the ship-change guidance to say the driver strips same-family ambient verifier
   overrides for Claude authors; users should not clear `BASH_ENV` by hand.
 
