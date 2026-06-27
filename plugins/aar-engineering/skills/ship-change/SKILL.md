@@ -162,6 +162,30 @@ engineer identity, not the human owner's token. A HIGH must be fixed or genuinel
 (The cross-family reviewer is *told* to find the next thing, so it won't self-converge — don't chase it past
 HIGH=0 into endless polish; the merge bar is HIGH=0 + checks green.)
 
+### Disposition-aware merge gate (#137/#139) — for broad changes that won't converge
+
+When a review keeps re-raising findings you've already addressed (the convergence trap on a broad/umbrella
+change), opt the PR into the **disposition-aware** gate. State is **PR-local** (a canonical PR comment,
+recoverable by any agent; cached under the gitdir — never committed). The author maintains a machine-readable
+disposition per finding so the reviewer stops re-litigating resolved ones and the gate blocks only on what's
+*unresolved*.
+
+```
+wf.sh fdispo <wt> <author> seed     # pull the latest code-review findings into the state as `unresolved`
+                                    #   (prints the cache path)
+$EDITOR <cache>                     # set each finding's status + evidence:
+                                    #   fixed (+ commit, an in-PR SHA) | refuted (+ reason)
+                                    #   | deferred_to_child_design (+ child_issue, umbrella altitude only)
+                                    #   | deferred_out_of_scope (+ followup_issue) | unresolved (blocks)
+wf.sh fdispo <wt> <author> save     # update the canonical PR comment
+```
+
+Then `wf.sh finish` runs the disposition-aware review (suppresses validly-dispositioned findings) **and** a
+deterministic structural gate over the state's HIGH entries (a HIGH left `unresolved`, or a malformed
+disposition, BLOCKS — fail-closed, independent of the model). Recovery: a malformed disposition file fails the
+gate with the offending finding; fix it and re-`save`. No state on a PR → the normal stateless review (this is
+opt-in). Pair with the fresh-eyes companion (#140) so the stateful gate never trusts a pre-existing hole past.
+
 ## GitHub reader surface
 
 GitHub is the durable coordination record, but it should read like a handoff to a human who opened the PR cold.

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # disposition_gate.sh — deterministic STRUCTURAL gate for the disposition-aware merge gate (#137, slice #138).
 #
-# Validates a committed `.aar-ci/dispositions.json` against the reviewer's finding list. Runs BEFORE the model
-# reviewer and is FAIL-CLOSED: any error, malformed file, or missing/!valid entry for a HIGH finding -> BLOCK,
-# never PASS. It checks STRUCTURE only (completeness + well-formedness). Whether a disposition is *sound*
-# (does the fix fix, does the refutation refute, is the deferral legitimate) is the model reviewer's job (#139).
+# Validates the PR-local disposition state (a JSON file `wf.sh` manages OUTSIDE the committed tree — canonical
+# copy is the PR comment, cache via `git rev-parse --git-path`; NOT a committed `.aar-ci/` file) against the
+# reviewer's finding list. Runs BEFORE the model reviewer and is FAIL-CLOSED: any error, malformed file, or
+# missing/!valid entry for a HIGH finding -> BLOCK, never PASS. It checks STRUCTURE only (completeness +
+# well-formedness, incl. a required non-empty `description`). Whether a disposition is *sound* (does the fix
+# fix, does the refutation refute, is the deferral legitimate) is the model reviewer's job (#139).
 #
 # Usage:  disposition_gate.sh <dispositions.json> <findings-file>
 #   <findings-file>: one finding per line, "<ID> <SEVERITY>" (SEVERITY in HIGH|MED|LOW).
@@ -118,6 +120,11 @@ for id in "${high_ids[@]}"; do
     *)
       block "finding $id: invalid status '${status:-<none>}'" ;;
   esac
+
+  # A non-empty description is required on every HIGH entry — the disposition-aware reviewer matches prior
+  # findings on it (#139). Checked after the status dispatch so a status defect still reports its own reason.
+  desc=$(printf '%s' "$entry" | jq -r 'if (.description|type)=="string" then .description else "" end' 2>/dev/null)
+  [ -n "${desc//[[:space:]]/}" ] || block "finding $id: a non-empty (non-whitespace) string description is required (semantic matching depends on it)"
 done
 
 echo "DISPOSITION-GATE: PASS"

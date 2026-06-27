@@ -207,11 +207,13 @@ is_claude_verifier_cmd(){
 
 review_audit_env(){  # review_audit_env <author> <constitution>
   local author=$1 constitution=$2
+  # AUDIT_DRY_RUN= : a review must NEVER run in dry-run (it would exit 0 without writing findings, and a stale
+  # clean review file could then be reused as the merge verdict — a gate bypass). Clear it unconditionally.
   if [ "$author" = claude ] && is_claude_verifier_cmd "${AUDIT_VERIFIER_CMD:-}"; then
     note "ignoring same-family AUDIT_VERIFIER_CMD for author=claude; using default Codex verifier"
-    printf '%s\0' BASH_ENV= AUDIT_VERIFIER_CMD= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+    printf '%s\0' BASH_ENV= AUDIT_VERIFIER_CMD= AUDIT_DRY_RUN= DISPOSITION_FILE= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
   else
-    printf '%s\0' BASH_ENV= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+    printf '%s\0' BASH_ENV= AUDIT_DRY_RUN= DISPOSITION_FILE= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
   fi
 }
 
@@ -385,6 +387,83 @@ wt_branch(){ git -C "$1" rev-parse --abbrev-ref HEAD; }                       # 
 # stale after a rebase-onto-newer-origin/main. Used consistently for PATHS, review diffs, and the version base
 # so they never disagree. Falls back to local main if there's no origin/main remote-tracking ref.
 base_ref(){ git -C "$1" rev-parse --verify -q origin/main >/dev/null 2>&1 && echo origin/main || echo main; }
+
+# ---- finding-disposition state (#137/#139): PR-local, GitHub-canonical --------------------------------------
+# DISTINCT from disposition_gate() above (the ISSUE close-gate, ready/needs-design). This is the FINDING
+# disposition state (fixed/refuted/deferred per review finding) for the disposition-aware merge gate. Canonical
+# copy = a marked PR comment (durable, recoverable by any zero-context agent); local cache = a git-path file,
+# NEVER the committed tree (so it cannot merge to main or leak to a sibling PR). Names are `fd_*`.
+FD_MARKER='<!-- WF-FINDING-DISPOSITIONS -->'
+fd_cache(){ git -C "$1" rev-parse --git-path wf-finding-dispositions.json; }   # absolute path under the gitdir
+# Stable content-derived id from a finding's issue text (same text -> same id across rounds).
+fd_fid(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' ' ' | sed 's/^ *//;s/ *$//' | md5sum | cut -c1-12; }
+# Seed/merge a review output file's findings into the cache JSON: new findings -> status "unresolved" (the
+# author then dispositions them); existing ids keep their disposition. Closes the omission hole (F2).
+fd_seed(){  # fd_seed <cache> <rev>
+  local cache=$1 rev=$2 sev="" issue id
+  [ -s "$cache" ] || printf '{"altitude":"implementation","findings":[]}\n' > "$cache"
+  while IFS= read -r line; do
+    case "$line" in
+      FINDING\ *) sev=$(printf '%s' "$line" | sed -nE 's/^FINDING [0-9]+: (HIGH|MED|LOW).*/\1/p') ;;
+      *issue:*)
+        [ -n "$sev" ] || continue
+        issue=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*issue:[[:space:]]*//')
+        [ -n "$issue" ] || { sev=""; continue; }
+        id=$(fd_fid "$issue")
+        if [ "$(jq --arg id "$id" '[.findings[]|select(.id==$id)]|length' "$cache" 2>/dev/null)" = 0 ]; then
+          jq --arg id "$id" --arg d "$issue" --arg s "$sev" \
+            '.findings += [{"id":$id,"severity":$s,"description":$d,"status":"unresolved"}]' \
+            "$cache" > "$cache.tmp" && mv "$cache.tmp" "$cache"
+        fi
+        sev="" ;;
+    esac
+  done < "$rev"
+}
+fd_high_list(){ jq -r '.findings[]|select(.severity=="HIGH")|"\(.id) HIGH"' "$1" 2>/dev/null; }
+# TRUSTED findings list (reviewer-derived, not author-editable) from a review output file: "<fid> HIGH" per
+# HIGH finding, ids computed the same way fd_seed does. Used as the gate's findings list so deleting/downgrading
+# a prior disposition entry can't bypass the deterministic backstop (the deleted id has no entry -> BLOCK).
+fd_review_high_list(){  # fd_review_high_list <rev>
+  local sev="" issue
+  while IFS= read -r line; do
+    case "$line" in
+      FINDING\ *) sev=$(printf '%s' "$line" | sed -nE 's/^FINDING [0-9]+: (HIGH|MED|LOW).*/\1/p') ;;
+      *issue:*) [ "$sev" = HIGH ] || { sev=""; continue; }
+        issue=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*issue:[[:space:]]*//')
+        [ -n "$issue" ] && printf '%s HIGH\n' "$(fd_fid "$issue")"; sev="" ;;
+    esac
+  done < "$1"
+}
+# Tri-state so a GitHub error never reads as "no state" (fail-open): 0 = active, 1 = no state, 2 = lookup error.
+fd_active(){  # fd_active <repo> <pr> <tok>
+  local out rc
+  out=$(gh_author "$3" -R "$1" pr view "$2" --json comments --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))]|length" 2>/dev/null); rc=$?
+  [ "$rc" = 0 ] || return 2
+  [ "${out:-0}" -gt 0 ] 2>/dev/null && return 0 || return 1
+}
+fd_load(){  # fd_load <wt> <repo> <pr> <tok> -> echoes cache path (canonical PR comment -> cache; init if none)
+  local wt=$1 repo=$2 pr=$3 tok=$4 cache body
+  cache=$(fd_cache "$wt")
+  # `last` selects the most-recent matching comment IN jq — do NOT pipe the multiline body through tail.
+  # Distinguish a GitHub READ FAILURE (must fail closed) from a legitimate "no marker yet" (empty state).
+  local grc=0
+  body=$(gh_author "$tok" -R "$repo" pr view "$pr" --json comments --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null) || grc=$?
+  [ "$grc" = 0 ] || { echo "BLOCKED: could not read PR #$pr comments to load disposition state (GitHub error)" >&2; return 2; }
+  if [ -n "$body" ]; then
+    printf '%s' "$body" | sed -n '/```json/,/```/p' | sed '1d;$d' > "$cache"
+    # A marked comment that exists but yields no valid JSON is CORRUPT state -> fail closed (not empty init).
+    jq -e . "$cache" >/dev/null 2>&1 || { echo "BLOCKED: canonical disposition comment on PR #$pr exists but has no valid JSON" >&2; return 1; }
+  else
+    printf '{"altitude":"implementation","findings":[]}\n' > "$cache"   # no marker -> legitimately empty state
+  fi
+  printf '%s\n' "$cache"
+}
+fd_save(){  # fd_save <wt> <repo> <pr> <tok> — post the cache as a new canonical comment; RETURNS the gh rc.
+  local wt=$1 repo=$2 pr=$3 tok=$4 cache; cache=$(fd_cache "$wt")
+  printf '%s\n\n## Finding dispositions — disposition-aware merge gate (canonical, latest)\n\n```json\n%s\n```\n' \
+    "$FD_MARKER" "$(cat "$cache")" | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1
+}
+# fd-helpers-end (extraction sentinel for fd_state_smoke.sh)
 # the reviewed + merged content must be the COMMITTED content: refuse to act on a dirty tree (uncommitted or
 # untracked changes would make checks/review see content that isn't what merges, and --force removal would
 # then destroy it).
@@ -539,6 +618,23 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   note "$mode review (author=$author, reviewer=opposite family; quiet for several minutes can be normal; findings appear atomically at completion)…"
   local audit_env=()
   while IFS= read -r -d '' item; do audit_env+=("$item"); done < <(review_audit_env "$author" "${AUDIT_CONSTITUTION:-$wt/AGENTS.md}")
+  # disposition-aware review (#139): if this PR has finding-disposition state, hand the reviewer the state so
+  # it suppresses validly-dispositioned prior findings. No state -> stateless review (today's behavior).
+  if { [ "$mode" = --scaffold ] || [ "$mode" = --code ]; } && [ -n "$pr" ]; then
+    local fd_repo; fd_repo=$(gh_repo "$wt")
+    local fdrc; if fd_active "$fd_repo" "$pr" "$rtok"; then fdrc=0; else fdrc=$?; fi   # if-form: set -e safe on rc 1/2
+    # A lookup error on the APPROVING merge-gate review must fail closed (don't silently drop to stateless).
+    [ "$fdrc" = 2 ] && [ "$approving" = 1 ] && die "disposition-state lookup failed (GitHub error) during the merge-gate review — failing closed; re-run finish"
+    if [ "$fdrc" = 0 ]; then
+      local fd_file
+      if fd_file=$(fd_load "$wt" "$fd_repo" "$pr" "$rtok"); then
+        audit_env+=("DISPOSITION_FILE=$fd_file")
+        note "disposition-aware: $(jq '[.findings[]|select(.status!="unresolved")]|length' "$fd_file" 2>/dev/null)/$(jq '.findings|length' "$fd_file" 2>/dev/null) findings dispositioned"
+      else
+        note "WARN: disposition state present but corrupt JSON — this review runs stateless (finish will fail closed)"
+      fi
+    fi
+  fi
   env "${audit_env[@]}" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
     || { echo "BLOCKED: reviewer process failed — tail of log:" >&2; tail -8 "$rev.run.log" >&2; exit 1; }
   require_valid_review "$rev"
@@ -882,6 +978,37 @@ comment)        # wf.sh comment <worktree> <author> [body-file]   — post an AU
   else note "posted author COMMENT to PR #$PR (ambient token — no engineer identity configured for $AUTHOR)"; fi
   ;;
 
+fdispo)         # wf.sh fdispo <worktree> <author> <seed|show|edit|save> — manage FINDING-disposition state (#139)
+  # The author-facing interface to the disposition-aware merge gate. `seed` pulls the latest review's findings
+  # into the PR-canonical state as `unresolved`; edit the printed cache to set fixed/refuted/deferred_*, then
+  # `save` to update the canonical PR comment. `show`/`edit` print the cache path/contents.
+  WT=${1:?usage: wf.sh fdispo <worktree> <author> <seed|show|edit|save>}
+  AUTHOR=${2:?author: claude|codex}; ACTION=${3:-show}
+  check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
+  ATOK=$(author_token_optional "$AUTHOR"); [ -n "$ATOK" ] || need_ambient_gh
+  REPO=$(gh_repo "$WT"); PR=$(wt_pr_required "$WT" "$ATOK")
+  CACHE=$(fd_cache "$WT")   # the LOCAL cache path — do NOT reload from GitHub for save/show/edit (would clobber edits)
+  case "$ACTION" in
+    seed)
+      # refresh canonical state from GitHub, THEN merge in the latest review's findings (then the author edits).
+      CACHE=$(fd_load "$WT" "$REPO" "$PR" "$ATOK") || die "canonical disposition state on PR #$PR is corrupt (invalid JSON) — fix the disposition comment first"
+      BRT=$(wt_branch "$WT" | tr '/' '_')
+      REVF=$(ls -t "${TMPDIR:-/tmp}/wf_code_${BRT}.md" "${TMPDIR:-/tmp}/wf_scaffold_${BRT}.md" 2>/dev/null | head -1 || true)
+      [ -n "$REVF" ] && [ -f "$REVF" ] || die "no review output to seed from — run 'wf.sh code-review $WT $AUTHOR' (or design-review) first"
+      fd_seed "$CACHE" "$REVF"
+      fd_save "$WT" "$REPO" "$PR" "$ATOK" || die "failed to post the canonical disposition comment to PR #$PR (GitHub error) — state NOT updated"
+      note "seeded $(jq '.findings|length' "$CACHE") finding(s) ($(jq '[.findings[]|select(.status=="unresolved")]|length' "$CACHE") unresolved). Edit $CACHE (set status fixed|refuted|deferred_to_child_design|deferred_out_of_scope + evidence/commit/child_issue/followup_issue), then: wf.sh fdispo $WT $AUTHOR save" ;;
+    save)
+      [ -s "$CACHE" ] || die "no local disposition cache to save ($CACHE) — run 'wf.sh fdispo $WT $AUTHOR seed' first"
+      jq -e . "$CACHE" >/dev/null 2>&1 || die "local disposition cache is not valid JSON ($CACHE) — fix it, then save"
+      fd_save "$WT" "$REPO" "$PR" "$ATOK" || die "failed to post the canonical disposition comment to PR #$PR (GitHub error) — state NOT updated"
+      note "saved disposition state to PR #$PR canonical comment ($(jq '.findings|length' "$CACHE") findings)" ;;
+    show) [ -s "$CACHE" ] && cat "$CACHE" || echo "(no local disposition cache — run 'wf.sh fdispo $WT $AUTHOR seed')" ;;
+    edit) echo "$CACHE" ;;
+    *) die "usage: wf.sh fdispo <worktree> <author> <seed|show|edit|save>" ;;
+  esac
+  ;;
+
 issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comment on a GitHub Issue AS the engineer identity
   # The Issue-side counterpart to `wf.sh comment` (which does PR triage comments): authors Issues and
   # issue-comments as the family engineer identity (claude-code-engineer / codex-engineer), never the human
@@ -1091,6 +1218,35 @@ Split into one design PR per doc."
   # 1.5 the CLOSE-GATE (#50/#85): enforce the two-phase disposition contract on the PR's closing issues, BEFORE
   #     the native APPROVE below (so a non-conforming PR is never approved/mergeable). Fail-closed.
   disposition_gate "$WT" "$ATOK" "$PR" "$DESIGN_MODE"
+  # 2a. disposition-aware deterministic backstop (#139), BEFORE any approving review — so a blocked/malformed
+  #     disposition state can never receive a native APPROVE. If this PR has finding-disposition state, the
+  #     structural gate over its HIGH entries must pass first (a HIGH left `unresolved` or a malformed
+  #     disposition BLOCKS). Fail-CLOSED on a GitHub lookup error; no state -> skipped (stateless behavior).
+  FD=""; if fd_active "$REPO" "$PR" "$ATOK"; then FDRC=0; else FDRC=$?; fi   # if-form: set -e safe on rc 1/2
+  case "$FDRC" in
+    2) die "disposition-state lookup failed (GitHub error) — failing closed; re-run finish" ;;
+    0) FD=$(fd_load "$WT" "$REPO" "$PR" "$ATOK") || die "canonical disposition state on PR #$PR is corrupt (invalid JSON) — fix the disposition comment and re-run finish"
+       FDLIST="${TMPDIR:-/tmp}/wf_fd_high_${BR//\//_}.txt"
+       # TRUSTED findings list: prefer the latest code-review output (reviewer-derived, not author-editable) so a
+       # deleted/downgraded disposition can't bypass the gate; fall back to the state's own HIGH ids only when no
+       # rev file is present (the model review then backstops deletions).
+       PK=code; [ "$DESIGN_MODE" = 1 ] && PK=scaffold
+       PRIORREV="${TMPDIR:-/tmp}/wf_${PK}_$(wt_branch "$WT" | tr '/' '_').md"
+       # FAIL CLOSED if no trusted reviewer-derived list is recoverable — never fall back to author-only state
+       # (that would let a deleted/downgraded disposition bypass the deterministic backstop).
+       [ -f "$PRIORREV" ] || die "disposition-aware finish needs a trusted reviewer-derived findings list, but no recent $PK review output is present — run 'wf.sh code-review $WT $AUTHOR' (or design-review) first, then finish."
+       # Detect a TRUE duplicate WITHIN the reviewer-derived list (a hashed-id collision = real ambiguity)
+       # BEFORE any dedup, so `sort -u` below only collapses the legitimate reviewer∩state overlap.
+       REVHIGH=$(fd_review_high_list "$PRIORREV")
+       # awk 'NF' (not grep -v '^$') so an EMPTY list — the expected convergence case — returns 0, not 1-under-pipefail.
+       DUPR=$(printf '%s\n' "$REVHIGH" | awk 'NF' | sort | uniq -d)
+       [ -z "$DUPR" ] || die "ambiguous reviewer findings — colliding id(s): $(printf '%s ' $DUPR) — cannot disposition unambiguously"
+       # UNION of reviewer-derived HIGH ids (trusted; catches a deleted/downgraded disposition) AND the state's
+       # own HIGH ids (catches a stale `unresolved` HIGH the current reviewer no longer raises). Either blocks.
+       { printf '%s\n' "$REVHIGH"; fd_high_list "$FD"; } | awk 'NF' | sort -u > "$FDLIST"
+       ( cd "$WT" && bash "$(dirname "$0")/disposition_gate.sh" "$FD" "$FDLIST" ) \
+         || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
+  esac
   # 2. the authoritative merge gate, fail-closed, NO HIGH. approving=1 -> clean review posts a native APPROVE.
   #    --design: gate on --scaffold over the design DOC (the doc IS the deliverable). else: --code over the diff.
   if [ "$DESIGN_MODE" = 1 ]; then
@@ -1100,6 +1256,13 @@ Split into one design PR per doc."
     DIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
     ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
     run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)" 1
+  fi
+  # 2c. record the final review's findings into the disposition state for the NEXT round (non-gating — the
+  #     structural gate above and the model verdict below are the gates; this only keeps the canonical record current).
+  if [ -n "$FD" ]; then
+    FK=code; [ "$DESIGN_MODE" = 1 ] && FK=scaffold
+    REVF="${TMPDIR:-/tmp}/wf_${FK}_$(wt_branch "$WT" | tr '/' '_').md"
+    if [ -f "$REVF" ]; then fd_seed "$FD" "$REVF"; fd_save "$WT" "$REPO" "$PR" "$ATOK" || note "WARN: could not update canonical disposition comment (cosmetic — gates already evaluated)"; fi
   fi
   [ "$REVIEW_HIGH" = 0 ] || die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
   # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced). On enforced

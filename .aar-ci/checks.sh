@@ -191,6 +191,13 @@ if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-c
   else
     err "wf.sh changed but identity_smoke.sh missing — cannot verify strict identity behavior"
   fi
+  FD_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/fd_state_smoke.sh"
+  if [ -f "$FD_SMOKE" ]; then
+    echo "[checks] finding-disposition state smoke" >&2
+    bash "$FD_SMOKE" >&2 && ok "fd_state smoke" || err "fd_state smoke FAILED"
+  else
+    err "wf.sh changed but fd_state_smoke.sh missing — cannot verify the finding-disposition helpers"
+  fi
 fi
 
 # 8. disposition structural-gate smoke (#138): the deterministic gate that validates .aar-ci/dispositions.json
@@ -202,6 +209,18 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/aar-engineering/skills/ship-
     bash "$DG_SMOKE" >&2 && ok "disposition_gate smoke" || err "disposition_gate smoke FAILED"
   else
     err "disposition_gate.sh changed but disposition_gate_smoke.sh missing — cannot verify the structural gate"
+  fi
+fi
+
+# 9. disposition-aware prompt-injection smoke (#139): audit_experiment.sh injects the disposition framing
+#    (and preserves the dimensional review) only when DISPOSITION_FILE is set. Runs when the auditor changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/verify-claims/skills/verify-claims/scripts/audit_experiment\.sh$'; then
+  DI_SMOKE="$ROOT/plugins/verify-claims/skills/verify-claims/scripts/disposition_inject_smoke.sh"
+  if [ -f "$DI_SMOKE" ]; then
+    echo "[checks] disposition prompt-injection smoke" >&2
+    bash "$DI_SMOKE" >&2 && ok "disposition_inject smoke" || err "disposition_inject smoke FAILED"
+  else
+    err "audit_experiment.sh changed but disposition_inject_smoke.sh missing — cannot verify the injection"
   fi
 fi
 
