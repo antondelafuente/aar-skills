@@ -19,6 +19,13 @@ no(){ echo "FAIL $1"; fails=1; }
 run(){ bash "$S" "$@"; }
 field(){ run show "$1" | python3 -c "import json,sys;print(json.load(sys.stdin).get('$2'))"; }
 
+# --- intent ignores INHERITED generic overlay env (Finding 3): an exported STATE/POD_ID/SSH/COST in
+#     the caller's environment must NOT corrupt a brand-new intent lease ---
+INH=$(STATE=enriched POD_ID=evil-pod SSH=6.6.6.6:22 COST=99 run intent RUNPOD_API_KEY --expiry-min 15)
+[ "$(field "$INH" state)" = intent ]   && ok intent-ignores-inherited-state  || no intent-ignores-inherited-state
+[ "$(field "$INH" pod_id)" = None ]    && ok intent-ignores-inherited-podid  || no intent-ignores-inherited-podid
+[ "$(field "$INH" ssh)" = None ]       && ok intent-ignores-inherited-ssh    || no intent-ignores-inherited-ssh
+
 # --- 3-phase create: intent -> provisional -> enriched ---
 N=$(run intent RUNPOD_API_KEY --expiry-min 15)
 case "$N" in gpujob-????????????????????????????????) ok intent-nonce-format;; *) no "intent-nonce-format ($N)";; esac

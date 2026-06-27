@@ -32,8 +32,9 @@ deleted(){ grep -qx "$1" "$DEL_LOG"; }    # was pod $1 deleted?
 # --- provider stubs (exported so pod_reaper.sh's seams pick them up) ---
 cat > "$TMP/list.sh"   <<EOF
 #!/bin/bash
-# emit "<pod-id> <name>" for the "live" pods declared in $TMP/pods.txt (any key)
-cat "$TMP/pods.txt" 2>/dev/null || true
+# emit "<pod-id> <name>" for the "live" pods of key \$1. A per-key file pods_<secret>.txt partitions
+# pods by account (realistic — a pod belongs to ONE key); else the shared pods.txt (any key).
+if [ -f "$TMP/pods_\$1.txt" ]; then cat "$TMP/pods_\$1.txt"; else cat "$TMP/pods.txt" 2>/dev/null || true; fi
 EOF
 cat > "$TMP/del.sh"    <<EOF
 #!/bin/bash
@@ -105,6 +106,16 @@ BADK=$(mk_lease pod-badk -1 'bad key$(touch /tmp/PWNED)')
 #     by name-matching (Finding 4); find-nonce only matches pending intents ===
 REGN=$(mk_lease pod-regn 120 RUNPOD_API_KEY)   # provisional, fresh; its nonce is REGN
 # a DIFFERENT live pod carrying REGN as its name (a collision/spoof) must be report-only, never reaped
+# === fixture 9: a legacy contract-1 lease with NO ssh endpoint -> report-retry, NEVER deleted (Finding 1) ===
+LNOSSH=$(lease intent RUNPOD_API_KEY --expiry-min -1); lease provisional "$LNOSSH" pod-lnossh >/dev/null
+python3 - "$GPU_JOB_LEASE_DIR/$LNOSSH.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["refresh_contract"]=1   # legacy, and ssh stays null
+json.dump(d, open(p,"w"), indent=2, sort_keys=True)
+PY
+# === fixture 10: an EXPIRED pending intent recorded under a DIFFERENT key_ref, whose nonce names a
+#     live pod listed under THIS key -> report-only, never rebound/reaped by the wrong key (Finding 4) ===
+XKEY=$(lease intent OTHER_KEY --expiry-min -1)   # pending intent under key_ref OTHER_KEY
 # === fixture 5: legacy contract-1 leases, keepalive future / inconclusive / past ===
 LF=$(mk_lease pod-lf -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo future       > "$TMP/keepalive_pod-lf"
 LI=$(mk_lease pod-li -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo ""           > "$TMP/keepalive_pod-li"
@@ -113,7 +124,11 @@ LP=$(mk_lease pod-lp -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo past         > "$TMP/
 # the "live" pod list the stub returns (pod-id name)
 # Two live pods sharing the SAME name (an ambiguous name) -> both report-only, never reaped (Finding 4).
 DUPNAME="gpujob-dupedupedupedupedupedupedupe"
-cat > "$TMP/pods.txt" <<EOF
+# Partition the live pods by account: all fixtures' pods are under the RUNPOD_API_KEY account (key A).
+# The XKEY intent is recorded under OTHER_KEY (key B) but its pod (pod-xkey) is listed under key A —
+# so the reaper, iterating key A, must NOT reap it (the intent's key_ref != key A). OTHER_KEY's account
+# has NO live pods, so the intent is never matched under its own key either.
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
 pod-exp $EXP
 pod-fresh $FRESH
 pod-unres $UNRES
@@ -125,6 +140,8 @@ pod-badk $BADK
 pod-regn-spoof $REGN
 pod-dup1 $DUPNAME
 pod-dup2 $DUPNAME
+pod-lnossh $LNOSSH
+pod-xkey $XKEY
 pod-lf $LF
 pod-li $LI
 pod-lp $LP
@@ -164,24 +181,43 @@ deleted pod-regn-spoof && no regn-spoof-deleted || ok regn-spoof-report-only
 deleted pod-dup1 && no dup1-deleted || ok dup1-report-only
 deleted pod-dup2 && no dup2-deleted || ok dup2-report-only
 echo "$OUT" | grep -q "AMBIGUOUS" && ok ambiguous-name-logged || no ambiguous-name-logged
+# Finding 1: a legacy contract-1 lease with NO ssh endpoint is report-retry, NEVER deleted
+deleted pod-lnossh && no legacy-nossh-deleted || ok legacy-nossh-report-retry
+echo "$OUT" | grep -q "no SSH endpoint to check keepalive" && ok legacy-nossh-logged || no legacy-nossh-logged
+# Finding 4: an expired pending intent under a DIFFERENT key_ref is report-only, never reaped by this key
+deleted pod-xkey && no xkey-cross-key-deleted || ok xkey-cross-key-report-only
+echo "$OUT" | grep -q "different key_ref" && ok xkey-logged || no xkey-logged
+# the cross-key intent was NOT rebound (still a pending intent, no pod_id)
+[ "$(lease show "$XKEY" | python3 -c 'import json,sys;print(json.load(sys.stdin)["pod_id"])')" = None ] \
+  && ok xkey-not-rebound || no xkey-not-rebound
 
 # === locked-reap race (Finding 1): a refresh that lands before the reaper's in-lock recheck SAVES
 #     the pod. Simulate by refreshing the expired lease to a future expiry, THEN sweeping. ===
 RACE=$(mk_lease pod-race -1 RUNPOD_API_KEY)
-echo "pod-race $RACE" >> "$TMP/pods.txt"
+echo "pod-race $RACE" >> "$TMP/pods_secret-for-RUNPOD_API_KEY.txt"
 lease refresh "$RACE" --expiry-min 120 >/dev/null     # the long run refreshed just in time
 bash "$REAPER" >/dev/null 2>&1
 deleted pod-race && no race-refresh-lost || ok race-refresh-saves-pod
 
-# === --dry-run deletes NOTHING even for an expired lease ===
+# === --dry-run deletes NOTHING and MUTATES NOTHING even for an expired lease / pending intent ===
 : > "$DEL_LOG"
+# reset the pods list so prior fixtures (now closed/reaping) don't muddy the dry-run sweep
 DRYEXP=$(mk_lease pod-dry -1 RUNPOD_API_KEY)
-echo "pod-dry $DRYEXP" >> "$TMP/pods.txt"
+DRYPEND=$(lease intent RUNPOD_API_KEY --expiry-min -1)   # expired PENDING intent; its nonce names a live pod
+rm -f "$TMP"/pods_*.txt
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-dry $DRYEXP
+$DRYPEND $DRYPEND
+EOF
 DOUT=$(bash "$REAPER" --dry-run 2>&1)
 deleted pod-dry && no dryrun-deleted || ok dryrun-deletes-nothing
 echo "$DOUT" | grep -q "DRY-RUN would reap" && ok dryrun-logs-would-reap || no dryrun-logs-would-reap
 # the dry-run lease is NOT closed/reaping
 [ "$(lease show "$DRYEXP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = provisional ] \
   && ok dryrun-no-mutation || no dryrun-no-mutation
+# Finding 2: dry-run must NOT bind a pending intent provisional — it stays intent, no pod_id
+echo "$DOUT" | grep -q "DRY-RUN would bind+reap" && ok dryrun-logs-would-bind || no dryrun-logs-would-bind
+[ "$(lease show "$DRYPEND" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = intent ] \
+  && ok dryrun-pending-not-bound || no dryrun-pending-not-bound
 
 [ "$fails" = 0 ] && { echo "pod_reaper smoke PASS"; exit 0; } || { echo "pod_reaper smoke FAIL"; exit 1; }

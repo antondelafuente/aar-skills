@@ -53,6 +53,12 @@
 # Registry root is instance-overridable: ${GPU_JOB_LEASE_DIR:-$HOME/.config/gpu-job/leases}.
 set -euo pipefail
 
+# write_record reads these generic overlay vars from the environment; an INHERITED value from the
+# caller's shell must never leak into a lease write (round-3 Finding 3). Clear them up front — every
+# real mutation sets the ones it means via an inline `VAR=val write_record` call, which re-exports just
+# those for that single subprocess.
+unset POD_ID SSH STATE COST EXPIRY_MIN NONCE KEY_REF CREATE 2>/dev/null || true
+
 ROOT="${GPU_JOB_LEASE_DIR:-$HOME/.config/gpu-job/leases}"
 
 die(){ echo "pod_lease: $*" >&2; exit 2; }
@@ -153,12 +159,18 @@ def setif(key, env):
     if v != "":
         rec[key] = v
 
-setif("pod_id", "POD_ID")
-setif("ssh", "SSH")
-setif("state", "STATE")
-cost = os.environ.get("COST", "")
-if cost != "":
-    rec["cost_per_hr"] = cost
+# On CREATE the record is fully defined by NONCE/KEY_REF/EXPIRY_MIN above; the generic overlay vars
+# (POD_ID/SSH/STATE/COST) must NOT be applied, or an intent could inherit an exported POD_ID/SSH/STATE/
+# COST from the caller's environment and corrupt a brand-new lease before deploy bound the pod
+# (code-review round-3 Finding 3). Those overlays only ever apply to a non-create mutation, which sets
+# them deliberately via the inline `VAR=… write_record` call.
+if not creating:
+    setif("pod_id", "POD_ID")
+    setif("ssh", "SSH")
+    setif("state", "STATE")
+    cost = os.environ.get("COST", "")
+    if cost != "":
+        rec["cost_per_hr"] = cost
 em = os.environ.get("EXPIRY_MIN", "")
 if em != "":
     rec["expiry_at"] = now + int(float(em) * 60)
