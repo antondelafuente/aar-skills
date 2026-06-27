@@ -444,23 +444,33 @@ FD_REVIEW_MARKER='<!-- WF-REVIEW'
 fd_review_high_github(){  # fd_review_high_github <repo> <pr> <pk> <read-token> <reviewer-login>
   local repo=$1 pr=$2 pk=$3 tok=$4 login=$5
   [ -n "$login" ] || return 2   # no reviewer identity to anchor trust on
-  local marker="$FD_REVIEW_MARKER pk=$pk "
+  local prefix="$FD_REVIEW_MARKER pk=$pk "   # the marker run_review prepends as the body's FIRST bytes
   local reviews comments body
   # per_page=100 (no --paginate): a PR with >100 reviewer reviews/comments is implausible, and --paginate over
   # array endpoints needs --slurp gymnastics. Both surfaces run_review posts to: native reviews + issue comments.
   reviews=$(GH_TOKEN="$tok" gh api "repos/$repo/pulls/$pr/reviews?per_page=100" 2>/dev/null) || return 2
   comments=$(GH_TOKEN="$tok" gh api "repos/$repo/issues/$pr/comments?per_page=100" 2>/dev/null) || return 2
-  # Keep only items authored by the reviewer LOGIN whose body carries the pk marker; pick the most-recent.
-  body=$(jq -rn --argjson R "$reviews" --argjson C "$comments" --arg login "$login" --arg marker "$marker" '
+  # Trust only reviewer-LOGIN-authored bodies whose marker is at the START of the body — startswith, NOT
+  # contains, so a marker QUOTED inside a fenced review body (a review OF this very change, or a sweep's
+  # candidate text) can never masquerade as a real marked review. Reject the fresh-eyes sweep marker outright
+  # (defense in depth). Pick the most-recent survivor.
+  body=$(jq -rn --argjson R "$reviews" --argjson C "$comments" --arg login "$login" --arg prefix "$prefix" '
     ([ $R[] | {t: (.submitted_at // .created_at // ""), login: .user.login, body} ]
      + [ $C[] | {t: (.created_at // ""), login: .user.login, body} ])
-    | map(select(.login == $login and .body != null and (.body | contains($marker))))
+    | map(select(.login == $login and .body != null
+                 and (.body | startswith($prefix))
+                 and (.body | contains("<!-- WF-FRESH-SWEEP -->") | not)))
     | sort_by(.t) | last | .body // empty') 2>/dev/null || return 2
   [ -n "$body" ] || return 1   # no marked reviewer review recoverable
-  local tmp; tmp=$(mktemp 2>/dev/null) || tmp="${TMPDIR:-/tmp}/wf_ghrev_${pk}_$$.md"
-  printf '%s\n' "$body" > "$tmp"
-  fd_review_high_list "$tmp"
+  # Capture the parser output AND status BEFORE cleanup so a temp write/read failure fails closed instead of
+  # being masked by rm's success (the function's exit status must reflect recovery, not cleanup).
+  local tmp out rc
+  tmp=$(mktemp 2>/dev/null) || tmp="${TMPDIR:-/tmp}/wf_ghrev_${pk}_$$.md"
+  if ! printf '%s\n' "$body" > "$tmp" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 2; fi
+  out=$(fd_review_high_list "$tmp"); rc=$?
   rm -f "$tmp" 2>/dev/null || true
+  printf '%s\n' "$out"
+  return "$rc"
 }
 # Tri-state so a GitHub error never reads as "no state" (fail-open): 0 = active, 1 = no state, 2 = lookup error.
 fd_active(){  # fd_active <repo> <pr> <tok>
