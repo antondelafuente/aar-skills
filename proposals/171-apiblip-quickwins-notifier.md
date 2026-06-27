@@ -28,7 +28,7 @@ This is deliberately one paragraph: it names the *operation* (a fire-not-resume 
 
 ## Blast radius
 
-- **Product (this PR):** `plugins/experiment-lifecycle/skills/run-experiment/SKILL.md` — one paragraph in the resume-contract section (the "notifier ≠ recovery" clarification). Plus the `plugins/experiment-lifecycle/plugin.json` version bump + CHANGELOG entry. No code, no schema, no behavior change — docs only.
+- **Product (this PR):** `plugins/experiment-lifecycle/skills/run-experiment/SKILL.md` — one paragraph in the resume-contract section (the "notifier ≠ recovery" clarification). Plus the `plugins/experiment-lifecycle/.claude-plugin/plugin.json` version bump + root `CHANGELOG.md` entry. No code, no schema, no behavior change — docs only.
 - **Instance (NOT this repo):** the box's `settings.json` (`API_TIMEOUT_MS`, `API_FORCE_IDLE_TIMEOUT`) and the `StopFailure` hook script under `~/.claude/`, shipped same-day with a pointer back to this spec.
 - No change to the SWE pipeline (`aar-engineering`), `gpu-job`, or any other plugin.
 
