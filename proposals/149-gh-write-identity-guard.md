@@ -119,13 +119,17 @@ Blocking bare `issue edit/close`, label edits, and `pr review/merge` would break
 issue closes ("tracker maintenance … requires a configured maintainer identity"), and `wf.sh` itself does
 `pr review`/`pr merge`/issue-close — but `wf.sh issue` currently exposes only `create` and `comment`. So
 the design's guard cannot simply forbid these; it must point at an **engineer-identity replacement**. The
-decision (recorded here for the owner): **extend the one engineer path to cover the maintenance verbs the
-workflow actually uses** — add `wf.sh issue edit|close|label` (and confirm `pr review/merge` already run
-through the engineer token, which they do inside `finish`/the review path) so that every operation the
-guard blocks under the ambient owner token has a bot-identity equivalent. Operations with **no** workflow
-need (arbitrary owner-only admin) stay on the elevated maintenance path. `feedback-loop`/`triage-feedback`
-docs are updated to call the new engineer verbs instead of bare `gh`. This is its own product child
-(#4 below) so the guard never lands ahead of the replacement it requires.
+decision (recorded here for the owner): **extend the one engineer path with NARROW, per-verb-allowlisted
+maintainer commands** — `wf.sh issue close|label` (and `edit` only if a concrete workflow needs it), each
+accepting a **fixed, validated argument set** and NOT forwarding arbitrary `gh` args. This deliberately
+mirrors `proposals/91-issue-flag-hardening.md`, which restricted `wf.sh issue` to `create`/`comment`
+precisely because forwarding arbitrary args "permits destructive/interactive operations": the new verbs
+must stay on that hardened model (allowlisted flags, no passthrough), so we do not reopen what #91 closed.
+`pr review/merge` already run through the engineer token inside `finish`/the review path — confirm, don't
+re-add. Operations with **no** workflow need (arbitrary owner-only admin) stay on the elevated maintenance
+path. `feedback-loop`/`triage-feedback` docs are updated to call the new engineer verbs instead of bare
+`gh`. This is its own product child (#4 below) so the guard never lands ahead of the replacement it
+requires.
 
 **Reuse, don't fork.** The engineer write path already exists and is the one canonical implementation
 (`WF_ENGINEER_TOKEN_CMD_*` → `gh_author`/`gh_push` in `wf.sh`, surfaced as `wf.sh issue|comment`). This
@@ -162,51 +166,62 @@ and the instance applies the capability change to itself.
    and a behavior smoke asserting **all** directions (bare `gh` write blocked; credential-mutating
    `gh auth` blocked; `wf.sh`-routed write AND full engineer push allowed). Owns the guard-specific
    override flag.
-2. **Read-only-ambient detector: `wf.sh doctor` check + a `.aar-ci` fake-`gh` smoke (product), covering
-   BOTH the `gh`/API surface AND the ambient `git push` surface.** Implements concrete,
-   non-mutating tests (this design picks the methods; it is not a placeholder), probing the **actual write
-   permission classes that caused the incident — issues/PRs/comments/contents — not repo administration**
-   (a repo-admin PATCH would falsely pass a token that can write issues/PRs but not admin).
 
-   **(a) API-write probe — one canary per fine-grained PERMISSION CLASS the workflow mutates, against a
-   REAL, self-discovered resource** The workflow's writes map onto a small set of
-   fine-grained permissions, not many endpoints: `pr review`/`pr merge`/PR comments ⇒ **`pull_requests:
-   write`**; issue create/comment/label/close ⇒ **`issues: write`**; pushes/content ⇒ **`contents:
-   write`**. So the detector probes **each of those three permission classes** with an identity-write
-   canary and passes only if **all** return 403 (read-only); a 2xx on *any* class ⇒ write-capable (FAIL).
-   This closes the scope gap where a single issue-comment canary would miss a PR-write-capable token.
+   **Packaging / install home (so the wrapper isn't a free-floating instance PATH hack).** The wrapper
+   ships as **product code inside the ship-change skill's `scripts/` dir** (the Agent Skills layout —
+   scripts live in the skill dir, per `AGENTS.md`), with a **canonical product activation command** —
+   `wf.sh install-gh-guard` (or an init subcommand) — that an instance invokes to put the wrapper ahead of
+   the real `gh` on PATH (and prints how to undo it). The product owns the wrapper source + the installer;
+   the instance only *runs* the installer and owns its own PATH. This gives the guard a defined home in the
+   packaging model rather than an undocumented per-instance shim.
+2. **Read-only-ambient detector: `wf.sh doctor` check + a `.aar-ci` smoke (product), covering BOTH the
+   `gh`/API surface AND the ambient `git push` surface — and NEVER performing a real mutation on either
+   branch.** The non-negotiable property: a `doctor` probe must be safe to run routinely against the live
+   repo, so it must **not complete a write even when the ambient token is write-capable** (otherwise a
+   write-capable owner token would edit a live PR/issue or land a commit before `doctor` reports FAIL —
+   exactly the failure a safety check cannot have). It probes the **actual write permission classes that
+   caused the incident — `issues`, `pull_requests`, `contents` — not repo administration** (a repo-admin
+   PATCH would falsely pass a token that can write issues/PRs but not admin), with the detection mapped onto
+   those fine-grained permissions: `pr review`/`pr merge`/PR comments ⇒ `pull_requests: write`; issue
+   create/comment/label/close ⇒ `issues: write`; pushes/content ⇒ `contents: write`. PASS only if **all
+   three** classes read as read-only; any one class showing write capability ⇒ FAIL.
 
-   Each canary is an **identity-write on a real object the token can already GET** — no bootstrap config,
-   the target is **self-discovered** at runtime so there is no "known comment id" to provision:
-   - `pull_requests`: GET the repo's most-recent PR the token can read, then `PATCH repos/{o}/{r}/pulls/{n}
-     -f title="{its-current-title}"` (identity title ⇒ no-op 2xx if writable, 403 if not).
-   - `issues`: same shape on the most-recent issue's title, or `PATCH .../issues/comments/{id-the-token-
-     just-read}` with its current body.
-   - `contents`: a `PUT .../contents/{path}` with the file's **current** sha + content (identity write ⇒
-     no-op), or, to avoid any commit, a `GET` of the contents-permission-gated `.../contents/` with a write
-     method that a read-only token 403s before any change.
+   **(a) API-permission probe — non-mutating on BOTH branches.** Two methods, in preference order:
+   - **Permission-metadata first (no write attempted at all).** Where the credential exposes its own
+     permissions, read and assert them: a GitHub App installation token's permissions object, or — for a
+     fine-grained PAT — the `x-accepted-github-permissions` / rate-limit-resource hints GitHub returns on a
+     cheap GET. If a permission surface is available, the probe is a pure read; no canary write.
+   - **403-only fallback (still no mutation).** Where no permission surface is exposed, issue a
+     write-method request **shaped so the *only* observable outcome that ever occurs is the read-only
+     token's 403** — i.e. the probe is validated by the **denied** path, not the allowed path. Concretely:
+     send the write with a body GitHub rejects at **validation before** it mutates (e.g. an empty/invalid
+     `PATCH` body that returns **422 Unprocessable** for a write-capable token and **403 Forbidden** for a
+     read-only one — 422 means "you may write but this body is invalid," so nothing is written; 403 means
+     "you may not write"). The signal is **403 ⇒ read-only (PASS) / 422 ⇒ write-capable (FAIL)** and
+     **neither outcome mutates** the target. This deliberately replaces the earlier identity-write canary,
+     which *did* complete a real (no-op) write on the writable branch and was unsafe.
 
-   The signal is a clean **403 ⇒ that class is read-only / 2xx ⇒ that class can write** on a real resource,
-   with **no reliance on missing-resource 403-vs-404 ordering**. (Where the token type *does* expose its
-   permission object directly — e.g. a GitHub App installation token — `doctor` may instead GET and assert
-   that object; the identity-write canary is the portable default because fine-grained PATs don't expose
-   `x-oauth-scopes`/a permissions object.) **The child issue MUST empirically prove the 403/2xx matrix for
-   each permission class against both a read-only and a write-capable token before this probe is the
-   rollout gate** — the validation is part of the child's acceptance, not assumed.
+   No probe uses a guessed/provisioned resource id; targets are self-discovered from what the token can
+   already GET, and the contents probe never carries a real `sha`+content (so it cannot create a commit).
+   **The child MUST empirically prove, per permission class, that the chosen probe distinguishes a
+   read-only from a write-capable token AND mutates nothing on either branch, before it is the rollout
+   gate** — verified mutation-freedom is part of the child's acceptance, not assumed.
 
-   **(b) Ambient-`git push` probe** a **non-mutating `git push --dry-run`** to a disposable
-   ref on the GitHub remote, with **all credential prompts disabled** (`GIT_TERMINAL_PROMPT=0`,
-   `GIT_ASKPASS=/bin/false`/`true`, `core.askPass` empty, SSH `BatchMode=yes`) and the engineer credential
-   explicitly absent, so it exercises only whatever **ambient** Git credential the shell resolves. If the
-   dry-run push is *accepted* (an owner HTTPS/SSH credential can write), `doctor` FAILS loudly; if it is
-   *rejected* for auth, the ambient Git surface is read-only (PASS). `--dry-run` never updates the remote.
+   **(b) Ambient-`git push` probe — `--dry-run`, never updates the remote.** A `git push --dry-run` to a
+   disposable ref with **all credential prompts disabled** (`GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` to a
+   no-op, `core.askPass` empty, SSH `BatchMode=yes`) and the engineer credential explicitly absent, so it
+   exercises only the **ambient** Git credential. `--dry-run` performs the auth/negotiation but **does not
+   update the remote**. Accepted ⇒ an owner credential can write ⇒ FAIL loud; auth-rejected ⇒ ambient Git
+   surface is read-only ⇒ PASS.
 
-   `doctor` reads HTTP status via `gh api -i` / `--include` and never trusts the body. The `.aar-ci`
-   fake-`gh`/fake-`git` smoke supplies stubs that return the read-only fixture (403 / push-rejected) and
-   the write-capable fixture (2xx / push-accepted) and asserts `doctor` reports read-only vs write-capable
-   accordingly for **both** the API and the Git surface. Fails loudly if an install still hands agents a
-   write-capable ambient credential on either surface, so a regression/rollback is caught instead of
-   silently re-opening the footgun.
+   **Doctor probes each credential SOURCE separately and bypasses only the ergonomic guard, not the
+   capability layer.** `doctor` checks `GH_TOKEN`, `GITHUB_TOKEN`, and the stored `gh auth` credential
+   **independently** (clearing/isolating the others per check), so it proves *no* reachable source is
+   write-capable rather than only whichever one `gh` happens to resolve first; and it invokes the real `gh`
+   directly (the internal-bypass marker) so the ergonomic wrapper can never mask a write-capable source and
+   falsely certify safety. The `.aar-ci` fake-`gh`/fake-`git` smoke supplies stubs for the read-only fixture
+   (403 / push-rejected) and the write-capable fixture (422 / push-accepted) and asserts `doctor` reports
+   read-only vs write-capable per source and per surface, and that no fixture path performs a mutation.
 3. **Codify the contract across ALL its canonical homes — one canonical reference, no duplicate live
    contracts (product, doc-only).** Add the rule to `AGENTS.md` ("the ambient agent GitHub
    credential MUST be read-only; all writes go through the engineer token path"), next to the existing
@@ -215,15 +230,17 @@ and the instance applies the capability change to itself.
    ship-change `SKILL.md` ("Auth: … export `GH_TOKEN`"), `RUNBOOK.md` (the `GH_TOKEN` rotation note that
    says "repo: contents + pull_requests"), and any help/plugin metadata. Prefer a single canonical
    statement that the others reference over duplicated prose.
-4. **Extend the engineer path to the maintenance verbs the guard blocks, so no existing workflow is
-   stranded (product; the blast-radius dependency).** The guard forbids bare `issue edit/close`, label
-   edits, and PR review/merge under the ambient owner token, but `triage-feedback` (label edits + closes)
-   and `wf.sh` itself need them under the engineer/maintainer identity, and `wf.sh issue` currently exposes
-   only `create`/`comment`. Add `wf.sh issue edit|close|label` (engineer-token, same `gh_author` path) and
-   confirm/route `pr review`/`pr merge` through the engineer token; then update `feedback-loop`/
-   `triage-feedback` docs and any prose to call the new engineer verbs instead of bare `gh`. **This child
-   MUST land before (or with) child #1's guard** so the guard never blocks an operation that has no
-   engineer-identity replacement yet.
+4. **Narrow engineer maintainer verbs so no existing workflow is stranded (product; the blast-radius
+   dependency — BLOCKING predecessor of child #1).** The guard forbids bare `issue close`, label edits, and
+   PR review/merge under the ambient owner token, but `triage-feedback` (label edits + closes) and `wf.sh`
+   itself need them under the engineer/maintainer identity, and `wf.sh issue` currently exposes only
+   `create`/`comment`. Add **narrow, per-verb-allowlisted** `wf.sh issue close|label` (and `edit` only if
+   needed), each with a fixed validated arg set and **no arbitrary-arg passthrough** — preserving the #91
+   hardening model so the destructive/interactive surface stays closed. Confirm `pr review`/`pr merge`
+   already run through the engineer token (they do, inside `finish`/the review path). Update
+   `feedback-loop`/`triage-feedback` docs to call the engineer verbs instead of bare `gh`, each with a
+   per-verb smoke. **This child is an explicit BLOCKING predecessor: it MUST merge before child #1's guard**
+   so the guard never blocks an operation that has no engineer-identity replacement yet.
 
 **Instance rollout task (NOT a product ship-change child — applied to this deployment directly):**
 
@@ -240,13 +257,14 @@ and the instance applies the capability change to itself.
   GitHub remote (read-only fetch/clone is fine), so the only thing that can push is the one-shot engineer
   credential `git_push_author` forces.
 
-Sequencing: **child #4 (the engineer maintenance verbs) lands first or with child #1**, so the guard never
-blocks an operation lacking an engineer-identity replacement. Then the rest of the product children land
-(child #1 guard + bypass + forced push cred; child #2 detector; child #3 contract). Only after the product
-children are available does the instance perform the capability demotion (token + stored `gh auth` + Git
-credential) and run `wf.sh doctor` to confirm every probed surface is read-only while a `wf.sh`-routed
-write/push still authors as the bot. The capability layer delivers the structural guarantee; the product
-children make it enforceable, ergonomic, detectable, non-stranding, and documented.
+Sequencing (a strict dependency, not a preference): **child #4 (the narrow engineer maintenance verbs)
+MUST merge before child #1 (the guard)** — the guard cannot block `issue close`/`label` until their
+engineer-identity replacements exist, or it strands `triage-feedback`. Order: **#4 → #1 → #2 → #3** (child
+#3 the contract docs can land any time after #1; child #2 the detector before the instance rollout). Only
+after the product children are available does the instance perform the capability demotion (token + stored
+`gh auth` + Git credential) and run `wf.sh doctor` to confirm every probed surface is read-only while a
+`wf.sh`-routed write/push still authors as the bot. The capability layer delivers the structural guarantee;
+the product children make it enforceable, ergonomic, detectable, non-stranding, and documented.
 
 ## Alternatives considered
 
@@ -255,8 +273,8 @@ children make it enforceable, ergonomic, detectable, non-stranding, and document
   interception layer, not a capability removal: it must enumerate every mutating subcommand shape
   (including `gh api -X …`, aliases, future subcommands), it can be PATH-shadowed or bypassed by calling
   the real binary directly, and it risks recursing into `wf.sh`'s own `gh` calls. It remains valuable as
-  the **ergonomic layer** (child #2), but the *guarantee* must come from the read-only capability, which
-  no enumeration gap or PATH trick can defeat.
+  the **ergonomic layer** (child #1's guard wrapper), but the *guarantee* must come from the read-only
+  capability, which no enumeration gap or PATH trick can defeat.
 
 - **Keep it as prose + reviewer vigilance.** Status quo. Rejected — that is exactly the #147/#148/#149
   failure class. The whole point of the issue is that skippable prose gets skipped under reflex.
@@ -279,11 +297,14 @@ children make it enforceable, ergonomic, detectable, non-stranding, and document
   must keep working untouched is the SWE pipeline itself — verified by the design constraint that the
   guard never intercepts an engineer-token call and that `wf.sh` never depends on the ambient token for a
   write.
-- **Product surface touched (in the three `ready` children):** a new `gh` write-guard wrapper + its
-  `.aar-ci` behavior smoke, a `wf.sh` bypass marker at its internal `gh` call sites, a `wf.sh doctor`
-  read-only-ambient check + its fake-`gh` smoke, and the contract codified across `AGENTS.md` +
-  ship-change `SKILL.md`/`RUNBOOK.md`/metadata. No change to the existing engineer-token implementation —
-  it is reused as-is.
+- **Product surface touched (in the four `ready` children):** a new `gh` write-guard wrapper (shipped in
+  the ship-change skill's `scripts/` + a `wf.sh install-gh-guard` activation command) and its `.aar-ci`
+  behavior smoke; a `wf.sh` bypass marker at its internal `gh` call sites + a forced one-shot engineer push
+  credential in `git_push_author`; a `wf.sh doctor` read-only check (API + ambient-`git push`,
+  per-credential-source, non-mutating) + its fake-`gh`/`git` smoke; narrow `wf.sh issue close|label`
+  maintainer verbs (per-verb-allowlisted, #91 model) + their smoke and the `feedback-loop`/`triage-feedback`
+  doc updates; and the contract codified across `AGENTS.md` + ship-change `SKILL.md`/`RUNBOOK.md`/metadata.
+  No change to the existing engineer-token implementation — it is reused as-is.
 - **Instance surface touched (the instance rollout task, not product code):** the auth-env loader stops
   exporting a write-capable ambient token and instead exports a read-only one; a separate elevated owner
   token is wired for explicit maintenance; the wrapper is installed on PATH ahead of the real `gh`. These
@@ -294,11 +315,13 @@ children make it enforceable, ergonomic, detectable, non-stranding, and document
 
 ## Rollout + rollback
 
-- **Staged.** Land the product children first: #1 (guard wrapper + `wf.sh` bypass contract + smoke), #2
-  (read-only detector / doctor check), #3 (contract across canonical homes). Then perform the instance
-  rollout (demote the ambient token to read-only + wire the elevated owner token) and confirm via
-  `wf.sh doctor`: reads still work, a bare `gh issue create` now 403s, and `wf.sh issue …` still authors
-  as the bot.
+- **Staged, in dependency order #4 → #1 → #2 → #3.** Land #4 (narrow engineer maintainer verbs) FIRST so
+  the guard has replacements to point at; then #1 (guard wrapper + `wf.sh` bypass contract + forced push
+  cred + `wf.sh install-gh-guard`); then #2 (non-mutating read-only detector / doctor check); #3 (contract
+  across canonical homes) any time after #1. Then perform the instance rollout (demote the ambient token +
+  stored `gh auth` + Git credential to read-only, wire the elevated owner token, run `wf.sh
+  install-gh-guard`) and confirm via `wf.sh doctor`: reads still work, a bare `gh issue create` now 403s,
+  and `wf.sh issue …` still authors as the bot.
 - **Escape hatch / rollback for a wedged state.** If the read-only demotion ever blocks legitimate
   owner/admin work, the operator performs the explicit two-step (source the elevated owner token **and**
   set the guard-specific `WF_GH_ALLOW_OWNER_WRITE=1`); the guard emits a terminal note. Full rollback is a
