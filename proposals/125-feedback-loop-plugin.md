@@ -39,9 +39,12 @@ The plugin uses the same Agent Skills layout as the existing modules. README and
 optional but recommended: it is how users report product friction and how maintainers process that friction.
 Codex installs symlink the two skill dirs independently.
 
-`feedback_loop_init.sh` must be discoverable from either skill. Because Codex installs symlink skill
-directories independently, a cross-skill wrapper is not reliable for a maintainer-only install. Ship the full
-script in both skill dirs and add a deterministic CI drift check so the two copies cannot silently diverge.
+`feedback_loop_init.sh` must be discoverable from either skill. Keep one canonical implementation under
+`file-feedback/scripts/`. The `triage-feedback/scripts/feedback_loop_init.sh` file is a tiny wrapper that
+resolves its real source path (`readlink -f` / physical `pwd`) before delegating to the sibling source tree's
+canonical script. That works for plugin installs, where both skills are copied together, and for Codex symlink
+installs, where a symlinked skill still points into the source checkout. The wrapper contains no config logic, so
+there is no duplicated init implementation or bespoke drift check.
 
 ### Local config
 
@@ -52,14 +55,10 @@ are prompted.
 The config keys are:
 
 - `FEEDBACK_PRODUCT_REPO`: required `OWNER/REPO` for product issues.
-- `FEEDBACK_INSTANCE_GOTCHAS_FILE`: optional local gotcha destination for deployment-only incidents.
-- `FEEDBACK_INSTANCE_BACKLOG_FILE`: optional local backlog destination for deployment-only ideas.
-- `FEEDBACK_INSTANCE_GOTCHAS_ARCHIVE`: optional closed gotcha archive, used by `triage-feedback` when configured.
-- `FEEDBACK_INSTANCE_BACKLOG_ARCHIVE`: optional closed backlog archive, used by `triage-feedback` when configured.
 - `FEEDBACK_INSTANCE_GUIDANCE`: optional path or URI to the consuming instance's feedback/coordination
-  guidance. This is where an instance names its peer-coordination channel, changelog, local helper/pipeline
-  homes, live-ownership conventions, and richer archive policy. The product skill surfaces this pointer when it
-  needs instance-specific instructions instead of freezing those slots into the product schema.
+  guidance. This is where an instance names its gotcha/backlog files, archive policy, peer-coordination channel,
+  changelog, local helper/pipeline homes, and live-ownership conventions. The product skill surfaces this pointer
+  when it needs deployment bookkeeping instead of freezing those slots into the product schema.
 - `FEEDBACK_ISSUE_COMMAND`: optional issue creation/comment command override.
 
 The initializer always requires `FEEDBACK_PRODUCT_REPO` through an environment preseed or an interactive prompt.
@@ -69,9 +68,10 @@ ambiguity and removes the hidden "works on Anton's box" class entirely. A non-in
 
 The skills read `~/.config/feedback-loop/env` at point of need. If the config file or `FEEDBACK_PRODUCT_REPO` is
 missing, product feedback is not silently sent anywhere: the skill drafts the exact Issue/search/comment text for
-the researcher and tells them to run `feedback_loop_init.sh` to enable direct filing. Deployment-only feedback
-requires the corresponding instance file keys; when absent, the skill drafts a local note instead of writing to
-Anton paths.
+the researcher and tells them to run `feedback_loop_init.sh` to enable direct filing. Deployment-only feedback is
+not written by product code. The skill drafts the local note in the generic incident/idea shape and tells the
+agent to follow `FEEDBACK_INSTANCE_GUIDANCE` when configured; when unset, it reports that the instance guidance
+key is missing instead of writing to Anton paths.
 
 ### `file-feedback`
 
@@ -80,7 +80,8 @@ The product skill keeps the routing judgment from the live skill:
 1. Decide whether the feedback would affect an external adopter of the product.
 2. Product/user-facing feedback goes to `FEEDBACK_PRODUCT_REPO` as a GitHub Issue with a type label and exactly
    one disposition label when the answer is clear.
-3. Deployment-only feedback goes to the configured instance gotcha/backlog files when those are configured.
+3. Deployment-only feedback is drafted in the generic incident/idea shape and routed through the configured
+   instance guidance pointer.
 4. A small mechanical fix can be applied immediately at the canonical home, but product fixes still go through
    `ship-change`.
 
@@ -93,20 +94,17 @@ When that path is missing, it either uses `FEEDBACK_ISSUE_COMMAND` or drafts the
 researcher to submit. It never tells an outside user to call `gh-as-engineer`, never assumes Anton's owner token,
 and never writes to `/home/anton/...` unless the instance config explicitly points there.
 
-For instance-only file targets, the skill owns only the generic shape: symptom -> cause -> fix/cost for gotchas,
-and what/why/take/next-step for backlog ideas. When archive keys are configured, `triage-feedback` may perform
-the generic close-by-move operation: remove the resolved entry from the configured live file and append a
-one-line pointer to the configured archive. The product owns that generic operation and a generic marker
-vocabulary (`codified`, `promoted`, `gated`, `parked`). The consuming instance owns which files exist, what local
-entries mean, any legacy markers already present in its archives, and any richer archive policy surfaced through
-`FEEDBACK_INSTANCE_GUIDANCE`.
+For instance-only targets, the skill owns only the generic shape: symptom -> cause -> fix/cost for incidents,
+and what/why/take/next-step for ideas. It does not own local file edits, close-by-move, archive filenames, or
+marker vocabulary. Those remain consuming-instance procedure, surfaced through `FEEDBACK_INSTANCE_GUIDANCE`.
 
 ### `triage-feedback`
 
 The product skill is the maintainer side of the same loop. It processes:
 
 - open product Issues in `FEEDBACK_PRODUCT_REPO`;
-- optional instance gotcha/backlog files when configured.
+- optional instance feedback only by reading and following `FEEDBACK_INSTANCE_GUIDANCE`; the product skill does
+  not pre-name local feedback buckets.
 
 Its reusable core is product issue and PR triage: maintain disposition labels, classify product feedback as
 ready/needs-design/needs-shaping/blocked/parked/other, group duplicates, and route product-scaffold fixes through
@@ -142,7 +140,7 @@ Update the lifecycle skills/templates so feedback has a concrete product pointer
 - reference `feedback-loop`'s `file-feedback` skill by name at retro/checklist points;
 - add explicit fallback wording: if `feedback-loop` is not installed or configured, use the consuming instance's
   feedback process and record the note where the instance tells you to;
-- replace literal `experiment_gotchas.md`/`AAR_BACKLOG` assumptions with configured instance feedback surfaces;
+- replace literal `experiment_gotchas.md`/`AAR_BACKLOG` assumptions with neutral instance-guidance wording;
 - keep the design/run retro requirement, but do not require `feedback-loop` to be installed for the rest of
   `experiment-lifecycle` to make sense.
 
@@ -165,9 +163,10 @@ Update the lifecycle skills/templates so feedback has a concrete product pointer
   clearer, and cannot misroute an outside install's feedback to Anton's tracker.
 - **Require `aar-engineering` for issue filing.** Rejected: the integration is valuable when configured, but a
   product user should still get a safe draft/fallback when engineer Apps are not installed.
-- **Move all instance archive procedure into product.** Rejected in the strong form: local filenames, legacy
-  archive history, coordination rules, and rich close policy are deployment-owned. The product owns only the
-  generic close-by-move operation and generic marker vocabulary needed for portable `triage-feedback` behavior.
+- **Move instance file/archive procedure into product config.** Rejected: local buckets, filenames, archive
+  history, coordination rules, marker vocabulary, and rich close policy are deployment-owned. The product
+  surfaces one guidance pointer and drafts generic notes; the consuming instance decides where and how those
+  notes are recorded or closed.
 
 ## Blast radius
 
