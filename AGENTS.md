@@ -58,6 +58,19 @@ that builds them).
   `gh-as-engineer` alias that delegates to it, but there's a single token implementation. The rule covers
   *every* Issue an agent opens (ad-hoc backlog, decompositions, follow-ups). Backfilling existing
   human-authored Issues is not possible (GitHub can't reauthor) and not attempted.
+- **Bounded background waits — silence is not progress.** Any wait on background or external work (a
+  `run_in_background` task, a detached driver, a poll loop, a review/verifier subprocess) MUST have three
+  things, or it can hang forever with nothing erroring (orchestrator#2: a `ship-change` review blocked on
+  stdin and never returned — completion-only notifications never fired, the watcher grepped only the success
+  string, no deadline): (1) a **deadline** — a time bound the wait exits on, not only the success marker;
+  (2) a **liveness / positive-progress check** — process alive AND output advancing ("no done-marker yet"
+  can't distinguish working from wedged); and (3) a **failure/timeout path that wakes the agent or fails
+  visibly** — the watcher emits on *stuck*, not only on *done*, and a tripped deadline is acted on, never
+  silently re-waited. The worked, substrate-specific instance for autonomous detached experiment runs is
+  `run-experiment`'s self-wake (done-marker + liveness + positive-progress + look-again deadline); the
+  `ship-change` reviewer-latency thresholds and the `wf.sh` `WF_REVIEW_TIMEOUT` cap are this rule applied to
+  the SWE-pipeline review wait. Each waiting surface restates the minimal rule at point of need (this is the
+  editorial home), so it never depends on this file being installed.
 - **Every script header cites the real incidents it encodes.** No best-practice guesses.
 - **Version bump on every behavior change** (plugin.json), one CHANGELOG-style line in the
   commit message; tag releases when someone depends on stability.

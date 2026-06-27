@@ -77,7 +77,10 @@ advancing / bytes growing — liveness alone can't tell working from a wedged ho
 BLOCKED/errors; and it must honor a **look-again deadline** — a deadline quietly gone past with compute still billing is
 the signal you parked, so STOP re-waiting, diagnose, and notify the human.
 
-For an **autonomous detached run**, this is a capability requirement, not a best-effort preference. If your substrate
+This self-wake is the experiment-surface instance of the harness-wide **bounded-wait** rule (AGENTS.md
+"Bounded background waits": every background wait needs a deadline + a liveness/positive-progress check + a
+failure path that wakes you — silence is not progress). For an **autonomous detached run**, this is a
+capability requirement, not a best-effort preference. If your substrate
 cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and then park. Mark the
 `CHECKLIST.md` self-wake gate **FAIL**, notify/escalate before GPU/API spend, and either relaunch in a substrate that
 can own its wake or keep the work explicitly controller-supervised. A blocking watcher that keeps the executor turn

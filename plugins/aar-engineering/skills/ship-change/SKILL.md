@@ -43,9 +43,15 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
   Claude-authored reviews use the default Codex verifier; `wf.sh` clears inherited `BASH_ENV` and ignores a
   same-family Claude `AUDIT_VERIFIER_CMD` for that review subprocess rather than requiring agents to hand-edit
   shell environment state.
-- **Quiet review is normal.** Claude-family reviews can be quiet for several minutes. The underlying verifier
-  writes findings atomically only after completion, so an absent or empty findings file is not by itself a hang
-  signal; use the runbook's local thresholds before inspecting or retrying.
+- **Quiet review is normal — but bounded.** Claude-family reviews can be quiet for several minutes. The
+  underlying verifier writes findings atomically only after completion, so an absent or empty findings file is
+  not by itself a hang signal; use the runbook's local thresholds before inspecting or retrying. That patience
+  is only the *don't-kill-too-early* half: this review is a background wait, so it still needs a **deadline**
+  and a **liveness check**, and a stuck reviewer must be acted on (the failure path), never waited on forever —
+  silence is not progress (orchestrator#2 was exactly this review wait hanging). The runbook's
+  inspect-at-5/suspicious-at-10-minutes thresholds ARE that deadline + liveness check; the merge-gate verifier
+  subprocess itself is hard-capped by `wf.sh` (`WF_REVIEW_TIMEOUT`, default 20min — a tripped cap fails CLOSED
+  as BLOCKED, never an indefinite park). Canonical rule: `AGENTS.md` "Bounded background waits".
 - **Engineer identities are strict by default for workflow writes.** Ambient `gh` is fine for inspection and
   owner/admin maintenance, but protected `wf.sh` mutations that name an author use the family engineer bot
   identities or fail before falling back to the owner account. `WF_ENGINEER_TOKEN_CMD_CLAUDE` /

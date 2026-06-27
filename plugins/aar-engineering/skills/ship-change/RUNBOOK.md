@@ -107,6 +107,15 @@ the verifier process is still alive; do not treat an empty log as a hang signal.
 also check the run log, remembering that it is a shared driver/verifier log. At 10 minutes, treat the run as
 suspicious unless there is concrete evidence of progress.
 
+These thresholds ARE the deadline + liveness check the canonical bounded-wait rule requires (AGENTS.md
+"Bounded background waits"; orchestrator#2 was this exact review wait hanging forever). They bound the *agent's*
+attention; the verifier subprocess itself is also hard-capped in `wf.sh` by **`WF_REVIEW_TIMEOUT`** (seconds,
+default `1200` = 20 min). A reviewer that exceeds it is killed (`timeout -k 30`) and the review fails **CLOSED**
+as `BLOCKED` — never an indefinite park. Tune it for a genuinely slow reviewer environment (or set `0` to
+disable the cap deliberately); the default sits comfortably above the 10-minute suspicious threshold so it only
+ever catches a true hang, not normal slowness. A `BLOCKED: reviewer exceeded …s deadline` is the stuck-path
+signal: inspect `*.run.log`, then re-run `code-review`/`finish` (or raise the cap), do not just re-wait.
+
 The underlying `verify-claims` engine writes through an internal temp file and atomically moves it to the final
 findings path only after the verifier exits successfully. In `wf.sh`, that means the final review file
 (`/tmp/wf_*.md`) can remain missing or empty until the full response completes; that alone is not evidence of a
