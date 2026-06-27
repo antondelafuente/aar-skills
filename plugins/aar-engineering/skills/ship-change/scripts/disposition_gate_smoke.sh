@@ -169,5 +169,11 @@ expect BLOCK dup-disposition-entry "$d" "$(find_ 'F1 HIGH')"
 d=$(disp '{"altitude":"umbrella","findings":{"x":1}}')
 expect BLOCK findings-object-no-high "$d" "$(find_ 'F1 MED')"
 
+# 28. HIGH entry with a whitespace-only / non-string description -> BLOCK (semantic matching needs real text).
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","description":"   ","status":"refuted","reason":"x"}]}')
+expect BLOCK high-blank-description "$d" "$(find_ 'F1 HIGH')"
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","description":123,"status":"refuted","reason":"x"}]}')
+expect BLOCK high-nonstring-description "$d" "$(find_ 'F1 HIGH')"
+
 if [ "$fails" -eq 0 ]; then echo "disposition_gate_smoke: ALL PASS"; else echo "disposition_gate_smoke: FAILURES"; fi
 exit "$fails"

@@ -123,8 +123,8 @@ for id in "${high_ids[@]}"; do
 
   # A non-empty description is required on every HIGH entry — the disposition-aware reviewer matches prior
   # findings on it (#139). Checked after the status dispatch so a status defect still reports its own reason.
-  desc=$(printf '%s' "$entry" | jq -r '.description // empty' 2>/dev/null)
-  [ -n "$desc" ] || block "finding $id: a non-empty description is required (semantic matching depends on it)"
+  desc=$(printf '%s' "$entry" | jq -r 'if (.description|type)=="string" then .description else "" end' 2>/dev/null)
+  [ -n "${desc//[[:space:]]/}" ] || block "finding $id: a non-empty (non-whitespace) string description is required (semantic matching depends on it)"
 done
 
 echo "DISPOSITION-GATE: PASS"

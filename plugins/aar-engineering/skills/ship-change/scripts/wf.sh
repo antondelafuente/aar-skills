@@ -443,7 +443,10 @@ fd_load(){  # fd_load <wt> <repo> <pr> <tok> -> echoes cache path (canonical PR 
   local wt=$1 repo=$2 pr=$3 tok=$4 cache body
   cache=$(fd_cache "$wt")
   # `last` selects the most-recent matching comment IN jq — do NOT pipe the multiline body through tail.
-  body=$(gh_author "$tok" -R "$repo" pr view "$pr" --json comments --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null)
+  # Distinguish a GitHub READ FAILURE (must fail closed) from a legitimate "no marker yet" (empty state).
+  local grc=0
+  body=$(gh_author "$tok" -R "$repo" pr view "$pr" --json comments --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null) || grc=$?
+  [ "$grc" = 0 ] || { echo "BLOCKED: could not read PR #$pr comments to load disposition state (GitHub error)" >&2; return 2; }
   if [ -n "$body" ]; then
     printf '%s' "$body" | sed -n '/```json/,/```/p' | sed '1d;$d' > "$cache"
     # A marked comment that exists but yields no valid JSON is CORRUPT state -> fail closed (not empty init).
@@ -617,7 +620,7 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   # it suppresses validly-dispositioned prior findings. No state -> stateless review (today's behavior).
   if { [ "$mode" = --scaffold ] || [ "$mode" = --code ]; } && [ -n "$pr" ]; then
     local fd_repo; fd_repo=$(gh_repo "$wt")
-    local fdrc; fd_active "$fd_repo" "$pr" "$rtok"; fdrc=$?
+    local fdrc; if fd_active "$fd_repo" "$pr" "$rtok"; then fdrc=0; else fdrc=$?; fi   # if-form: set -e safe on rc 1/2
     # A lookup error on the APPROVING merge-gate review must fail closed (don't silently drop to stateless).
     [ "$fdrc" = 2 ] && [ "$approving" = 1 ] && die "disposition-state lookup failed (GitHub error) during the merge-gate review — failing closed; re-run finish"
     if [ "$fdrc" = 0 ]; then
@@ -1217,7 +1220,7 @@ Split into one design PR per doc."
   #     disposition state can never receive a native APPROVE. If this PR has finding-disposition state, the
   #     structural gate over its HIGH entries must pass first (a HIGH left `unresolved` or a malformed
   #     disposition BLOCKS). Fail-CLOSED on a GitHub lookup error; no state -> skipped (stateless behavior).
-  FD=""; fd_active "$REPO" "$PR" "$ATOK"; FDRC=$?
+  FD=""; if fd_active "$REPO" "$PR" "$ATOK"; then FDRC=0; else FDRC=$?; fi   # if-form: set -e safe on rc 1/2
   case "$FDRC" in
     2) die "disposition-state lookup failed (GitHub error) — failing closed; re-run finish" ;;
     0) FD=$(fd_load "$WT" "$REPO" "$PR" "$ATOK") || die "canonical disposition state on PR #$PR is corrupt (invalid JSON) — fix the disposition comment and re-run finish"
@@ -1227,7 +1230,9 @@ Split into one design PR per doc."
        # rev file is present (the model review then backstops deletions).
        PK=code; [ "$DESIGN_MODE" = 1 ] && PK=scaffold
        PRIORREV="${TMPDIR:-/tmp}/wf_${PK}_$(wt_branch "$WT" | tr '/' '_').md"
-       if [ -f "$PRIORREV" ]; then fd_review_high_list "$PRIORREV" | sort -u > "$FDLIST"; else fd_high_list "$FD" > "$FDLIST"; fi
+       # UNION of reviewer-derived HIGH ids (trusted; catches a deleted/downgraded disposition) AND the state's
+       # own HIGH ids (catches a stale `unresolved` HIGH the current reviewer no longer raises). Either blocks.
+       { if [ -f "$PRIORREV" ]; then fd_review_high_list "$PRIORREV"; fi; fd_high_list "$FD"; } | sort -u > "$FDLIST"
        ( cd "$WT" && bash "$(dirname "$0")/disposition_gate.sh" "$FD" "$FDLIST" ) \
          || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
   esac
