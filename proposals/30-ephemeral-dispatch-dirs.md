@@ -126,6 +126,18 @@ The `desired-active`-clear and the kill live together in the closer, so there is
 neither recoverable nor being closed. The executor never commits anything after its session is gone; the
 post-kill truth lives in the closer's control-plane record.
 
+**The full post-audit Close sequence (reconciled with the rest of `run-experiment`'s Close).** Host-close is
+the *very last* substrate action, so it must slot in after — not displace — the other post-audit Close steps
+(self-wake clear, retro/`file-feedback`, the close self-audit). The complete executor-side order is: run the
+independent close audit → file the retro/feedback → run the close self-audit → **then the host-close handoff,
+as the final block:** durably launch the host-close finalizer → clear the self-wake (LAST, only once the
+finalizer is durably in charge) → return. Everything destructive (clear `desired-active`, kill, prune,
+`closed`) is the *detached closer's* job after the executor returns. The closer needs no handshake waiting on
+the executor to clear the wake: the wake-clear and the finalizer launch are both the executor's own last
+in-session steps (wake-clear strictly after the durable launch), and the closer's own work is gated only on its
+own durable start — so there is no cross-process wait, just a fixed in-executor order followed by the closer's
+independent atomic close. (This ordering is what the `run-experiment` Close-clause child must encode.)
+
 **Where the marker lives, and its schema** (Finding-driven). The marker must live **outside the git
 worktree** — in the dispatcher's own control-plane state dir — *not* a file inside the worktree. This is
 load-bearing because the worktree is exactly what the existing `--reap` clean+pushed guard polices: a marker
@@ -339,9 +351,14 @@ substrate supplies the *mechanism* and the field's *values*.
 
 ## Rollout + rollback
 
-- **Sequencing:** this is a two-phase design PR (doc-only). It has a hard upstream dependency: **#54's child-1
-  run-supervision record API must land first**, because the handle lives on that record and the close ordering
-  consumes its `close`/`is-desired-active`. On merge #30 spawns `ready` children: (1) the product contract —
+- **Sequencing & child dispositions (Finding-driven — disposition discipline):** this is a two-phase design PR
+  (doc-only). It has a hard upstream dependency: **#54's child-1 run-supervision record API (#168) must land
+  first**, because the handle lives on that record and the close ordering consumes its `close`/`is-desired-active`.
+  #168 is currently OPEN, so per the disposition vocabulary (`ready` = actionable *now*; `blocked` = decided
+  but gated on a prerequisite) the implementation children that touch #54's record are filed **`blocked` with a
+  `blocked-by: #168` pointer**, and **flip to `ready` only once #168 (and the transitional dispatcher
+  declaration) have landed** — they are NOT filed `ready` while the prerequisite is unbuilt. On merge #30 spawns
+  these children: (1) the product contract —
   the `run-experiment` Close clause (incl. the **audited-checklist-gate vs post-audit-finalizer-gate**
   distinction), the `design-experiment` dispatch-contract line, the `CHECKLIST`-template static `[BLOCK]`
   "host-close readiness" gate (evidence read from #54's record; the actual close is the post-audit finalizer),
