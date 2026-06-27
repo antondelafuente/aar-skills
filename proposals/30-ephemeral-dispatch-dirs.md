@@ -37,9 +37,20 @@ clears its own wake** (Finding-driven ordering; this removes a race the executor
 self-wake is the one thing that would catch a *hung* (not exited) executor — and #54's relaunch supervisor acts
 on process *exit*, not a hang — so the wake must survive until the closer is genuinely killing the host. If the
 executor cleared its own wake (even "last"), the detached closer could race in and kill the session *before*
-that clear-line ran, or the executor could hang after launching the closer with its wake already gone. Both
+that clear-line ran, or the executor could hang after launching the closer with its wake already gone.
+
+**This requires an externally-callable waker-cancel interface — a named prerequisite, not an assumption**
+(Finding-driven). Today the self-wake is *session-scoped and executor-cleared* (it wakes only its creating
+session, and the executor clears it from inside), so a *controller-side* closer cannot cancel it with the
+current API. So "the closer clears the wake" is **blocked-by a prerequisite that adds an externally-callable
+waker-cancel** (cancel-by-run-id / by-waker-id from outside the session) — a small lifecycle-API extension that
+sits naturally alongside #54's controller-side supervision (which already externalizes relaunch state off the
+session). Until that exists, the mechanism is N.A. for the Claude substrate (the gate's `dispatch_host=none`
+transitional declaration covers exactly this), so nothing strands: the design **names the dependency** rather
+than assuming the API. With it,
 are eliminated by giving the wake-clear to the closer: the **executor's only host-close act is to durably
-launch the closer and return** (wake still armed); the **closer then clears the self-wake, clears
+launch the closer and return** (wake still armed); the **closer then clears the self-wake (via the
+externally-callable cancel), clears
 `desired-active`, and kills the session as one atomic controller-side step**, outside the executor's process.
 There is no cross-process handshake and no race, because only one process (the closer) ever clears the wake or
 kills the session, and it does both together after it is durably in charge. The marker is deliberately scoped
@@ -192,18 +203,24 @@ reason, and `--list` plus any TTL sweep
 state**, never silently. `failed`/stale-`closing` hosts are *not* auto-reaped (they're the ones a human must
 look at); the marker turns a stuck close into a flagged item rather than an invisible orphaned session.
 
-**Host-close is an idempotent, externally-supervised state — not a single fragile process** (Finding-driven).
-The closer is one process, so if it *itself* dies mid-step (after clearing wake/`desired-active`, before the
-kill or the `closed` write), its own `deadline` can't fire — a dead process writes nothing. The robustness
-property that closes this: the **`closing` marker (with its `deadline` + closer `pid`) is the supervised state,
-and an *external* check — the same model-free sweep that already lists/reaps, and/or #54's supervisor reading
-`closing` — detects a `closing` whose `deadline` has passed or whose `pid` is dead, independent of the closer
-process.** On detection it **re-runs the close idempotently** (host-close is safe to repeat: clearing an
-already-clear wake, killing an already-dead session, and re-asserting `closed` are all no-ops) or marks
-`failed` for an operator. So no single process death strands a host invisibly: the durable `closing` state plus
-an external detector — not the closer's own liveness — is what guarantees a host reaches `closed` or a flagged
-`failed`. (This is the controller-side, model-free supervision pattern #54 already establishes; #30's host-close
-plugs into it rather than inventing a second watcher.)
+**Host-close is an idempotent, externally-supervised state — backed by a REQUIRED standing detector**
+(Finding-driven). The closer is one process, so if it *itself* dies mid-step (after clearing
+wake/`desired-active`, before the kill or the `closed` write), its own `deadline` can't fire — a dead process
+writes nothing. The robustness property that closes this: the **`closing` marker (with its `deadline` + closer
+`pid`) is the supervised state, and a *standing external detector* finds a `closing` whose `deadline` has
+passed or whose `pid` is dead, independent of the closer process**, then **re-runs the close idempotently**
+(host-close is safe to repeat: clearing an already-clear wake, killing an already-dead session, and
+re-asserting `closed` are all no-ops) or marks `failed` for an operator.
+
+Critically, that detector must be a **required, owned, *standing* component — not today's manual `--list`/`--reap`**
+(which an operator runs by hand, so a dead closer would strand a host until someone happened to look). So the
+instance child specifies it as an owned component: a **standing model-free poll** (a small always-on
+controller-side sweep, the same class as #54's relaunch supervisor and the gpu-job idle-teardown watchdog —
+*not* an LLM) with a defined polling trigger, the `closing`-marker record as its source, and idempotent
+retry / `failed` behavior with tests. It is an **ordering prerequisite**: the closer is allowed to clear
+wake/`desired-active` only once this standing detector exists, so a closer death can never strand an
+unsupervised host. (This plugs into #54's controller-side model-free supervision rather than inventing a second
+watcher — but it is named and owned, not assumed.)
 
 To make the host-state marker actually *load-bearing* — the signal that a host is safe to remove — the
 dispatcher's destructive and listing paths must consult it, not just the existing clean+pushed guard.
@@ -377,7 +394,18 @@ substrate supplies the *mechanism* and the field's *values*.
   extends #54's helper API + tests to read/write them, and requires instance dispatchers to go through that
   helper** (not re-derive the record shape). The gate-evidence wording references #54's
   `is-desired-active`/`close` rather than inventing a second record. (A real ordering + DRY constraint surfaced
-  in design review — recorded so the `ready` children carry it.)
+  in design review — recorded so the children carry it.)
+- **Two further named prerequisites the closer needs (surfaced in design review — NOT assumed):**
+  - **An externally-callable waker-cancel API.** The self-wake is today session-scoped + executor-cleared, so a
+    *controller-side* closer can't cancel it. The closer-clears-the-wake design is **blocked-by** a small
+    lifecycle-API extension adding cancel-by-run-id/by-waker-id from outside the session (sits alongside #54's
+    controller-side supervision). Until it lands, the Claude substrate declares `dispatch_host=none`
+    (transitional) and the gate is N.A. — nothing strands.
+  - **A standing model-free stale-`closing` detector.** Dead-closer recovery requires an always-on
+    controller-side poll (same class as #54's supervisor / the gpu-job idle watchdog — not an LLM, and **not**
+    today's manual `--list`/`--reap`), with a defined trigger, the `closing` record as source, and idempotent
+    retry/`failed` behavior + tests. The closer may clear wake/`desired-active` **only once this detector
+    exists**. Filed `blocked` until its prerequisite (the #54-class supervisor cut, #170) is in place.
 - **Instance (this box), where the mechanism lives:** `dispatch-claude.sh` gains the non-destructive
   `--host-close` verb (clear `desired-active` via #54's API → write `closing` marker → spawn a
   *deadline-bounded* detached closer that kills the session, writes `closed`, prunes — or writes `failed` on
