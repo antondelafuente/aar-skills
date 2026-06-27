@@ -60,5 +60,11 @@ n=$(fd_high_list "$cache" | wc -l | tr -d ' ')
 [ "$n" = 2 ] && ok high-list-count || no "high-list-count ($n)"
 fd_high_list "$cache" | grep -qE '^[0-9a-f]{12} HIGH$' && ok high-list-format || no high-list-format
 
+# fd_review_high_list: reviewer-derived trusted list (HIGH only), ids matching fd_seed so the gate aligns.
+rl=$(fd_review_high_list "$TMP/rev.md")
+[ "$(printf '%s\n' "$rl" | grep -c ' HIGH$')" = 1 ] && ok review-high-count || no "review-high-count ($rl)"
+exp_id=$(fd_fid "empty input crashes merge_records")
+printf '%s\n' "$rl" | grep -qx "$exp_id HIGH" && ok review-high-matches-seed-id || no "review-high-matches-seed-id (want $exp_id)"
+
 if [ "$fails" -eq 0 ]; then echo "fd_state_smoke: ALL PASS"; else echo "fd_state_smoke: FAILURES"; fi
 exit "$fails"

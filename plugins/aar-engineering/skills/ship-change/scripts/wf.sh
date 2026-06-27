@@ -418,6 +418,20 @@ fd_seed(){  # fd_seed <cache> <rev>
   done < "$rev"
 }
 fd_high_list(){ jq -r '.findings[]|select(.severity=="HIGH")|"\(.id) HIGH"' "$1" 2>/dev/null; }
+# TRUSTED findings list (reviewer-derived, not author-editable) from a review output file: "<fid> HIGH" per
+# HIGH finding, ids computed the same way fd_seed does. Used as the gate's findings list so deleting/downgrading
+# a prior disposition entry can't bypass the deterministic backstop (the deleted id has no entry -> BLOCK).
+fd_review_high_list(){  # fd_review_high_list <rev>
+  local sev="" issue
+  while IFS= read -r line; do
+    case "$line" in
+      FINDING\ *) sev=$(printf '%s' "$line" | sed -nE 's/^FINDING [0-9]+: (HIGH|MED|LOW).*/\1/p') ;;
+      *issue:*) [ "$sev" = HIGH ] || { sev=""; continue; }
+        issue=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*issue:[[:space:]]*//')
+        [ -n "$issue" ] && printf '%s HIGH\n' "$(fd_fid "$issue")"; sev="" ;;
+    esac
+  done < "$1"
+}
 # Tri-state so a GitHub error never reads as "no state" (fail-open): 0 = active, 1 = no state, 2 = lookup error.
 fd_active(){  # fd_active <repo> <pr> <tok>
   local out rc
@@ -430,8 +444,13 @@ fd_load(){  # fd_load <wt> <repo> <pr> <tok> -> echoes cache path (canonical PR 
   cache=$(fd_cache "$wt")
   # `last` selects the most-recent matching comment IN jq — do NOT pipe the multiline body through tail.
   body=$(gh_author "$tok" -R "$repo" pr view "$pr" --json comments --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null)
-  [ -n "$body" ] && printf '%s' "$body" | sed -n '/```json/,/```/p' | sed '1d;$d' > "$cache"
-  [ -s "$cache" ] || printf '{"altitude":"implementation","findings":[]}\n' > "$cache"
+  if [ -n "$body" ]; then
+    printf '%s' "$body" | sed -n '/```json/,/```/p' | sed '1d;$d' > "$cache"
+    # A marked comment that exists but yields no valid JSON is CORRUPT state -> fail closed (not empty init).
+    jq -e . "$cache" >/dev/null 2>&1 || { echo "BLOCKED: canonical disposition comment on PR #$pr exists but has no valid JSON" >&2; return 1; }
+  else
+    printf '{"altitude":"implementation","findings":[]}\n' > "$cache"   # no marker -> legitimately empty state
+  fi
   printf '%s\n' "$cache"
 }
 fd_save(){  # fd_save <wt> <repo> <pr> <tok> — post the cache as a new canonical comment; RETURNS the gh rc.
@@ -599,9 +618,13 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   if { [ "$mode" = --scaffold ] || [ "$mode" = --code ]; } && [ -n "$pr" ]; then
     local fd_repo; fd_repo=$(gh_repo "$wt")
     if fd_active "$fd_repo" "$pr" "$rtok"; then
-      local fd_file; fd_file=$(fd_load "$wt" "$fd_repo" "$pr" "$rtok")
-      audit_env+=("DISPOSITION_FILE=$fd_file")
-      note "disposition-aware: $(jq '[.findings[]|select(.status!="unresolved")]|length' "$fd_file" 2>/dev/null)/$(jq '.findings|length' "$fd_file" 2>/dev/null) findings dispositioned"
+      local fd_file
+      if fd_file=$(fd_load "$wt" "$fd_repo" "$pr" "$rtok"); then
+        audit_env+=("DISPOSITION_FILE=$fd_file")
+        note "disposition-aware: $(jq '[.findings[]|select(.status!="unresolved")]|length' "$fd_file" 2>/dev/null)/$(jq '.findings|length' "$fd_file" 2>/dev/null) findings dispositioned"
+      else
+        note "WARN: disposition state present but corrupt JSON — this review runs stateless (finish will fail closed)"
+      fi
     fi
   fi
   env "${audit_env[@]}" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
@@ -959,8 +982,9 @@ fdispo)         # wf.sh fdispo <worktree> <author> <seed|show|edit|save> — man
   CACHE=$(fd_load "$WT" "$REPO" "$PR" "$ATOK")
   case "$ACTION" in
     seed)
-      REVF="${TMPDIR:-/tmp}/wf_code_$(wt_branch "$WT" | tr '/' '_').md"
-      [ -f "$REVF" ] || die "no review output to seed from ($REVF) — run 'wf.sh code-review $WT $AUTHOR' first"
+      BRT=$(wt_branch "$WT" | tr '/' '_')
+      REVF=$(ls -t "${TMPDIR:-/tmp}/wf_code_${BRT}.md" "${TMPDIR:-/tmp}/wf_scaffold_${BRT}.md" 2>/dev/null | head -1)
+      [ -n "$REVF" ] && [ -f "$REVF" ] || die "no review output to seed from — run 'wf.sh code-review $WT $AUTHOR' (or design-review) first"
       fd_seed "$CACHE" "$REVF"
       fd_save "$WT" "$REPO" "$PR" "$ATOK" || die "failed to post the canonical disposition comment to PR #$PR (GitHub error) — state NOT updated"
       note "seeded $(jq '.findings|length' "$CACHE") finding(s) ($(jq '[.findings[]|select(.status=="unresolved")]|length' "$CACHE") unresolved). Edit $CACHE (set status fixed|refuted|deferred_to_child_design|deferred_out_of_scope + evidence/commit/child_issue/followup_issue), then: wf.sh fdispo $WT $AUTHOR save" ;;
@@ -1188,10 +1212,15 @@ Split into one design PR per doc."
   FD=""; fd_active "$REPO" "$PR" "$ATOK"; FDRC=$?
   case "$FDRC" in
     2) die "disposition-state lookup failed (GitHub error) — failing closed; re-run finish" ;;
-    0) FD=$(fd_load "$WT" "$REPO" "$PR" "$ATOK")
-       FDLIST="${TMPDIR:-/tmp}/wf_fd_high_${BR//\//_}.txt"; fd_high_list "$FD" > "$FDLIST"
+    0) FD=$(fd_load "$WT" "$REPO" "$PR" "$ATOK") || die "canonical disposition state on PR #$PR is corrupt (invalid JSON) — fix the disposition comment and re-run finish"
+       FDLIST="${TMPDIR:-/tmp}/wf_fd_high_${BR//\//_}.txt"
+       # TRUSTED findings list: prefer the latest code-review output (reviewer-derived, not author-editable) so a
+       # deleted/downgraded disposition can't bypass the gate; fall back to the state's own HIGH ids only when no
+       # rev file is present (the model review then backstops deletions).
+       PRIORREV="${TMPDIR:-/tmp}/wf_code_$(wt_branch "$WT" | tr '/' '_').md"
+       if [ -f "$PRIORREV" ]; then fd_review_high_list "$PRIORREV" | sort -u > "$FDLIST"; else fd_high_list "$FD" > "$FDLIST"; fi
        ( cd "$WT" && bash "$(dirname "$0")/disposition_gate.sh" "$FD" "$FDLIST" ) \
-         || die "disposition structural gate BLOCKED — a HIGH finding is unresolved or malformed in the disposition state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
+         || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
   esac
   # 2. the authoritative merge gate, fail-closed, NO HIGH. approving=1 -> clean review posts a native APPROVE.
   #    --design: gate on --scaffold over the design DOC (the doc IS the deliverable). else: --code over the diff.
