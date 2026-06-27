@@ -434,6 +434,34 @@ fd_review_high_list(){  # fd_review_high_list <rev>
     esac
   done < "$1"
 }
+# DURABLE trusted findings list (#143): recover the reviewer-derived HIGH ids from the GitHub review record the
+# reviewer bot posts — NOT a transient/author-writable /tmp file. The review body carries a `<!-- WF-REVIEW
+# pk=.. -->` marker (run_review) and embeds the raw FINDING block; the fresh-eyes sweep carries a DISTINCT
+# marker (fresh_sweep) so it is never trusted. Tamper-resistance is anchored on the reviewer-bot LOGIN (the
+# author cannot author another identity's review/comment). echoes "<id> HIGH" lines; returns 1 = no marked
+# reviewer review found, 2 = no reviewer login / GitHub API error (caller fails closed on both).
+FD_REVIEW_MARKER='<!-- WF-REVIEW'
+fd_review_high_github(){  # fd_review_high_github <repo> <pr> <pk> <read-token> <reviewer-login>
+  local repo=$1 pr=$2 pk=$3 tok=$4 login=$5
+  [ -n "$login" ] || return 2   # no reviewer identity to anchor trust on
+  local marker="$FD_REVIEW_MARKER pk=$pk "
+  local reviews comments body
+  # per_page=100 (no --paginate): a PR with >100 reviewer reviews/comments is implausible, and --paginate over
+  # array endpoints needs --slurp gymnastics. Both surfaces run_review posts to: native reviews + issue comments.
+  reviews=$(GH_TOKEN="$tok" gh api "repos/$repo/pulls/$pr/reviews?per_page=100" 2>/dev/null) || return 2
+  comments=$(GH_TOKEN="$tok" gh api "repos/$repo/issues/$pr/comments?per_page=100" 2>/dev/null) || return 2
+  # Keep only items authored by the reviewer LOGIN whose body carries the pk marker; pick the most-recent.
+  body=$(jq -rn --argjson R "$reviews" --argjson C "$comments" --arg login "$login" --arg marker "$marker" '
+    ([ $R[] | {t: (.submitted_at // .created_at // ""), login: .user.login, body} ]
+     + [ $C[] | {t: (.created_at // ""), login: .user.login, body} ])
+    | map(select(.login == $login and .body != null and (.body | contains($marker))))
+    | sort_by(.t) | last | .body // empty') 2>/dev/null || return 2
+  [ -n "$body" ] || return 1   # no marked reviewer review recoverable
+  local tmp; tmp=$(mktemp 2>/dev/null) || tmp="${TMPDIR:-/tmp}/wf_ghrev_${pk}_$$.md"
+  printf '%s\n' "$body" > "$tmp"
+  fd_review_high_list "$tmp"
+  rm -f "$tmp" 2>/dev/null || true
+}
 # Tri-state so a GitHub error never reads as "no state" (fail-open): 0 = active, 1 = no state, 2 = lookup error.
 fd_active(){  # fd_active <repo> <pr> <tok>
   local out rc
@@ -499,7 +527,9 @@ fresh_sweep(){  # fresh_sweep <wt> <author> <mode> <target> <pr>  -> echoes the 
       note "fresh-eyes sweep: no reviewer engineer identity — skipping the (non-gating) PR comment"
     else
       local body
-      body=$( { printf '## Fresh-eyes sweep — un-anchored stateless read (CANDIDATE findings; NON-gating; do NOT `fdispo seed` these)\n\nThese are an amnesiac full re-read to catch a pre-existing hole. They are NOT a verdict and NOT auto-seeded; the disposition-aware merge review semantically adjudicates them, and only its residual findings are dispositioned.\n\n'; markdown_code_details "Sweep candidates ($h HIGH/$m MED/$l LOW)" "$(cat "$rev")"; } )
+      # #143: a DISTINCT marker (NOT WF-REVIEW) so the disposition gate's GitHub recovery never trusts the
+      # candidate-only sweep — even though it is posted by the same reviewer bot and embeds FINDING lines.
+      body=$( { printf '<!-- WF-FRESH-SWEEP -->\n## Fresh-eyes sweep — un-anchored stateless read (CANDIDATE findings; NON-gating; do NOT `fdispo seed` these)\n\nThese are an amnesiac full re-read to catch a pre-existing hole. They are NOT a verdict and NOT auto-seeded; the disposition-aware merge review semantically adjudicates them, and only its residual findings are dispositioned.\n\n'; markdown_code_details "Sweep candidates ($h HIGH/$m MED/$l LOW)" "$(cat "$rev")"; } )
       printf '%s' "$body" | gh_author "$rtok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
         || note "WARN: could not post the fresh-eyes sweep comment (non-fatal)"
     fi
@@ -694,6 +724,11 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
   local repo body review_text; repo=$(gh_repo "$wt"); review_text=$(cat "$rev")
   body=$( { printf '## %s\n\n%s\n\n' "$heading" "$(review_summary_text "$REVIEW_HIGH" "$review_med" "$review_low" "$approving")"; markdown_code_details "Full review details" "$review_text"; } )
+  # #143: stamp gate-relevant reviewer reviews with a hidden, machine-readable marker so the disposition gate
+  # can recover this trusted findings list from GitHub (durable) instead of /tmp. pk = the disposition gate's
+  # PRIORREV key (code|scaffold); the fresh-eyes sweep carries a DISTINCT marker so it is never trusted.
+  local pk=""; case "$mode" in --code) pk=code;; --scaffold) pk=scaffold;; esac
+  [ -n "$pk" ] && body=$(printf '%s pk=%s sha=%s -->\n%s' "$FD_REVIEW_MARKER" "$pk" "$(git -C "$wt" rev-parse HEAD)" "$body")
   if [ -z "$rtok" ] && ambient_identity_allowed; then
     body=$( { ambient_override_notice "$mode review for PR #$pr"; printf '\n\n%s' "$body"; } )
   fi
@@ -1288,17 +1323,25 @@ Split into one design PR per doc."
          fresh_sweep "$WT" "$AUTHOR" --code "$FRESHDIFF" "$PR" >/dev/null || die "fresh-eyes sweep (mandatory #140 backstop) failed — re-run finish (only its PR comment is best-effort)"
        fi
        FDLIST="${TMPDIR:-/tmp}/wf_fd_high_${BR//\//_}.txt"
-       # TRUSTED findings list: prefer the latest code-review output (reviewer-derived, not author-editable) so a
-       # deleted/downgraded disposition can't bypass the gate; fall back to the state's own HIGH ids only when no
-       # rev file is present (the model review then backstops deletions).
+       # TRUSTED findings list (#143): recover the reviewer-derived HIGH ids from the DURABLE GitHub review
+       # record (posted under the reviewer-bot identity), NOT a transient/author-writable /tmp file. A
+       # deleted/downgraded disposition still can't bypass the gate (the deleted id has no entry -> BLOCK), and
+       # the list now survives reboot / fresh worktree / a different agent. FAIL CLOSED if no reviewer identity
+       # or no marked reviewer review is recoverable — never fall back to /tmp or to author-only state.
        PK=code; [ "$DESIGN_MODE" = 1 ] && PK=scaffold
-       PRIORREV="${TMPDIR:-/tmp}/wf_${PK}_$(wt_branch "$WT" | tr '/' '_').md"
-       # FAIL CLOSED if no trusted reviewer-derived list is recoverable — never fall back to author-only state
-       # (that would let a deleted/downgraded disposition bypass the deterministic backstop).
-       [ -f "$PRIORREV" ] || die "disposition-aware finish needs a trusted reviewer-derived findings list, but no recent $PK review output is present — run 'wf.sh code-review $WT $AUTHOR' (or design-review) first, then finish."
+       # Reviewer-bot login = the opposite family's canonical git-author NAME (== the App's PR comment login).
+       RLOGIN=$(git_author_name "$(engineer_git_author "$(opposite_family "$AUTHOR")" 0)")
+       [ -n "$RLOGIN" ] || die "disposition-aware finish needs the reviewer identity to anchor the trusted findings list, but WF_ENGINEER_GIT_AUTHOR_$(family_suffix "$(opposite_family "$AUTHOR")") is unset — configure the reviewer engineer identity (wf.sh doctor $AUTHOR) and re-run finish."
+       # ATOK (author token) has read access to the PR's reviews/comments; the trust is in the reviewer LOGIN
+       # filter, not in which token reads. Tri-state: 0 ok, 1 no marked reviewer review, 2 no login / API error.
+       if REVHIGH=$(fd_review_high_github "$REPO" "$PR" "$PK" "$ATOK" "$RLOGIN"); then :; else
+         case "$?" in
+           1) die "disposition-aware finish found no marked reviewer $PK review on PR #$PR to anchor the trusted findings list — run 'wf.sh code-review $WT $AUTHOR' (or design-review) to post one, then finish. (A disposition PR last reviewed before #143 landed has an unmarked review — one fresh review fixes it.)" ;;
+           *) die "disposition-aware finish could not recover the trusted reviewer findings list from the GitHub review record (API error or no reviewer identity) — failing closed; re-run finish." ;;
+         esac
+       fi
        # Detect a TRUE duplicate WITHIN the reviewer-derived list (a hashed-id collision = real ambiguity)
        # BEFORE any dedup, so `sort -u` below only collapses the legitimate reviewer∩state overlap.
-       REVHIGH=$(fd_review_high_list "$PRIORREV")
        # awk 'NF' (not grep -v '^$') so an EMPTY list — the expected convergence case — returns 0, not 1-under-pipefail.
        DUPR=$(printf '%s\n' "$REVHIGH" | awk 'NF' | sort | uniq -d)
        [ -z "$DUPR" ] || die "ambiguous reviewer findings — colliding id(s): $(printf '%s ' $DUPR) — cannot disposition unambiguously"
