@@ -66,40 +66,64 @@ CHECKLIST evidence is therefore "`closing` marker present + closer launched," wh
 self-audit rule (verify state by inspection, not memory) without asking the executor to inspect a process it
 just terminated.
 
-To make the terminal marker actually *load-bearing* — the signal that a host is safe to remove — the
+**Where the marker lives, and its schema** (Finding-driven). The marker must live **outside the git
+worktree** — in the dispatcher's own control-plane state dir, keyed by slug (alongside where `--list` already
+enumerates dispatches), *not* a file inside the worktree. This is load-bearing because the worktree is exactly
+what the existing `--reap` clean+pushed guard polices: a marker written *inside* it would dirty the tree (or
+sit unpushed) and the guard would then refuse the very reap the marker is meant to authorize. A control-plane
+marker keyed by slug is read/written by the dispatcher and the detached closer without ever touching the
+worktree's git state, so it composes with the clean+pushed guard instead of fighting it. The marker schema is
+small but explicit: `host_state` (`closing` | `closed` | `failed`), a start `timestamp`, a `deadline`, and the
+closer's `pid` + `log` path — enough for an external reader to tell a still-running close from a stuck one.
+
+**The closer is a bounded background wait — give it a deadline and a failure state** (Finding-driven; AGENTS.md
+"Bounded background waits"). A detached closer with no deadline is exactly the unbounded-park footgun that rule
+exists to forbid, and it's worse here because the executor has *already cleared its self-wake* by the time the
+closer runs — so nothing the executor owns is watching it. So the closer carries a `deadline`; if it exceeds it
+(the kill/prune hung), it writes `host_state=failed` with the reason, and `--list` plus any TTL sweep
+**surface a stale `closing` (deadline passed, still not `closed`) and a `failed` as a visible operator-actionable
+state**, never silently. `failed`/stale-`closing` hosts are *not* auto-reaped (they're the ones a human must
+look at); the marker turns a stuck close into a flagged item rather than an invisible orphaned session.
+
+To make the host-state marker actually *load-bearing* — the signal that a host is safe to remove — the
 dispatcher's destructive and listing paths must consult it, not just the existing clean+pushed guard.
-`--host-close` makes the marker the single source of "this host is terminal"; in turn `--list` shows
-**terminal vs running** (so an operator sees at a glance what is reap-eligible), `--reap-all` and any TTL sweep
-target **only terminal-marked** hosts (a still-running executor's worktree is never swept), and `--reap <exp>`
-on a host with no terminal marker **warns / refuses unless `--force`** (so an operator can't accidentally reap
-a live run, while keeping `--force` as the rescue hatch). The clean+pushed guard stays as the *destructive*
-safety floor; the marker is the *liveness* gate layered above it.
+`--host-close` makes the marker the single source of host liveness; in turn `--list` shows **`closed` vs
+`closing` vs `failed` vs running** (so an operator sees at a glance what is reap-eligible and what is stuck),
+`--reap-all` and any TTL sweep target **only `closed`-marked** hosts (a running executor's worktree, or a
+`closing`/`failed` one, is never swept), and `--reap <exp>` on a host with no `closed` marker **warns / refuses
+unless `--force`** (so an operator can't accidentally reap a live or stuck run, while keeping `--force` as the
+rescue hatch). The clean+pushed guard stays as the *destructive* safety floor; the marker is the *liveness*
+gate layered above it.
 
 For this to work for a *zero-context* executor — which reads ONLY the brief + scaffold — the host-close
-handle must be **surfaced on a discoverable launch-metadata surface, not buried instance-side and not passed
-as tmux seed text** (seed text isn't part of the brief+scaffold a zero-context executor is contracted to read,
-and relying on it reintroduces exactly the implicit-context fragility dispatch exists to kill). The handle
-names: the exact command to run at Close, the host-state marker's path and schema, the evidence that proves
-the close was initiated, and explicit **N.A. semantics** for substrates with no persistent dispatch host (a
-Codex thread/watcher that simply exits).
+handle must be **surfaced in a file the executor already reads (`CHECKLIST.md`), not buried instance-side and
+not passed as tmux seed text** (seed text isn't part of the brief+scaffold a zero-context executor is
+contracted to read, and relying on it reintroduces exactly the implicit-context fragility dispatch exists to
+kill). The handle names: the exact command to run at Close, the host-state marker's path and schema, the
+evidence that proves the close was initiated, and explicit **N.A. semantics** for substrates with no
+persistent dispatch host (a Codex thread/watcher that simply exits).
 
-**Who writes the handle, and when** (Finding-driven, load-bearing): the handle is **launch metadata written
-by the dispatch step at spawn time** — it is a property of *how this executor was launched*, known only to the
-dispatcher, not part of the science the designer locked. Crucially it must **not mutate the locked `START.md`
-after clearance**: the `DESIGN.md` + `START.md` + `CHECKLIST.md` seam is frozen at handoff, and a
-post-clearance edit to it would violate the locked-brief contract and reopen the very gap the freeze closes.
-So the dispatcher writes the handle to a **separate, committed launch-metadata surface in the worktree**
-(e.g. a `DISPATCH.md` / launch-metadata file the executor reads alongside the brief), authored once by the
-dispatch step before the executor's first turn — never the executor editing its own brief, never ephemeral
-seed text. The `CHECKLIST` template references that surface as the place the host-close handle lives. The
-*contract* (an obligation + a discoverable, dispatcher-authored handle) lives in the product; the *values* of
-the handle (the concrete `--host-close` command, the marker path) are filled in by the instance/substrate. And because the CHECKLIST template is the scaffold's canonical forcing function for Close
+**Who writes the handle, and where — `CHECKLIST.md`, not a 4th artifact** (Finding-driven, load-bearing): the
+handle is launch metadata — a property of *how this executor was launched*, known only to the dispatcher, not
+part of the science the designer locked. It must **not mutate the locked `START.md`/`DESIGN.md` after
+clearance** (the science seam is frozen at handoff; a post-clearance edit would violate the locked-brief
+contract). But it also must not become a *new fourth required input*: the canonical dispatch read-contract is
+`dispatch(DESIGN.md, START.md, CHECKLIST.md)`, and a faithful zero-context executor reads exactly those three —
+so a separate `DISPATCH.md` would be silently unread. The resolution reuses the existing precedent:
+**`CHECKLIST.md` is already the runtime-launch surface** — the self-wake contract already has the dispatch/arm
+step record the waker/backstop id *there* — and it is already a first-class member of the read-contract. So
+the `dispatch_host_close` handle is **a field the dispatch step fills into `CHECKLIST.md` at spawn**, exactly
+like the waker id: the *designer*'s `CHECKLIST.md` ships the `[BLOCK]` gate and a blank handle slot; the
+*dispatcher* fills the slot's value (the concrete `--host-close` command + marker path) at launch, which is a
+runtime-launch annotation of `CHECKLIST.md`, not a mutation of the frozen science brief. No new artifact, no
+new read obligation — the executor already reads `CHECKLIST.md`. The *contract* (an obligation + a discoverable
+handle slot in `CHECKLIST.md`) lives in the product; the *values* are filled by the dispatcher/substrate. And because the CHECKLIST template is the scaffold's canonical forcing function for Close
 gates, the contract is anchored there: a universal `[BLOCK]` checklist gate requiring terminal
 host-marker / host-closed evidence (or an explicit N.A. for no-persistent-host substrates), so the host-close
 can't be silently skipped the way buried prose gets skipped.
 
 **The gate is capability-gated, never substrate-blind.** The `[BLOCK]` checklist gate must key off *whether a
-`dispatch_host_close` handle is present on the launch-metadata surface*, not fire unconditionally. It blocks
+`dispatch_host_close` handle slot in `CHECKLIST.md` is filled*, not fire unconditionally. It blocks
 **only when a handle is wired** (then the executor must run it and show the marker evidence); it resolves
 **N.A.** when no handle is present — which covers both the permanent no-persistent-host case (a Codex
 thread/watcher that just exits) **and** the transitional window where a substrate with a persistent host has
@@ -107,9 +131,9 @@ not yet shipped its handle. This is the ordering safety property: the product ga
 instance handle, so landing the product contract first can never strand a fresh executor with an obligation it
 has no command to satisfy — absent a handle, the gate is N.A., and the day the instance wires `--host-close`
 the same gate flips to active for that substrate with no further product change. (Concretely: a Claude
-executor between product-land and instance-land sees no handle in its launch metadata → N.A.; once
-`dispatch-claude.sh --host-close` ships and the dispatch step writes the handle into the launch-metadata file,
-the gate becomes a real `[BLOCK]`.)
+executor between product-land and instance-land sees an unfilled handle slot in its `CHECKLIST.md` → N.A.;
+once `dispatch-claude.sh --host-close` ships and the dispatch step fills the handle slot at launch, the gate
+becomes a real `[BLOCK]`.)
 
 The load-bearing decision is **"auto-mark reapable, not auto-`rm -rf` on completion."** A finished executor is
 not a *reviewed* executor: the worktree may hold the failed logs, partial artifacts, or exact debug state a
@@ -124,10 +148,10 @@ moment the executor stopped.
 The split between the **product** and the **instance** is the second load-bearing decision. The product repo
 (`automated-researcher`) gets the **substrate-neutral dispatch-host lifecycle contract** — a clause in
 `run-experiment`'s Close step, a matching line in the `design-experiment` dispatch contract, and a `[BLOCK]`
-gate in the `CHECKLIST` template that references the **dispatcher-authored launch-metadata surface** as the
-home of the `dispatch_host_close` handle (not a post-clearance edit of the locked `START.md`) — stating that
-the dispatch host (the session/launch dir the executor ran in), like the GPU and the self-wake, must be
-brought to a terminal state at Close: the executor runs its launch-metadata host-close command, which writes a
+gate in the `CHECKLIST` template carrying a **dispatcher-filled `dispatch_host_close` handle slot** (the same
+runtime-launch annotation the waker id already uses; not a post-clearance edit of the locked `START.md`) —
+stating that the dispatch host (the session/launch dir the executor ran in), like the GPU and the self-wake,
+must be brought to a terminal state at Close: the executor runs its `CHECKLIST.md` host-close command, which writes a
 host-state marker and hands off the idle-session kill to a detached closer; *deletion* is a separate
 operator/TTL step that
 never fires on unreviewed work; and durable results live in the committed/pushed record, never only in the
@@ -160,7 +184,7 @@ worktree, so the gate resolves N.A.) and must satisfy the same contract its own 
 - **Product (`automated-researcher`), docs at the implementation stage — but a runtime-protocol behavior
   change:** a Close-step clause in `run-experiment`'s SKILL.md, a matching line in the `design-experiment`
   dispatch contract, and a `[BLOCK]` host-close gate in the `CHECKLIST` template that points at the
-  dispatcher-authored launch-metadata surface for the `dispatch_host_close` handle. Because this changes the
+  dispatcher-filled `dispatch_host_close` handle slot in `CHECKLIST.md`. Because this changes the
   `experiment-lifecycle` runtime protocol (a new
   Close obligation + a new required checklist gate), the product child **bumps
   `plugins/experiment-lifecycle/.claude-plugin/plugin.json` and adds a `CHANGELOG.md` entry** per the AGENTS.md
@@ -168,27 +192,34 @@ worktree, so the gate resolves N.A.) and must satisfy the same contract its own 
   install/discovery surface is unchanged beyond the manifest version. This design PR itself is
   `proposals/*.md` only.
 - **Instance (this box), where the mechanism lives:** `dispatch-claude.sh` gains the non-destructive
-  `--host-close` verb (write `closing` marker → spawn detached closer that kills the session, writes `closed`, and prunes, reusing the
-  existing clean+pushed guards) **and marker-aware listing/deletion** — `--list` distinguishes terminal vs
-  running, `--reap-all`/TTL target only terminal-marked hosts, and `--reap <exp>` warns/refuses without a
-  marker unless `--force`. `new-claude.sh` is unaffected beyond what the executor calls at Close.
+  `--host-close` verb (write `closing` marker → spawn a *deadline-bounded* detached closer that kills the
+  session, writes `closed`, prunes — or writes `failed` on timeout — reusing the existing clean+pushed guards),
+  the **host-state marker stored in the dispatcher control-plane state dir keyed by slug, outside the
+  worktree** (so it never dirties the tree the reap guard polices), **and marker-aware listing/deletion** —
+  `--list` distinguishes `closed`/`closing`/`failed`/running, `--reap-all`/TTL target only `closed` hosts, and
+  `--reap <exp>` warns/refuses without a `closed` marker unless `--force`. `new-claude.sh` is unaffected beyond
+  what the executor calls at Close.
   `run-experiment`'s executor gains a final host-close action. These land as the `ready` children, not in this
   design PR.
 - **Risk profile:** low. The destructive operation (`--reap`/`rm -rf`) is unchanged and stays behind its
   existing guards and an explicit operator/TTL trigger; the new automatic behavior is only *killing an idle
-  session* and *writing a status file*, both reversible and non-destructive (the worktree and its pushed
-  branch survive). The persistent `~/claude-N` fleet workers are explicitly out of scope — they are
-  long-lived and never reaped by this path.
+  session* and *writing a control-plane status file outside the worktree*, both reversible and non-destructive
+  (the worktree and its pushed branch survive). A stuck closer fails *visibly* (`failed`/stale-`closing`
+  surfaced by `--list`), not silently, so the worst case is a flagged orphan session a human reaps by hand —
+  never lost data and never an auto-deleted unreviewed run. The persistent `~/claude-N` fleet workers are
+  explicitly out of scope — they are long-lived and never reaped by this path.
 
 ## Rollout + rollback
 
 - **Sequencing:** this is a two-phase design PR (doc-only). On merge it spawns `ready` children: (1) the
   product contract — the `run-experiment` Close clause, the `design-experiment` dispatch-contract line, the
-  `CHECKLIST`-template `[BLOCK]` gate referencing the launch-metadata `dispatch_host_close` handle, **plus the
+  `CHECKLIST`-template `[BLOCK]` gate + `dispatch_host_close` handle slot, **plus the
   experiment-lifecycle version bump + CHANGELOG entry**; (2) the instance non-destructive
-  `dispatch-claude.sh --host-close <exp>` verb (write `closing` marker → spawn detached closer that kills the
-  session + writes `closed` + prunes, reusing the existing clean+pushed guards, never deleting the worktree),
-  the dispatch step authoring the launch-metadata handle at spawn, **plus the marker-aware `--list`/`--reap`/`--reap-all`
+  `dispatch-claude.sh --host-close <exp>` verb (write `closing` marker → spawn a deadline-bounded detached
+  closer that kills the session + writes `closed` + prunes, or `failed` on timeout; marker stored in the
+  control-plane state dir outside the worktree; reusing the existing clean+pushed guards, never deleting the
+  worktree), the dispatch step filling the `CHECKLIST.md` handle slot at spawn, **plus the marker-aware
+  `--list`/`--reap`/`--reap-all`
   semantics**; (3) the `run-experiment` executor's final
   host-close action that invokes (2) at Close. The product contract (1) lands first **safely** precisely
   because its gate is capability-gated (above): with no handle wired yet, every existing executor — Claude
