@@ -40,7 +40,7 @@ expect PASS no-high-no-file "$TMP/absent.json" "$(find_ 'F1 MED')"
 #    regardless of origin/main: HEAD is in (HEAD^..HEAD].
 PARENT=$(git rev-parse --verify 'HEAD^' 2>/dev/null || true)
 if [ -n "$PARENT" ]; then
-  d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
+  d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"description\":\"missing config check\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
   out=$(DISPOSITION_BASE_REF="$PARENT" "$GATE" "$d" "$(find_ 'F1 HIGH')" 2>&1); rc=$?
   if [ "$rc" -eq 0 ]; then echo "ok   high-fixed-ok"; else echo "FAIL high-fixed-ok: want PASS got BLOCK :: $out"; fails=1; fi
 else
@@ -48,12 +48,16 @@ else
 fi
 
 # 3. HIGH deferred_to_child_design at umbrella with child_issue -> PASS.
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"deferred_to_child_design","child_issue":"#139"}]}')
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","description":"open sub-design","status":"deferred_to_child_design","child_issue":"#139"}]}')
 expect PASS high-defer-child-ok "$d" "$(find_ 'F1 HIGH')"
 
 # 4. HIGH refuted -> PASS (structurally complete).
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"refuted","reason":"reviewer wrong"}]}')
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","description":"alleged bug","status":"refuted","reason":"reviewer wrong"}]}')
 expect PASS high-refuted-ok "$d" "$(find_ 'F1 HIGH')"
+
+# 4b. HIGH entry missing description -> BLOCK (semantic matching depends on it).
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"refuted","reason":"x"}]}')
+expect BLOCK high-no-description "$d" "$(find_ 'F1 HIGH')"
 
 # 5. HIGH with no disposition entry -> BLOCK.
 d=$(disp '{"altitude":"umbrella","findings":[{"id":"F2","severity":"HIGH","status":"fixed","commit":"'"$COMMIT"'"}]}')
