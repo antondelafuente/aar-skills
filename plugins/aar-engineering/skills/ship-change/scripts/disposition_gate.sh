@@ -30,6 +30,7 @@ command -v jq >/dev/null 2>&1 || block "jq not available"
 
 # Collect HIGH finding ids from the reviewer output. (MED/LOW never block.)
 high_ids=()
+all_ids=()
 while IFS= read -r line || [ -n "$line" ]; do
   [ -n "$line" ] || continue
   # Strict format: exactly "<ID> <SEVERITY>". A malformed line BLOCKS (fail-closed) — never silently
@@ -39,8 +40,17 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
   id=${BASH_REMATCH[1]}
   sev=${BASH_REMATCH[2]}
+  all_ids+=("$id")
   [ "$sev" = HIGH ] && high_ids+=("$id")
 done < "$FIND"
+
+# Reject duplicate finding ids in the current review — an ambiguous id would let one disposition cover two
+# findings. (Stable finding IDENTITY ACROSS rounds is the packet/reviewer contract in #139; #138 only
+# guarantees the current invocation is self-consistent.)
+if [ "${#all_ids[@]}" -gt 0 ]; then
+  dups=$(printf '%s\n' "${all_ids[@]}" | sort | uniq -d)
+  [ -z "$dups" ] || block "duplicate finding id(s) in findings list: $(printf '%s ' "$dups" | tr -d '\n')"
+fi
 
 # A committed dispositions file must be valid JSON even when this round has no HIGHs — a malformed
 # committed file is invalid gate state and must not pass silently just because nothing blocks today.
@@ -74,8 +84,9 @@ if [ -n "$BASE_REF" ]; then
 fi
 
 for id in "${high_ids[@]}"; do
+  count=$(jq --arg id "$id" '[.findings[] | select(.id == $id)] | length' "$DISP" 2>/dev/null)
+  [ "$count" = 1 ] || block "finding $id: expected exactly 1 disposition entry, found ${count:-0}"
   entry=$(jq -c --arg id "$id" '.findings[] | select(.id == $id)' "$DISP" 2>/dev/null)
-  [ -n "$entry" ] || block "HIGH finding $id has no disposition entry"
 
   status=$(printf '%s' "$entry" | jq -r '.status // empty' 2>/dev/null)
   # Exact-match dispatch with a default BLOCK — a malformed / multi-token status can never fall through.

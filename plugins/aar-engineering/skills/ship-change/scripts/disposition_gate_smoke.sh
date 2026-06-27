@@ -7,7 +7,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 GATE="$HERE/disposition_gate.sh"
 [ -x "$GATE" ] || { echo "FAIL: disposition_gate.sh not executable at $GATE"; exit 1; }
 
-TMP=$(mktemp -d)
+TMP=$(mktemp -d) || { echo "FAIL: mktemp -d failed"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 fails=0
 
@@ -139,6 +139,15 @@ expect BLOCK findings-not-array "$d" "$(find_ 'F1 HIGH')"
 # 24. deferral link with an invalid GitHub URL (whitespace in owner) -> BLOCK.
 d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"deferred_to_child_design","child_issue":"https://github.com/a b/c/issues/1"}]}')
 expect BLOCK defer-child-bad-url "$d" "$(find_ 'F1 HIGH')"
+
+# 25. duplicate finding id in the findings list -> BLOCK (ambiguous matching).
+d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
+printf 'F1 HIGH\nF1 MED\n' > "$TMP/dup.txt"
+expect BLOCK dup-finding-id "$d" "$TMP/dup.txt"
+
+# 26. two disposition entries for the same id -> BLOCK (expected exactly 1).
+d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"refuted","reason":"a"},{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
+expect BLOCK dup-disposition-entry "$d" "$(find_ 'F1 HIGH')"
 
 if [ "$fails" -eq 0 ]; then echo "disposition_gate_smoke: ALL PASS"; else echo "disposition_gate_smoke: FAILURES"; fi
 exit "$fails"
