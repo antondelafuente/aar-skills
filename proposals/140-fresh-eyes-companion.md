@@ -20,8 +20,10 @@ SEMANTIC, not textual — a rephrased version of an already-dispositioned findin
 F1). Concretely:
 
 1. **Force-stateless un-anchored sweep, to its OWN artifact.** `run_review` gains `WF_STATELESS_REVIEW=1`,
-   which skips the disposition injection so the reviewer does a full amnesiac holistic read (re-raises
-   *everything*, anchored to nothing) — exactly the un-anchored read that caught #132's pre-existing hole. The
+   which skips the disposition injection. The sweep uses the **dimensional `--code`/`--scaffold` review** —
+   which has NO close-mode "prior-round / peer-debate" anchoring (that framing lives only in the research
+   `close` audit, never used here) — so combined with the disposition skip it is a genuinely **un-anchored**
+   holistic read (re-raises *everything*, anchored to nothing), exactly the read that caught #132's hole. The
    sweep writes a **distinct `wf_fresh_<branch>.md` artifact** (NOT the `wf_code_*`/`wf_scaffold_*` review file
    #139 consumes), and is posted **comment-only, non-gating** (no native `REQUEST_CHANGES`; raw stateless HIGHs
    are not a verdict). Posting makes it durable/recoverable from GitHub (F2/F3).
@@ -67,7 +69,9 @@ sound rather than self-referential.
   only for disposition-aware PRs. No-state path byte-identical. Version bump + a smoke.
 - **`verify-claims`** (`audit_experiment.sh`): the disposition-aware prompt gains an optional "candidate
   fresh-sweep findings — surface any HIGH not semantically covered by the dispositions" section, fed via an
-  env/file when present. Absent → unchanged.
+  env/file when present. Absent → unchanged. **verify-claims version bump** (plugin behavior change — F3).
+- **Docs (F2):** `ship-change/SKILL.md` + `wf.sh` help + RUNBOOK state that the fresh sweep is candidate-only,
+  must NOT be `fdispo seed`-ed, and that only the residual merge-review findings are dispositioned.
 - No behavior change for non-disposition PRs.
 
 ## Rollout + rollback
