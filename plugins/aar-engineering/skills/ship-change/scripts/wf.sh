@@ -1230,9 +1230,12 @@ Split into one design PR per doc."
        # rev file is present (the model review then backstops deletions).
        PK=code; [ "$DESIGN_MODE" = 1 ] && PK=scaffold
        PRIORREV="${TMPDIR:-/tmp}/wf_${PK}_$(wt_branch "$WT" | tr '/' '_').md"
+       # FAIL CLOSED if no trusted reviewer-derived list is recoverable — never fall back to author-only state
+       # (that would let a deleted/downgraded disposition bypass the deterministic backstop).
+       [ -f "$PRIORREV" ] || die "disposition-aware finish needs a trusted reviewer-derived findings list, but no recent $PK review output is present — run 'wf.sh code-review $WT $AUTHOR' (or design-review) first, then finish."
        # UNION of reviewer-derived HIGH ids (trusted; catches a deleted/downgraded disposition) AND the state's
        # own HIGH ids (catches a stale `unresolved` HIGH the current reviewer no longer raises). Either blocks.
-       { if [ -f "$PRIORREV" ]; then fd_review_high_list "$PRIORREV"; fi; fd_high_list "$FD"; } | sort -u > "$FDLIST"
+       { fd_review_high_list "$PRIORREV"; fd_high_list "$FD"; } | sort -u > "$FDLIST"
        ( cd "$WT" && bash "$(dirname "$0")/disposition_gate.sh" "$FD" "$FDLIST" ) \
          || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
   esac
