@@ -293,6 +293,25 @@ cmd_refresh(){
   echo "refreshed lease $id (expiry +${expiry_min}min)"
 }
 
+# expire: set expiry_at to NOW so the lease is IMMEDIATELY reapable on the next sweep. Used by teardown
+# when a delete could not be verified gone (round-4 Finding 3): the lease must not keep its future run
+# expiry, or the reaper wouldn't retry the abandoned-but-billing pod for hours. Refuses terminal leases.
+cmd_expire(){
+  local id=$1; local file; file=$(record_path "$id")
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    provisional|enriched) : ;;
+    absent)  die "expire: no lease for '$id'";;
+    invalid) die "expire: lease '$id' is malformed — inspect $file";;
+    intent)  die "expire: lease '$id' has no pod yet";;
+    closed)  die "expire: lease '$id' is closed (terminal) — refusing";;
+    reaping) echo "expire: lease '$id' already reaping (no-op)"; return 0;;
+    *) die "expire: unexpected state '$state'";;
+  esac
+  EXPIRY_MIN="0" write_record "$file"
+  echo "expired lease $id (immediately reapable)"
+}
+
 cmd_close(){
   local id=$1; local file; file=$(record_path "$id")
   local state; state=$(classify_record "$file")
@@ -467,6 +486,10 @@ main(){
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "close: unexpected extra argument(s): $*"
       with_lock "$id" cmd_close "$id";;
+    expire)
+      validate_id "${1:-}"; local id=$1; shift
+      [ $# -eq 0 ] || die "expire: unexpected extra argument(s): $*"
+      with_lock "$id" cmd_expire "$id";;
     reaping)
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "reaping: unexpected extra argument(s): $*"
@@ -495,7 +518,7 @@ main(){
     find-nonce)
       [ $# -eq 1 ] || die "usage: pod_lease.sh find-nonce <pod-name>"
       cmd_find_nonce "$1";;
-    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|reaping|claim-reaping|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
+    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|expire|reaping|claim-reaping|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
     *) die "unknown subcommand '$sub'";;
   esac
 }

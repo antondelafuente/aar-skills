@@ -38,11 +38,13 @@ if [ -f "$TMP/pods_\$1.txt" ]; then cat "$TMP/pods_\$1.txt"; else cat "$TMP/pods
 EOF
 cat > "$TMP/del.sh"    <<EOF
 #!/bin/bash
-echo "\$2" >> "$DEL_LOG"      # record the deleted pod id
-# mark it gone so verify passes — UNLESS the pod id is in $TMP/nogone (simulates an unverified delete)
+echo "\$2" >> "$DEL_LOG"      # record that a delete was ATTEMPTED for this pod id
+# a pod in $TMP/delfail simulates a NON-ACCEPTED delete (wrong key / non-2xx) -> exit 1, NOT gone
+if grep -qx "\$2" "$TMP/delfail" 2>/dev/null; then exit 1; fi
+# mark it gone so verify passes — UNLESS the pod id is in $TMP/nogone (accepted delete, unverified)
 grep -qx "\$2" "$TMP/nogone" 2>/dev/null || touch "$GONE/\$2"
 EOF
-: > "$TMP/nogone"
+: > "$TMP/nogone"; : > "$TMP/delfail"
 cat > "$TMP/verify.sh" <<EOF
 #!/bin/bash
 [ -f "$GONE/\$2" ]            # exit 0 iff gone
@@ -116,6 +118,8 @@ PY
 # === fixture 10: an EXPIRED pending intent recorded under a DIFFERENT key_ref, whose nonce names a
 #     live pod listed under THIS key -> report-only, never rebound/reaped by the wrong key (Finding 4) ===
 XKEY=$(lease intent OTHER_KEY --expiry-min -1)   # pending intent under key_ref OTHER_KEY
+# === fixture 11: an expired lease whose DELETE is NOT ACCEPTED (non-2xx) -> NOT closed, reopened (round-4 Finding 2) ===
+DFAIL=$(mk_lease pod-dfail -1 RUNPOD_API_KEY); echo pod-dfail >> "$TMP/delfail"
 # === fixture 5: legacy contract-1 leases, keepalive future / inconclusive / past ===
 LF=$(mk_lease pod-lf -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo future       > "$TMP/keepalive_pod-lf"
 LI=$(mk_lease pod-li -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo ""           > "$TMP/keepalive_pod-li"
@@ -142,6 +146,7 @@ pod-dup1 $DUPNAME
 pod-dup2 $DUPNAME
 pod-lnossh $LNOSSH
 pod-xkey $XKEY
+pod-dfail $DFAIL
 pod-lf $LF
 pod-li $LI
 pod-lp $LP
@@ -190,6 +195,11 @@ echo "$OUT" | grep -q "different key_ref" && ok xkey-logged || no xkey-logged
 # the cross-key intent was NOT rebound (still a pending intent, no pod_id)
 [ "$(lease show "$XKEY" | python3 -c 'import json,sys;print(json.load(sys.stdin)["pod_id"])')" = None ] \
   && ok xkey-not-rebound || no xkey-not-rebound
+# round-4 Finding 2: a non-accepted DELETE -> lease NOT closed, reopened to a reapable active state
+deleted pod-dfail && ok dfail-delete-attempted || no dfail-delete-attempted
+dfail_state=$(lease show "$DFAIL" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')
+case "$dfail_state" in provisional|enriched|intent) ok dfail-not-closed-reopened ;; *) no "dfail-not-closed-reopened ($dfail_state)" ;; esac
+if lease is-reapable "$DFAIL"; then ok dfail-reapable-again; else no dfail-reapable-again; fi
 
 # === locked-reap race (Finding 1): a refresh that lands before the reaper's in-lock recheck SAVES
 #     the pod. Simulate by refreshing the expired lease to a future expiry, THEN sweeping. ===

@@ -82,10 +82,15 @@ for p in d:
     if p.get('desiredStatus')=='RUNNING': print(p['id'], p.get('name',''))" 2>/dev/null
 }
 
+# delete_pod: exit 0 ONLY on an ACCEPTED delete (2xx). A non-2xx (incl. a wrong-key 404, auth failure,
+# network error) is exit nonzero — the caller must NOT treat the pod as gone (code-review round-4
+# Finding 2: a 404 from the wrong key is not a verified deletion).
 delete_pod(){ # <key> <pod-id>
   if [ -n "${GPU_JOB_DELETE_POD_CMD:-}" ]; then $GPU_JOB_DELETE_POD_CMD "$1" "$2"; return; fi
-  curl -s -X DELETE -H "Authorization: Bearer $1" -H "User-Agent: gpu-job" \
-    "https://rest.runpod.io/v1/pods/$2" >/dev/null
+  local http
+  http=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $1" \
+         -H "User-Agent: gpu-job" "https://rest.runpod.io/v1/pods/$2" 2>/dev/null) || return 1
+  case "$http" in 200|201|202|204) return 0 ;; *) return 1 ;; esac
 }
 
 # verify_gone: exit 0 = CONFIRMED gone, 1 = still present, 2 = INCONCLUSIVE (network/HTTP/JSON error).
@@ -159,15 +164,15 @@ reap_lease(){ # <nonce> <key> <pod-id>
   if ! bash "$LEASE" claim-reaping "$nonce" >/dev/null 2>&1; then
     log "keep (refreshed under lock): $nonce pod=$pod"; kept=$((kept+1)); return
   fi
-  delete_pod "$key" "$pod" || true
-  if verify_gone "$key" "$pod"; then
+  # Close the lease ONLY on an ACCEPTED delete (2xx) AND a verified-gone confirmation. A delete that
+  # was not accepted (wrong key, auth/network error, non-2xx) must NOT be trusted even if a subsequent
+  # GET 404s (round-4 Finding 2). Anything short of accepted+verified -> reopen for the next sweep.
+  if delete_pod "$key" "$pod" && verify_gone "$key" "$pod"; then
     bash "$LEASE" close "$nonce" >/dev/null || true
-    log "REAPED: nonce=$nonce pod=$pod (deleted + verified gone)"; reaped=$((reaped+1))
+    log "REAPED: nonce=$nonce pod=$pod (delete accepted + verified gone)"; reaped=$((reaped+1))
   else
-    # delete NOT verified gone (still present OR inconclusive): revert the lease OUT of `reaping` so
-    # the NEXT sweep retries it (Finding 2 — a `reaping` lease is otherwise skipped forever).
     bash "$LEASE" unclaim-reaping "$nonce" >/dev/null 2>&1 || true
-    log "RETRY: nonce=$nonce pod=$pod delete not verified gone — lease reopened for next sweep"; retried=$((retried+1))
+    log "RETRY: nonce=$nonce pod=$pod delete not accepted/verified — lease reopened for next sweep"; retried=$((retried+1))
   fi
 }
 
@@ -276,9 +281,16 @@ for kr in "${!KEY_FOR_REF[@]}"; do
         # dry-run NEVER mutates: log the would-bind/would-reap, skip the provisional write (Finding 2)
         log "DRY-RUN would bind+reap half-born pod: pod=$pod nonce=$m"; reaped=$((reaped+1))
       else
-        bash "$LEASE" provisional "$m" "$pod" >/dev/null 2>&1 || true
-        log "pending-intent EXPIRED — reaping half-born pod: pod=$pod nonce=$m"
-        reap_lease "$m" "$key" "$pod"
+        # The bind MUST succeed and the lease's pod_id MUST now equal this pod before we delete it
+        # (round-4 Finding 1): otherwise a failed bind would let us DELETE an unknown pod with no
+        # registered lease. On any mismatch -> report-only, never reap.
+        if bash "$LEASE" provisional "$m" "$pod" >/dev/null 2>&1 \
+           && [ "$(bash "$LEASE" show "$m" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("pod_id") or "")' 2>/dev/null)" = "$pod" ]; then
+          log "pending-intent EXPIRED — reaping half-born pod: pod=$pod nonce=$m"
+          reap_lease "$m" "$key" "$pod"
+        else
+          log "report-only (pending-intent bind failed/mismatch — NOT reaping): pod=$pod nonce=$m"; reported=$((reported+1))
+        fi
       fi
     else
       log "report (pending-intent match, not yet expired): pod=$pod nonce=$m"; reported=$((reported+1))

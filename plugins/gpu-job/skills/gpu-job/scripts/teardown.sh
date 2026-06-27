@@ -48,7 +48,10 @@ else:
   if [ "$verdict" = gone ]; then
     bash "$HERE/pod_lease.sh" close "$NONCE" >/dev/null && echo "lease $NONCE closed (delete verified gone)"
   else
-    echo "WARNING: pod $PID delete NOT verified gone ($verdict) — lease $NONCE left for the reaper to retry (NOT closed)" >&2
+    # Unverified delete: mark the lease IMMEDIATELY reapable so the standing reaper retries it on the
+    # NEXT sweep, not hours from now when the run's expiry would have lapsed (round-4 Finding 3).
+    bash "$HERE/pod_lease.sh" expire "$NONCE" >/dev/null 2>&1 || true
+    echo "WARNING: pod $PID delete NOT verified gone ($verdict) — lease $NONCE expired for the reaper to retry promptly (NOT closed)" >&2
   fi
 fi
 

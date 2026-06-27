@@ -56,6 +56,13 @@ run close "$N" >/dev/null
 [ "$(field "$N" state)" = closed ] && ok close-state || no close-state
 if run is-reapable "$N"; then no closed-not-reapable; else ok closed-not-reapable; fi
 
+# --- expire: makes a future-expiry lease immediately reapable (teardown unverified-delete path) ---
+EX=$(run intent RUNPOD_API_KEY --expiry-min 600); run provisional "$EX" pod-ex >/dev/null
+if run is-reapable "$EX"; then no expire-precondition-fresh; else ok expire-precondition-fresh; fi
+run expire "$EX" >/dev/null
+if run is-reapable "$EX"; then ok expire-makes-reapable || true; else no expire-makes-reapable; fi
+[ "$(field "$EX" state)" = provisional ] && ok expire-keeps-state || no expire-keeps-state
+
 # --- terminal guards: provisional/enrich/refresh refused after close; close idempotent ---
 if run provisional "$N" pod-x >/dev/null 2>&1; then no closed-blocks-provisional; else ok closed-blocks-provisional; fi
 if run refresh "$N" --expiry-min 5 >/dev/null 2>&1; then no closed-blocks-refresh; else ok closed-blocks-refresh; fi
