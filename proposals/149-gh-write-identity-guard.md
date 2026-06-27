@@ -250,13 +250,28 @@ and the instance applies the capability change to itself.
    ship-change `SKILL.md` ("Auth: … export `GH_TOKEN`"), `RUNBOOK.md` (the `GH_TOKEN` rotation note that
    says "repo: contents + pull_requests"), and any help/plugin metadata. Prefer a single canonical
    statement that the others reference over duplicated prose.
+
+   **Define the product-facing read-only-credential seam (so provenance isn't hand-waved).** Mirror the
+   existing `WF_ENGINEER_TOKEN_CMD_*` pattern: the product defines a generic convention an instance
+   implements — a `WF_READONLY_TOKEN_CMD` that prints the ambient read-only token, and the authoritative
+   way `doctor` confirms its read-only scope (the App-installation permissions object for an App token, or a
+   documented attestation the minter provides). `doctor` PASSES on a token reachable via this seam with an
+   authoritatively read-only scope; it FAILS CLOSED on anything else. This makes "ambient = minted
+   read-only" a concrete generic interface, not an instance-specific assumption — a fresh install supplies
+   `WF_READONLY_TOKEN_CMD` (and the elevated owner token seam) the same way it supplies the engineer-token
+   seams today.
 4. **Narrow engineer maintainer verbs so no existing workflow is stranded (product; the blast-radius
    dependency — BLOCKING predecessor of child #1).** The guard forbids bare `issue close`, label edits, and
    PR review/merge under the ambient owner token, but `triage-feedback` (label edits + closes) and `wf.sh`
    itself need them under the engineer/maintainer identity, and `wf.sh issue` currently exposes only
-   `create`/`comment`. Add **narrow, per-verb-allowlisted** `wf.sh issue close|label` (and `edit` only if
-   needed), each with a fixed validated arg set and **no arbitrary-arg passthrough** — preserving the #91
-   hardening model so the destructive/interactive surface stays closed. Confirm `pr review`/`pr merge`
+   `create`/`comment`. Add **narrow, per-verb-allowlisted** `wf.sh issue close|label` **and a mandatory
+   body-set path** — the disposition workflow needs it: a `blocked` issue carries a `blocked-by: #N`
+   **body** line (per the AGENTS.md disposition vocab), so `triage-feedback` must set labels *and* a body
+   line under the engineer identity. Provide a dedicated atomic disposition command (e.g. `wf.sh issue
+   dispose <n> --label … --body-line "blocked-by: #N"`) or a narrow `wf.sh issue edit --body-line`
+   (**required, not optional**), each with a fixed validated arg set and **no arbitrary-arg passthrough**,
+   preserving the #91 hardening model so the destructive/interactive surface stays closed. Confirm
+   `pr review`/`pr merge`
    already run through the engineer token (they do, inside `finish`/the review path). Update
    `feedback-loop`/`triage-feedback` docs to call the engineer verbs instead of bare `gh`, each with a
    per-verb smoke. **This child is an explicit BLOCKING predecessor: it MUST merge before child #1's guard**
@@ -278,6 +293,14 @@ and the instance applies the capability change to itself.
   **Git** credential surface: ensure the agent shell holds no write-capable owner Git credential for the
   GitHub remote (read-only fetch/clone is fine), so the only thing that can push is the one-shot engineer
   credential `git_push_author` forces.
+
+- **Live-session migration gate (rollout is not complete until existing shells are covered).** Editing the
+  auth-env loader only affects *future* shells; **already-running** agent sessions keep their exported
+  write-capable `GH_TOKEN`/`GITHUB_TOKEN` in memory and would bypass the demotion. So the rollout explicitly:
+  installs the guard where live shells already resolve `gh` (or reloads/restarts each active session),
+  **unsets the old `GH_TOKEN`/`GITHUB_TOKEN`** (and clears any in-memory stored-auth) in every live agent
+  environment, and **runs `wf.sh doctor` from each active agent shell** — rollout is declared complete only
+  when doctor PASSES from every live session, not merely after the loader edit.
 
 Sequencing (a strict dependency, not a preference): **child #4 (the narrow engineer maintenance verbs)
 MUST merge before child #1 (the guard)** — the guard cannot block `issue close`/`label` until their
@@ -346,10 +369,13 @@ the product children make it enforceable, ergonomic, detectable, non-stranding, 
   and `wf.sh issue …` still authors as the bot.
 - **Escape hatch / rollback for a wedged state.** If the read-only demotion ever blocks legitimate
   owner/admin work, the operator performs the explicit two-step (source the elevated owner token **and**
-  set the guard-specific `WF_GH_ALLOW_OWNER_WRITE=1`); the guard emits a terminal note. Full rollback is a
-  one-line instance revert: re-export the write-capable token in the auth-env loader (restores the prior,
-  footgun-bearing behavior) — reversible, instance-local, no product change needed. The product wrapper is
-  removable from PATH independently of the capability layer, and the doctor check will then report the
-  ambient token as write-capable (loud), which is the intended signal that rollback happened.
+  set the guard-specific `WF_GH_ALLOW_OWNER_WRITE=1`); the guard emits a terminal note. Rollback is
+  instance-local and reversible, and is **symmetric with the rollout's full surface** — restoring the prior
+  behavior means: re-export the write-capable token in the auth-env loader, AND (if the rollout removed/
+  isolated them) deliberately restore or knowingly leave out the stored owner `gh auth` credential and the
+  owner Git/SSH credential. The rollback note documents each surface (so it isn't mistaken for a one-line
+  `GH_TOKEN` revert that leaves stored `gh`/Git auth demoted). The product wrapper is removable from PATH
+  independently of the capability layer, and the doctor check will then report the ambient credential as
+  write-capable (loud), the intended signal that rollback happened.
 - **No data migration; no GPU cost; no API/data-gen cost.** This is a credentials-scope + small-wrapper
   change. The only operational cost is minting the read-only and elevated tokens on the instance.
