@@ -619,6 +619,93 @@ issue_number_from_gh_issue_args(){  # issue_number_from_gh_issue_args <gh issue 
     esac
   done
 }
+# Narrow engineer MAINTAINER verbs (#164): close|label|dispose under the engineer identity, each with a FIXED
+# validated arg set and NO arbitrary-arg passthrough (the #91 hardening model). Called from the `issue)` arm.
+#   close   <N> -R <repo> [-c|--comment <text>] [-r|--reason completed|"not planned"]
+#   label   <N> -R <repo> [--add-label <L>]… [--remove-label <L>]…   (≥1 add/remove)
+#   dispose <N> -R <repo> --label <L> --body-line "<key>: <val>"     (atomic disposition: one label + one
+#           idempotent body line — re-running with the same "<key>:" replaces that line, never duplicates,
+#           and never overwrites the rest of the body. This is the `blocked-by: #N` body-set path.)
+issue_maintainer_verb(){
+  local author=$1 verb=$2; shift 2
+  local repo="" num="" comment="" reason="" dlabel="" bodyline="" want=""
+  local -a add_labels=() rm_labels=()
+  # STATEFUL allowlist scan (mirrors the create/comment path): only the named flags, each consuming its value;
+  # any other `-`-prefixed token fails CLOSED. No bare `gh` flag survives that isn't explicitly permitted here.
+  local a
+  for a in "$@"; do
+    if [ -n "$want" ]; then
+      case "$want" in
+        repo) repo=$a ;; comment) comment=$a ;; reason) reason=$a ;;
+        dlabel) dlabel=$a ;; bodyline) bodyline=$a ;;
+        add) add_labels+=("$a") ;; rm) rm_labels+=("$a") ;;
+      esac
+      want=""; continue
+    fi
+    case "$a" in
+      -R|--repo)            want=repo ;;
+      -R=*) repo=${a#-R=} ;; --repo=*) repo=${a#--repo=} ;;
+      -c|--comment)         [ "$verb" = close ] || die "wf.sh issue $verb: -c/--comment is only valid for 'close'"; want=comment ;;
+      -c=*) [ "$verb" = close ] || die "wf.sh issue $verb: -c/--comment is only valid for 'close'"; comment=${a#-c=} ;;
+      --comment=*) [ "$verb" = close ] || die "wf.sh issue $verb: --comment is only valid for 'close'"; comment=${a#--comment=} ;;
+      -r|--reason)          [ "$verb" = close ] || die "wf.sh issue $verb: -r/--reason is only valid for 'close'"; want=reason ;;
+      -r=*) [ "$verb" = close ] || die "wf.sh issue $verb: -r/--reason is only valid for 'close'"; reason=${a#-r=} ;;
+      --reason=*) [ "$verb" = close ] || die "wf.sh issue $verb: --reason is only valid for 'close'"; reason=${a#--reason=} ;;
+      --add-label)          [ "$verb" = label ] || die "wf.sh issue $verb: --add-label is only valid for 'label'"; want=add ;;
+      --add-label=*) [ "$verb" = label ] || die "wf.sh issue $verb: --add-label is only valid for 'label'"; add_labels+=("${a#--add-label=}") ;;
+      --remove-label)       [ "$verb" = label ] || die "wf.sh issue $verb: --remove-label is only valid for 'label'"; want=rm ;;
+      --remove-label=*) [ "$verb" = label ] || die "wf.sh issue $verb: --remove-label is only valid for 'label'"; rm_labels+=("${a#--remove-label=}") ;;
+      --label)              [ "$verb" = dispose ] || die "wf.sh issue $verb: --label is only valid for 'dispose'"; want=dlabel ;;
+      --label=*) [ "$verb" = dispose ] || die "wf.sh issue $verb: --label is only valid for 'dispose'"; dlabel=${a#--label=} ;;
+      --body-line)          [ "$verb" = dispose ] || die "wf.sh issue $verb: --body-line is only valid for 'dispose'"; want=bodyline ;;
+      --body-line=*) [ "$verb" = dispose ] || die "wf.sh issue $verb: --body-line is only valid for 'dispose'"; bodyline=${a#--body-line=} ;;
+      -*) die "wf.sh issue $verb: flag '$a' is not allowed (no arbitrary passthrough — #91 model). Permitted: close[-R -c -r] label[-R --add-label --remove-label] dispose[-R --label --body-line]" ;;
+      *) [ -z "$num" ] || die "wf.sh issue $verb: unexpected extra positional '$a' (only one issue number)"; num=$a ;;
+    esac
+  done
+  [ -z "$want" ] || die "wf.sh issue $verb: flag expecting a value got none"
+  [ -n "$num" ] || die "wf.sh issue $verb: missing issue number (e.g. wf.sh issue <fam> $verb 123 -R owner/repo …)"
+  case "$num" in *[!0-9]*) die "wf.sh issue $verb: issue must be a number (got '$num')" ;; esac
+  [ -n "$repo" ] || die "wf.sh issue $verb: -R <owner/repo> is required"
+  local ATOK; ATOK=$(author_token_optional "$author")
+  [ -n "$ATOK" ] || need_ambient_gh
+  case "$verb" in
+    close)
+      local -a args=(issue close "$num" -R "$repo")
+      [ -n "$comment" ] && args+=(-c "$comment")
+      if [ -n "$reason" ]; then
+        case "$reason" in completed|"not planned") ;; *) die "wf.sh issue close: --reason must be 'completed' or 'not planned' (gh has no other close reason; a duplicate close = a -c comment pointing at the canonical issue + a 'not planned' close)" ;; esac
+        args+=(-r "$reason")
+      fi
+      gh_author "$ATOK" "${args[@]}" || die "wf.sh issue close: 'gh issue close' failed — failing closed"
+      ;;
+    label)
+      [ ${#add_labels[@]} -gt 0 ] || [ ${#rm_labels[@]} -gt 0 ] || die "wf.sh issue label: give at least one --add-label or --remove-label"
+      local -a args=(issue edit "$num" -R "$repo")
+      local l
+      for l in "${add_labels[@]}"; do args+=(--add-label "$l"); done
+      for l in "${rm_labels[@]}"; do args+=(--remove-label "$l"); done
+      gh_author "$ATOK" "${args[@]}" || die "wf.sh issue label: 'gh issue edit' (labels) failed — failing closed"
+      ;;
+    dispose)
+      [ -n "$dlabel" ] || die "wf.sh issue dispose: --label <disposition> is required"
+      [ -n "$bodyline" ] || die "wf.sh issue dispose: --body-line \"<key>: <val>\" is required"
+      case "$bodyline" in *:*) ;; *) die "wf.sh issue dispose: --body-line must contain a 'key:' (e.g. \"blocked-by: #42\") so it can be set idempotently" ;; esac
+      local key; key=${bodyline%%:*}            # idempotency key = text before the first colon
+      local cur newbody
+      cur=$(gh_author "$ATOK" issue view "$num" -R "$repo" --json body -q .body 2>/dev/null) \
+        || die "wf.sh issue dispose: could not read issue #$num body — failing closed"
+      # Drop any existing line whose key matches (so re-disposing replaces, never duplicates), then append.
+      newbody=$(printf '%s' "$cur" | grep -vE "^[[:space:]]*${key}[[:space:]]*:" || true)
+      newbody=$(printf '%s\n%s\n' "$newbody" "$bodyline")
+      printf '%s' "$newbody" | gh_author "$ATOK" issue edit "$num" -R "$repo" --add-label "$dlabel" --body-file - \
+        || die "wf.sh issue dispose: 'gh issue edit' (label + body-line) failed — failing closed"
+      ;;
+  esac
+  if [ -n "$ATOK" ]; then note "ran 'gh issue $verb' on #$num as the $author engineer identity"
+  else note "ran 'gh issue $verb' on #$num (ambient token — no engineer identity configured for $author)"; fi
+}
+
 main_checkout(){ git -C "$1" worktree list --porcelain | awk '/^worktree /{print $2; exit}'; }   # 1st worktree = main
 wt_pr(){
   local tok=${2:-}
@@ -1158,9 +1245,19 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
   check_author "$AUTHOR"
   [ $# -gt 0 ] || die "no gh issue args given (e.g. create -R owner/repo -t '…' -b '…' -l <label>)"
   GHSUB=$1
+  # Narrow MAINTAINER verbs (#164 — blocking predecessor of the #149 gh write-guard). close|label|dispose let
+  # triage-feedback and wf.sh do tracker maintenance under the ENGINEER identity once the guard makes the
+  # ambient owner token read-only. Each has a FIXED, validated arg set and NO arbitrary-arg passthrough —
+  # preserving the #91 hardening model (allowlisted flags only; no destructive/interactive surface). They have
+  # their own arg shapes (and dispose is multi-step), so they run in a dedicated helper, NOT the create|comment
+  # authoring path below.
+  if [ "$GHSUB" = close ] || [ "$GHSUB" = label ] || [ "$GHSUB" = dispose ]; then
+    issue_maintainer_verb "$AUTHOR" "$@"
+  else
   # Allowlist: this is the engineer-AUTHORING path (#89), not general issue admin. Refuse anything but
-  # create/comment so a typo or a broad call can't run close/edit/delete/lock under the engineer token.
-  case "$GHSUB" in create|comment) ;; *) die "wf.sh issue: only 'create' and 'comment' are allowed (got '$GHSUB'); this is the engineer-authoring path, not general issue ops" ;; esac
+  # create/comment (and the maintainer verbs handled above) so a typo or a broad call can't run
+  # edit/delete/lock under the engineer token.
+  case "$GHSUB" in create|comment) ;; *) die "wf.sh issue: only 'create', 'comment', 'close', 'label', 'dispose' are allowed (got '$GHSUB'); this is the engineer-authoring/maintenance path, not general issue ops" ;; esac
   # Flag ALLOWLIST (#91): the subcommand allowlist isn't enough, and a denylist is whack-a-mole (misses
   # short forms, `--web=true`, `-we` bundles, future interactive flags). Permit ONLY the non-interactive
   # authoring flags; reject every other `-`-prefixed arg — fails CLOSED on all interactive/destructive/
@@ -1213,6 +1310,7 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
   fi
   if [ -n "$ATOK" ]; then note "ran 'gh issue $GHSUB' as the $AUTHOR engineer identity"
   else note "ran 'gh issue $GHSUB' (ambient token — no engineer identity configured for $AUTHOR)"; fi
+  fi
   ;;
 
 classify)       # wf.sh classify <worktree> <author>   — advisory record (never blocks)

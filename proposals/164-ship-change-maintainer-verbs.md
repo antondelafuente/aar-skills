@@ -25,7 +25,10 @@ closed:
 
 - **`wf.sh issue <fam> close <N> -R <repo> [-c <comment>] [-r <reason>]`** — closes an Issue as the engineer.
   Allowlisted flags only (`-R/--repo`, `-c/--comment`, `-r/--reason`); `-r` validated against gh's fixed
-  reason set (`completed`/`not planned`).
+  reason set (`completed`/`not planned`). gh exposes **no native `duplicate` close reason**, so a duplicate
+  close is represented the way `triage-feedback` already does it — a `-c` comment that points at the canonical
+  Issue plus a `not planned` close — not a separate reason value. (The structured duplicate signal is the
+  comment, which is durable and human-readable, not a reason enum gh doesn't have.)
 - **`wf.sh issue <fam> label <N> -R <repo> [--add-label L]… [--remove-label L]…`** — edits labels as the
   engineer. Only `-R`, `--add-label`, `--remove-label` are accepted (repeatable); each takes a value. No
   `--milestone`, `--add-assignee`, `--add-project`, or other `gh issue edit` mutations leak in.
@@ -45,8 +48,11 @@ dies. There is **no** `gh issue edit --body` (full-body overwrite) and **no** ge
 three structured mutations above.
 
 `pr review` / `pr merge` already run through the engineer token inside `finish` and the review path (verified
-in `wf.sh`: the merge does `gh_author "$ATOK" … pr merge`, reviews post via `gh_author`). This child
-**confirms** that — it adds nothing there.
+in `wf.sh`: the merge does `gh_author "$ATOK" … pr merge`; the review-post and PR-comment paths use the
+engineer token directly via `GH_TOKEN="$rtok" gh …` rather than the `gh_author` wrapper, but they are still
+engineer-authored). This child **confirms** that — it adds nothing there. Funnelling *every* internal `gh`
+call site through one marked helper (so a PATH guard can recognize them) is explicitly the #149 guard child's
+(child #1) job, not this one's.
 
 **Degradation when `aar-engineering` is absent.** `triage-feedback` is designed to maintain Issues even
 without the engineer path. The docs define the degradation explicitly: with no engineer maintainer verb
