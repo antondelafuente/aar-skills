@@ -617,7 +617,10 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   # it suppresses validly-dispositioned prior findings. No state -> stateless review (today's behavior).
   if { [ "$mode" = --scaffold ] || [ "$mode" = --code ]; } && [ -n "$pr" ]; then
     local fd_repo; fd_repo=$(gh_repo "$wt")
-    if fd_active "$fd_repo" "$pr" "$rtok"; then
+    local fdrc; fd_active "$fd_repo" "$pr" "$rtok"; fdrc=$?
+    # A lookup error on the APPROVING merge-gate review must fail closed (don't silently drop to stateless).
+    [ "$fdrc" = 2 ] && [ "$approving" = 1 ] && die "disposition-state lookup failed (GitHub error) during the merge-gate review — failing closed; re-run finish"
+    if [ "$fdrc" = 0 ]; then
       local fd_file
       if fd_file=$(fd_load "$wt" "$fd_repo" "$pr" "$rtok"); then
         audit_env+=("DISPOSITION_FILE=$fd_file")
@@ -979,18 +982,23 @@ fdispo)         # wf.sh fdispo <worktree> <author> <seed|show|edit|save> — man
   check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
   ATOK=$(author_token_optional "$AUTHOR"); [ -n "$ATOK" ] || need_ambient_gh
   REPO=$(gh_repo "$WT"); PR=$(wt_pr_required "$WT" "$ATOK")
-  CACHE=$(fd_load "$WT" "$REPO" "$PR" "$ATOK")
+  CACHE=$(fd_cache "$WT")   # the LOCAL cache path — do NOT reload from GitHub for save/show/edit (would clobber edits)
   case "$ACTION" in
     seed)
+      # refresh canonical state from GitHub, THEN merge in the latest review's findings (then the author edits).
+      CACHE=$(fd_load "$WT" "$REPO" "$PR" "$ATOK") || die "canonical disposition state on PR #$PR is corrupt (invalid JSON) — fix the disposition comment first"
       BRT=$(wt_branch "$WT" | tr '/' '_')
-      REVF=$(ls -t "${TMPDIR:-/tmp}/wf_code_${BRT}.md" "${TMPDIR:-/tmp}/wf_scaffold_${BRT}.md" 2>/dev/null | head -1)
+      REVF=$(ls -t "${TMPDIR:-/tmp}/wf_code_${BRT}.md" "${TMPDIR:-/tmp}/wf_scaffold_${BRT}.md" 2>/dev/null | head -1 || true)
       [ -n "$REVF" ] && [ -f "$REVF" ] || die "no review output to seed from — run 'wf.sh code-review $WT $AUTHOR' (or design-review) first"
       fd_seed "$CACHE" "$REVF"
       fd_save "$WT" "$REPO" "$PR" "$ATOK" || die "failed to post the canonical disposition comment to PR #$PR (GitHub error) — state NOT updated"
       note "seeded $(jq '.findings|length' "$CACHE") finding(s) ($(jq '[.findings[]|select(.status=="unresolved")]|length' "$CACHE") unresolved). Edit $CACHE (set status fixed|refuted|deferred_to_child_design|deferred_out_of_scope + evidence/commit/child_issue/followup_issue), then: wf.sh fdispo $WT $AUTHOR save" ;;
-    save) fd_save "$WT" "$REPO" "$PR" "$ATOK" || die "failed to post the canonical disposition comment to PR #$PR (GitHub error) — state NOT updated"
+    save)
+      [ -s "$CACHE" ] || die "no local disposition cache to save ($CACHE) — run 'wf.sh fdispo $WT $AUTHOR seed' first"
+      jq -e . "$CACHE" >/dev/null 2>&1 || die "local disposition cache is not valid JSON ($CACHE) — fix it, then save"
+      fd_save "$WT" "$REPO" "$PR" "$ATOK" || die "failed to post the canonical disposition comment to PR #$PR (GitHub error) — state NOT updated"
       note "saved disposition state to PR #$PR canonical comment ($(jq '.findings|length' "$CACHE") findings)" ;;
-    show) cat "$CACHE" ;;
+    show) [ -s "$CACHE" ] && cat "$CACHE" || echo "(no local disposition cache — run 'wf.sh fdispo $WT $AUTHOR seed')" ;;
     edit) echo "$CACHE" ;;
     *) die "usage: wf.sh fdispo <worktree> <author> <seed|show|edit|save>" ;;
   esac
@@ -1217,7 +1225,8 @@ Split into one design PR per doc."
        # TRUSTED findings list: prefer the latest code-review output (reviewer-derived, not author-editable) so a
        # deleted/downgraded disposition can't bypass the gate; fall back to the state's own HIGH ids only when no
        # rev file is present (the model review then backstops deletions).
-       PRIORREV="${TMPDIR:-/tmp}/wf_code_$(wt_branch "$WT" | tr '/' '_').md"
+       PK=code; [ "$DESIGN_MODE" = 1 ] && PK=scaffold
+       PRIORREV="${TMPDIR:-/tmp}/wf_${PK}_$(wt_branch "$WT" | tr '/' '_').md"
        if [ -f "$PRIORREV" ]; then fd_review_high_list "$PRIORREV" | sort -u > "$FDLIST"; else fd_high_list "$FD" > "$FDLIST"; fi
        ( cd "$WT" && bash "$(dirname "$0")/disposition_gate.sh" "$FD" "$FDLIST" ) \
          || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
