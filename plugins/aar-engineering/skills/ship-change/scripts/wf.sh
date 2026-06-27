@@ -621,14 +621,14 @@ issue_number_from_gh_issue_args(){  # issue_number_from_gh_issue_args <gh issue 
 }
 # Narrow engineer MAINTAINER verbs (#164): close|label|dispose under the engineer identity, each with a FIXED
 # validated arg set and NO arbitrary-arg passthrough (the #91 hardening model). Called from the `issue)` arm.
-#   close   <N> -R <repo> [-c|--comment <text>] [-r|--reason completed|"not planned"]
+#   close   <N> -R <repo> [-c|--comment <text>] [-r|--reason completed|"not planned"|duplicate] [--duplicate-of <N|url>]
 #   label   <N> -R <repo> [--add-label <L>]… [--remove-label <L>]…   (≥1 add/remove)
 #   dispose <N> -R <repo> --label <L> --body-line "<key>: <val>"     (atomic disposition: one label + one
 #           idempotent body line — re-running with the same "<key>:" replaces that line, never duplicates,
 #           and never overwrites the rest of the body. This is the `blocked-by: #N` body-set path.)
 issue_maintainer_verb(){
   local author=$1 verb=$2; shift 2
-  local repo="" num="" comment="" reason="" dlabel="" bodyline="" want=""
+  local repo="" num="" comment="" reason="" dupof="" dlabel="" bodyline="" want=""
   local -a add_labels=() rm_labels=()
   # STATEFUL allowlist scan (mirrors the create/comment path): only the named flags, each consuming its value;
   # any other `-`-prefixed token fails CLOSED. No bare `gh` flag survives that isn't explicitly permitted here.
@@ -636,7 +636,7 @@ issue_maintainer_verb(){
   for a in "$@"; do
     if [ -n "$want" ]; then
       case "$want" in
-        repo) repo=$a ;; comment) comment=$a ;; reason) reason=$a ;;
+        repo) repo=$a ;; comment) comment=$a ;; reason) reason=$a ;; dupof) dupof=$a ;;
         dlabel) dlabel=$a ;; bodyline) bodyline=$a ;;
         add) add_labels+=("$a") ;; rm) rm_labels+=("$a") ;;
       esac
@@ -651,6 +651,8 @@ issue_maintainer_verb(){
       -r|--reason)          [ "$verb" = close ] || die "wf.sh issue $verb: -r/--reason is only valid for 'close'"; want=reason ;;
       -r=*) [ "$verb" = close ] || die "wf.sh issue $verb: -r/--reason is only valid for 'close'"; reason=${a#-r=} ;;
       --reason=*) [ "$verb" = close ] || die "wf.sh issue $verb: --reason is only valid for 'close'"; reason=${a#--reason=} ;;
+      --duplicate-of)       [ "$verb" = close ] || die "wf.sh issue $verb: --duplicate-of is only valid for 'close'"; want=dupof ;;
+      --duplicate-of=*) [ "$verb" = close ] || die "wf.sh issue $verb: --duplicate-of is only valid for 'close'"; dupof=${a#--duplicate-of=} ;;
       --add-label)          [ "$verb" = label ] || die "wf.sh issue $verb: --add-label is only valid for 'label'"; want=add ;;
       --add-label=*) [ "$verb" = label ] || die "wf.sh issue $verb: --add-label is only valid for 'label'"; add_labels+=("${a#--add-label=}") ;;
       --remove-label)       [ "$verb" = label ] || die "wf.sh issue $verb: --remove-label is only valid for 'label'"; want=rm ;;
@@ -659,7 +661,7 @@ issue_maintainer_verb(){
       --label=*) [ "$verb" = dispose ] || die "wf.sh issue $verb: --label is only valid for 'dispose'"; dlabel=${a#--label=} ;;
       --body-line)          [ "$verb" = dispose ] || die "wf.sh issue $verb: --body-line is only valid for 'dispose'"; want=bodyline ;;
       --body-line=*) [ "$verb" = dispose ] || die "wf.sh issue $verb: --body-line is only valid for 'dispose'"; bodyline=${a#--body-line=} ;;
-      -*) die "wf.sh issue $verb: flag '$a' is not allowed (no arbitrary passthrough — #91 model). Permitted: close[-R -c -r] label[-R --add-label --remove-label] dispose[-R --label --body-line]" ;;
+      -*) die "wf.sh issue $verb: flag '$a' is not allowed (no arbitrary passthrough — #91 model). Permitted: close[-R -c -r --duplicate-of] label[-R --add-label --remove-label] dispose[-R --label --body-line]" ;;
       *) [ -z "$num" ] || die "wf.sh issue $verb: unexpected extra positional '$a' (only one issue number)"; num=$a ;;
     esac
   done
@@ -674,8 +676,19 @@ issue_maintainer_verb(){
       local -a args=(issue close "$num" -R "$repo")
       [ -n "$comment" ] && args+=(-c "$comment")
       if [ -n "$reason" ]; then
-        case "$reason" in completed|"not planned") ;; *) die "wf.sh issue close: --reason must be 'completed' or 'not planned' (gh has no other close reason; a duplicate close = a -c comment pointing at the canonical issue + a 'not planned' close)" ;; esac
+        # gh's fixed close-reason enum (gh ≥2.45: completed|not planned|duplicate). Validate against it so a
+        # typo'd reason fails closed here rather than at gh.
+        case "$reason" in completed|"not planned"|duplicate) ;; *) die "wf.sh issue close: --reason must be 'completed', 'not planned', or 'duplicate' (gh's fixed close-reason set)" ;; esac
         args+=(-r "$reason")
+      fi
+      if [ -n "$dupof" ]; then
+        # --duplicate-of takes an issue NUMBER or a GitHub issue URL — nothing else (no arbitrary string that
+        # gh might reinterpret). gh derives reason=duplicate from it, so it composes with -r duplicate.
+        case "$dupof" in
+          ''|*[!0-9]*)
+            case "$dupof" in https://github.com/*/issues/[0-9]*) ;; *) die "wf.sh issue close: --duplicate-of must be an issue number or a https://github.com/<owner>/<repo>/issues/<n> URL (got '$dupof')" ;; esac ;;
+        esac
+        args+=(--duplicate-of "$dupof")
       fi
       gh_author "$ATOK" "${args[@]}" || die "wf.sh issue close: 'gh issue close' failed — failing closed"
       ;;
@@ -694,6 +707,8 @@ issue_maintainer_verb(){
       # DISPOSITION, so reject anything that isn't one — this is not a general label setter.
       printf '%s' "$dlabel" | grep -qE "$DISPO_RE" || die "wf.sh issue dispose: --label must be a disposition ($(bash "${BASH_SOURCE[0]}" dispositions | paste -sd'|' -)); got '$dlabel' (use 'wf.sh issue <fam> label' for non-disposition labels)"
       case "$bodyline" in *:*) ;; *) die "wf.sh issue dispose: --body-line must contain a 'key:' (e.g. \"blocked-by: #42\") so it can be set idempotently" ;; esac
+      # --body-line is a SINGLE line by contract: reject embedded LF/CR so it can't append multiple body lines.
+      case "$bodyline" in *$'\n'*|*$'\r'*) die "wf.sh issue dispose: --body-line must be a single line (no embedded newline/CR)" ;; esac
       local key; key=${bodyline%%:*}            # idempotency key = text before the first colon
       # Treat the key as a LITERAL prefix, never a regex: validate a conservative charset (word chars + '-')
       # so it can't smuggle ERE metacharacters that would delete unrelated body lines.

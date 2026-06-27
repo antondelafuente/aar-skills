@@ -85,6 +85,24 @@ echo "$out"
 check "close with bad reason exits nonzero" "[ $rc -ne 0 ]"
 check "close with bad reason explains the allowed set" "grep -qi \"reason must be\" <<<\"\$out\""
 
+echo "=== close: native duplicate close (--reason duplicate + --duplicate-of) ==="
+: > "$GH_FAKE_LOG"
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo -r duplicate --duplicate-of 10 2>&1); rc=$?
+echo "$out"
+check "duplicate close exits zero" "[ $rc -eq 0 ]"
+check "duplicate close passes reason + duplicate-of" "grep -q -- '-r duplicate --duplicate-of 10' \"\$GH_FAKE_LOG\""
+
+echo "=== close: --duplicate-of accepts an issue URL ==="
+: > "$GH_FAKE_LOG"
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo --duplicate-of https://github.com/example/repo/issues/10 2>&1); rc=$?
+echo "$out"
+check "duplicate-of URL exits zero" "[ $rc -eq 0 ]"
+
+echo "=== close: --duplicate-of rejects a non-issue string ==="
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude close 42 -R example/repo --duplicate-of "not-an-issue" 2>&1); rc=$?
+echo "$out"
+check "bad --duplicate-of exits nonzero" "[ $rc -ne 0 ]"
+
 echo "=== label: add/remove route through the engineer token ==="
 : > "$GH_FAKE_LOG"
 out=$(env "${ENGENV[@]}" bash "$WF" issue codex label 42 -R example/repo --add-label ready --remove-label blocked 2>&1); rc=$?
@@ -121,6 +139,12 @@ echo "=== dispose: rejects a body line with no key ==="
 out=$(env "${ENGENV[@]}" bash "$WF" issue claude dispose 42 -R example/repo --label blocked --body-line "no colon here" 2>&1); rc=$?
 echo "$out"
 check "keyless body-line exits nonzero" "[ $rc -ne 0 ]"
+
+echo "=== dispose: rejects a multi-line --body-line (embedded newline) ==="
+out=$(env "${ENGENV[@]}" bash "$WF" issue claude dispose 42 -R example/repo --label blocked --body-line $'blocked-by: #9\nextra injected line' 2>&1); rc=$?
+echo "$out"
+check "multi-line body-line exits nonzero" "[ $rc -ne 0 ]"
+check "multi-line body-line names the single-line rule" "grep -qi 'single line' <<<\"\$out\""
 
 echo "=== dispose: rejects a non-disposition --label ==="
 out=$(env "${ENGENV[@]}" bash "$WF" issue claude dispose 42 -R example/repo --label bug --body-line "blocked-by: #9" 2>&1); rc=$?

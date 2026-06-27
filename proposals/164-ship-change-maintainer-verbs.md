@@ -23,12 +23,12 @@ engineer-token path (`gh_author`), each with a **fixed validated argument set an
 passthrough** — preserving the #91 hardening model exactly so the destructive/interactive surface stays
 closed:
 
-- **`wf.sh issue <fam> close <N> -R <repo> [-c <comment>] [-r <reason>]`** — closes an Issue as the engineer.
-  Allowlisted flags only (`-R/--repo`, `-c/--comment`, `-r/--reason`); `-r` validated against gh's fixed
-  reason set (`completed`/`not planned`). gh exposes **no native `duplicate` close reason**, so a duplicate
-  close is represented the way `triage-feedback` already does it — a `-c` comment that points at the canonical
-  Issue plus a `not planned` close — not a separate reason value. (The structured duplicate signal is the
-  comment, which is durable and human-readable, not a reason enum gh doesn't have.)
+- **`wf.sh issue <fam> close <N> -R <repo> [-c <comment>] [-r <reason>] [--duplicate-of <N|url>]`** — closes
+  an Issue as the engineer. Allowlisted flags only (`-R/--repo`, `-c/--comment`, `-r/--reason`,
+  `--duplicate-of`); `-r` is validated against gh's fixed close-reason set (`completed`/`not planned`/`duplicate`),
+  and `--duplicate-of` accepts only an issue **number** or a `https://github.com/<owner>/<repo>/issues/<n>`
+  URL (nothing gh might reinterpret). This gives `triage-feedback` a native duplicate close (`-r duplicate
+  --duplicate-of <canonical>`) rather than forcing a `not planned` workaround.
 - **`wf.sh issue <fam> label <N> -R <repo> [--add-label L]… [--remove-label L]…`** — edits labels as the
   engineer. Only `-R`, `--add-label`, `--remove-label` are accepted (repeatable); each takes a value. No
   `--milestone`, `--add-assignee`, `--add-project`, or other `gh issue edit` mutations leak in.

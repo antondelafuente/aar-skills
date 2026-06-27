@@ -57,8 +57,8 @@ wf.sh issue <family> close   <N> -R "$FEEDBACK_PRODUCT_REPO" [-c "<comment>"] [-
 wf.sh issue <family> dispose <N> -R "$FEEDBACK_PRODUCT_REPO" --label blocked --body-line "blocked-by: #<M>"
 ```
 
-Group duplicates by commenting on the canonical Issue and closing the duplicate: a duplicate close is a `close`
-with a `-c` comment pointing at the canonical Issue plus a `not planned` close (gh has no `duplicate` reason).
+Group duplicates by commenting on the canonical Issue and closing the duplicate as a native duplicate:
+`wf.sh issue <family> close <N> -R … -r duplicate --duplicate-of <canonical>` (optionally with a `-c` comment).
 `dispose` is the atomic `blocked` path — it sets the `blocked` label *and* the `blocked-by: #N` body line in one
 engineer-authored call (re-running with the same `blocked-by:` key replaces that line, never duplicates). These
 verbs accept only their fixed flags; there is no arbitrary `gh` passthrough.
