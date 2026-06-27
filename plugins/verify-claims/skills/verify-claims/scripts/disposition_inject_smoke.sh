@@ -50,5 +50,18 @@ assert "$(has "$yes" 'SENTINEL_DESC_139')"            with-file-json-injected
 assert "$(hasi "$yes" 'never deferrable')"            with-file-code-deferral-rule
 assert "$(has "$yes" 'INDEPENDENT CODE REVIEWER')"    with-file-dimensional-preserved
 
+# fresh-eyes adjudication (#140): with FRESH_SWEEP_FILE, the candidate section + the sweep's findings appear;
+# without it, no such section. Candidate-only — purely a prompt addition for semantic adjudication.
+cat > "$TMP/sweep.md" <<'SW'
+FINDING 1: HIGH [correctness]
+  issue: SENTINEL_SWEEP_HOLE a pre-existing crash no prior finding named
+SUMMARY: high=1 med=0 low=0
+SW
+withfresh=$(BASH_ENV= AUDIT_VERIFIER_CMD= AAR_SUBSTRATE=claude AUDIT_DRY_RUN=1 AUDIT_CONSTITUTION="$ROOT/AGENTS.md" \
+  DISPOSITION_FILE="$TMP/d.json" FRESH_SWEEP_FILE="$TMP/sweep.md" bash "$A" --code "$TMP/x.diff" "$ROOT" "$TMP/out" 2>/dev/null)
+assert "$(has "$withfresh" 'CANDIDATE FRESH-SWEEP FINDINGS')"                         with-fresh-adjudication-header
+assert "$(has "$withfresh" 'SENTINEL_SWEEP_HOLE')"                                    with-fresh-candidate-injected
+assert "$([ "$(has "$yes" 'CANDIDATE FRESH-SWEEP')" = 0 ] && echo 1 || echo 0)"       no-fresh-no-section
+
 if [ "$fails" -eq 0 ]; then echo "disposition_inject_smoke: ALL PASS"; else echo "disposition_inject_smoke: FAILURES"; fi
 exit "$fails"
