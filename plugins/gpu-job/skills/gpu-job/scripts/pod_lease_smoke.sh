@@ -60,6 +60,23 @@ run reaping "$R" >/dev/null
 [ "$(field "$R" state)" = reaping ] && ok reaping-state || no reaping-state
 if run refresh "$R" --expiry-min 60 >/dev/null 2>&1; then no reaping-blocks-refresh; else ok reaping-blocks-refresh; fi
 
+# --- claim-reaping: atomic claim succeeds on an expired lease, fails on a fresh one (no mutation) ---
+CR=$(run intent RUNPOD_API_KEY --expiry-min -1); run provisional "$CR" pod-cr >/dev/null
+if run claim-reaping "$CR" >/dev/null; then ok claim-expired-succeeds; else no claim-expired-succeeds; fi
+[ "$(field "$CR" state)" = reaping ] && ok claim-marks-reaping || no claim-marks-reaping
+CF=$(run intent RUNPOD_API_KEY --expiry-min 120); run provisional "$CF" pod-cf >/dev/null
+if run claim-reaping "$CF" >/dev/null 2>&1; then no claim-fresh-fails; else ok claim-fresh-fails; fi
+[ "$(field "$CF" state)" = provisional ] && ok claim-fresh-no-mutation || no claim-fresh-no-mutation
+
+# --- unclaim-reaping: reverts a reaping lease to a reapable active state (enriched if ssh present) ---
+run enrich "$CR" --ssh 5.5.5.5:22 --expiry-min -1 >/dev/null 2>&1 || true   # CR is reaping -> enrich refused; use a fresh one
+UC=$(run intent RUNPOD_API_KEY --expiry-min -1); run provisional "$UC" pod-uc >/dev/null
+run enrich "$UC" --ssh 5.5.5.5:22 --expiry-min -1 >/dev/null
+run claim-reaping "$UC" >/dev/null
+run unclaim-reaping "$UC" >/dev/null
+[ "$(field "$UC" state)" = enriched ] && ok unclaim-restores-enriched || no unclaim-restores-enriched
+if run is-reapable "$UC"; then ok unclaim-reapable-again; else no unclaim-reapable-again; fi
+
 # --- missing / corrupt records fail closed ---
 if run is-reapable nonesuch; then no missing-not-reapable; else ok missing-not-reapable; fi
 printf 'not json{' > "$TMP/gpujob-broken.json"

@@ -80,13 +80,30 @@ delete_pod(){ # <key> <pod-id>
     "https://rest.runpod.io/v1/pods/$2" >/dev/null
 }
 
-verify_gone(){ # <key> <pod-id> -> exit 0 iff gone
+# verify_gone: exit 0 = CONFIRMED gone, 1 = still present, 2 = INCONCLUSIVE (network/HTTP/JSON error).
+# Finding 3: an unreadable/garbled response must NOT count as gone — a transient GET failure would
+# otherwise close a lease while the pod is still billing. Only a successful, parseable response that
+# shows the pod absent / no longer RUNNING counts as gone.
+verify_gone(){ # <key> <pod-id>
   if [ -n "${GPU_JOB_VERIFY_GONE_CMD:-}" ]; then $GPU_JOB_VERIFY_GONE_CMD "$1" "$2"; return; fi
-  local out
-  out=$(curl -s -H "Authorization: Bearer $1" -H "User-Agent: gpu-job" \
-        "https://rest.runpod.io/v1/pods/$2" 2>/dev/null)
-  # gone iff the pod is absent / no longer RUNNING
-  printf '%s' "$out" | grep -q '"desiredStatus":[[:space:]]*"RUNNING"' && return 1 || return 0
+  local body http
+  body=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $1" -H "User-Agent: gpu-job" \
+         "https://rest.runpod.io/v1/pods/$2" 2>/dev/null) || return 2
+  http=$(printf '%s' "$body" | tail -1)
+  body=$(printf '%s' "$body" | sed '$d')
+  case "$http" in
+    404) return 0 ;;                       # pod absent -> gone
+    200|201)
+      # parseable 200 -> gone iff NOT RUNNING; a non-JSON 200 (error page) is inconclusive
+      printf '%s' "$body" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(2)
+ds=(d.get("desiredStatus") if isinstance(d,dict) else None)
+sys.exit(1 if ds=="RUNNING" else 0)' 2>/dev/null
+      return $? ;;
+    *) return 2 ;;                         # any other HTTP status -> inconclusive
+  esac
 }
 
 # keepalive check for a LEGACY (contract-1) lease: future | past | "" (inconclusive)
@@ -116,26 +133,33 @@ done < <(bash "$LEASE" list)
 
 reaped=0; reported=0; kept=0; retried=0
 
-# Reap one lease (by nonce) holding a verified-in-lock claim, then DELETE+verify.
+# Reap one lease (by nonce), DELETE+verify. The expiry re-check + the `reaping` mark happen in ONE
+# locked claim (claim-reaping) so a concurrent refresh can't race between them (Finding 1).
 reap_lease(){ # <nonce> <key> <pod-id>
   local nonce=$1 key=$2 pod=$3
-  # The LOCKED reap: re-check expiry and claim `reaping` inside the lease lock (pod_lease.sh takes the
-  # same lock refresh takes). If a refresh extended expiry, is-reapable now fails -> we abort, keep.
-  if ! bash "$LEASE" is-reapable "$nonce"; then
+  if [ "$DRY" = 1 ]; then
+    # dry-run still re-checks reapability (read-only) so the would-reap log is honest
+    if bash "$LEASE" is-reapable "$nonce"; then
+      log "DRY-RUN would reap: nonce=$nonce pod=$pod"; reaped=$((reaped+1))
+    else
+      log "keep (refreshed): nonce=$nonce pod=$pod"; kept=$((kept+1))
+    fi
+    return
+  fi
+  # ATOMIC claim: re-check expiry AND mark reaping in one lock. Exit 1 = a refresh moved expiry
+  # forward -> keep, no mutation.
+  if ! bash "$LEASE" claim-reaping "$nonce" >/dev/null 2>&1; then
     log "keep (refreshed under lock): $nonce pod=$pod"; kept=$((kept+1)); return
   fi
-  if [ "$DRY" = 1 ]; then
-    log "DRY-RUN would reap: nonce=$nonce pod=$pod"; reaped=$((reaped+1)); return
-  fi
-  bash "$LEASE" reaping "$nonce" >/dev/null || { log "report (claim failed): $nonce"; reported=$((reported+1)); return; }
   delete_pod "$key" "$pod" || true
   if verify_gone "$key" "$pod"; then
     bash "$LEASE" close "$nonce" >/dev/null || true
     log "REAPED: nonce=$nonce pod=$pod (deleted + verified gone)"; reaped=$((reaped+1))
   else
-    # delete not verified: leave the lease expired (re-mark enriched-ish is not needed — reaping is
-    # terminal-ish, but an unverified delete should retry; we re-open by NOT closing and logging).
-    log "RETRY: nonce=$nonce pod=$pod delete not verified — lease left for next sweep"; retried=$((retried+1))
+    # delete NOT verified gone (still present OR inconclusive): revert the lease OUT of `reaping` so
+    # the NEXT sweep retries it (Finding 2 — a `reaping` lease is otherwise skipped forever).
+    bash "$LEASE" unclaim-reaping "$nonce" >/dev/null 2>&1 || true
+    log "RETRY: nonce=$nonce pod=$pod delete not verified gone — lease reopened for next sweep"; retried=$((retried+1))
   fi
 }
 
@@ -143,6 +167,9 @@ reap_lease(){ # <nonce> <key> <pod-id>
 consider_lease(){ # <nonce>
   local nonce=$1 pod=${LEASE_POD[$nonce]} state=${LEASE_STATE[$nonce]}
   case "$state" in intent|provisional|enriched) : ;; *) return ;; esac   # closed/reaping/invalid: skip
+  # A lease with no bound pod id (a pending INTENT) is handled in step 2 by matching its nonce against
+  # the LIVE pod list — we never DELETE a placeholder id here.
+  [ -n "$pod" ] && [ "$pod" != "-" ] || return
   bash "$LEASE" is-reapable "$nonce" || { kept=$((kept+1)); return; }     # not expired -> keep
   local key_ref key
   key_ref=$(bash "$LEASE" show "$nonce" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("key_ref",""))' 2>/dev/null)
@@ -168,7 +195,8 @@ consider_lease(){ # <nonce>
   reap_lease "$nonce" "$key" "$pod"
 }
 
-log "sweep start${DRY:+ (dry-run=$DRY)} root=${GPU_JOB_LEASE_DIR:-$HOME/.config/gpu-job/leases}"
+DRY_TAG=""; [ "$DRY" = 1 ] && DRY_TAG=" (DRY-RUN)"
+log "sweep start${DRY_TAG} root=${GPU_JOB_LEASE_DIR:-$HOME/.config/gpu-job/leases}"
 
 # 1. Reap/keep over the lease registry (the only set we ever DELETE from).
 for nonce in "${!LEASE_POD[@]}"; do
@@ -192,11 +220,21 @@ for nonce in "${!LEASE_POD[@]}"; do
     # try to match an unknown pod to a PENDING INTENT by nonce (exact, ambiguous->empty=report)
     m=$(bash "$LEASE" find-nonce "$name")
     if [ -n "$m" ]; then
-      log "report (pending-intent match, not yet provisional): pod=$pod nonce=$m"; reported=$((reported+1))
+      # The created-but-id-never-returned case (Finding 4): a live pod whose NAME is an intent nonce.
+      # If that intent is EXPIRED, this pod is the half-born pod the intent exists to catch — bind the
+      # discovered id and reap it under the same locked claim. If not yet expired, just report.
+      if bash "$LEASE" is-reapable "$m"; then
+        bash "$LEASE" provisional "$m" "$pod" >/dev/null 2>&1 || true   # bind the discovered id
+        log "pending-intent EXPIRED — reaping half-born pod: pod=$pod nonce=$m"
+        reap_lease "$m" "$key" "$pod"
+      else
+        log "report (pending-intent match, not yet expired): pod=$pod nonce=$m"; reported=$((reported+1))
+      fi
     else
       log "report-only (UNKNOWN pod, no lease — NEVER deleted): pod=$pod name=$name"; reported=$((reported+1))
     fi
   done < <(list_pods "$key")
 done
 
-log "sweep done: reaped=$reaped kept=$kept reported=$reported retried=$retried${DRY:+ (DRY-RUN — nothing deleted)}"
+DONE_TAG=""; [ "$DRY" = 1 ] && DONE_TAG=" (DRY-RUN — nothing deleted)"
+log "sweep done: reaped=$reaped kept=$kept reported=$reported retried=$retried${DONE_TAG}"

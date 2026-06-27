@@ -37,9 +37,11 @@ cat "$TMP/pods.txt" 2>/dev/null || true
 EOF
 cat > "$TMP/del.sh"    <<EOF
 #!/bin/bash
-echo "\$2" >> "$DEL_LOG"      # record the deleted pod id; mark it gone so verify passes
-touch "$GONE/\$2"
+echo "\$2" >> "$DEL_LOG"      # record the deleted pod id
+# mark it gone so verify passes — UNLESS the pod id is in $TMP/nogone (simulates an unverified delete)
+grep -qx "\$2" "$TMP/nogone" 2>/dev/null || touch "$GONE/\$2"
 EOF
+: > "$TMP/nogone"
 cat > "$TMP/verify.sh" <<EOF
 #!/bin/bash
 [ -f "$GONE/\$2" ]            # exit 0 iff gone
@@ -84,8 +86,13 @@ FRESH=$(mk_lease pod-fresh 120 RUNPOD_API_KEY)
 # === fixture 2: an UNKNOWN live pod (no lease) ===
 # === fixture 3: an unresolved-key lease ===
 UNRES=$(mk_lease pod-unres -1 UNRESOLVABLE)
-# === fixture 4: a pending intent (no pod bound) whose nonce names a live pod ===
+# === fixture 4: a pending intent (no pod bound, NOT expired) whose nonce names a live pod -> report ===
 PEND=$(lease intent RUNPOD_API_KEY --expiry-min 15)
+# === fixture 4b: an EXPIRED pending intent whose nonce names a live pod -> the created-but-id-never-
+#     returned case (Finding 4): REAP the half-born pod ===
+PEXP=$(lease intent RUNPOD_API_KEY --expiry-min -1)
+# === fixture 6: an expired lease whose DELETE can't be verified -> lease REOPENED for retry (Finding 2) ===
+NOV=$(mk_lease pod-nov -1 RUNPOD_API_KEY); echo pod-nov >> "$TMP/nogone"
 # === fixture 5: legacy contract-1 leases, keepalive future / inconclusive / past ===
 LF=$(mk_lease pod-lf -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo future       > "$TMP/keepalive_pod-lf"
 LI=$(mk_lease pod-li -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo ""           > "$TMP/keepalive_pod-li"
@@ -98,6 +105,8 @@ pod-fresh $FRESH
 pod-unres $UNRES
 pod-unknown some-user-name
 $PEND $PEND
+pod-pexp $PEXP
+pod-nov $NOV
 pod-lf $LF
 pod-li $LI
 pod-lp $LP
@@ -112,11 +121,21 @@ deleted pod-unres         && no unresolved-deleted || ok unresolved-report-only
 deleted pod-lf            && no legacy-future-deleted || ok legacy-future-kept
 deleted pod-li            && no legacy-inconclusive-deleted || ok legacy-inconclusive-retry
 deleted pod-lp            && ok legacy-past-reaped || no legacy-past-reaped
-echo "$OUT" | grep -q "pending-intent match" && ok pending-intent-reported || no pending-intent-reported
+echo "$OUT" | grep -q "not yet expired" && ok pending-intent-not-expired-reported || no pending-intent-not-expired-reported
 echo "$OUT" | grep -q "UNKNOWN pod" && ok unknown-logged || no unknown-logged
 # a reaped lease is CLOSED after verified delete
 [ "$(lease show "$EXP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = closed ] \
   && ok reaped-lease-closed || no reaped-lease-closed
+# Finding 4: an EXPIRED pending-intent's half-born pod is REAPED (not just reported)
+deleted pod-pexp && ok pending-intent-expired-reaped || no pending-intent-expired-reaped
+# Finding 2: an unverified delete REOPENS the lease for retry (not stuck in `reaping`, not closed)
+deleted pod-nov && ok nov-delete-attempted || no nov-delete-attempted
+nov_state=$(lease show "$NOV" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')
+case "$nov_state" in
+  provisional|enriched|intent) ok nov-reopened-for-retry ;;
+  *) no "nov-reopened-for-retry (state=$nov_state)" ;;
+esac
+if lease is-reapable "$NOV"; then ok nov-reapable-again || true; else no nov-reapable-again; fi
 
 # === locked-reap race (Finding 1): a refresh that lands before the reaper's in-lock recheck SAVES
 #     the pod. Simulate by refreshing the expired lease to a future expiry, THEN sweeping. ===

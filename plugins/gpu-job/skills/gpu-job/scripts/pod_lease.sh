@@ -31,10 +31,16 @@
 #                                               SAME lock the reaper's delete takes.
 #   close   <id>                             -> ONLY after the pod's deletion is verified on the
 #                                               control plane (caller's job). Terminal.
-#   reaping <id>                             -> mark a lease as being reaped (set by pod_reaper.sh
-#                                               INSIDE the lock, only when still expired). Terminal-ish.
+#   claim-reaping <id>                       -> ATOMIC locked-reap claim: in ONE lock, re-check the
+#                                               lease is still expired AND mark it `reaping`. Exit 0 =
+#                                               claimed (caller may DELETE); exit 1 = a refresh moved
+#                                               expiry forward, no mutation (keep). pod_reaper.sh uses
+#                                               this (NOT is-reapable + reaping, which has a race window).
+#   unclaim-reaping <id>                     -> revert a `reaping` lease to a reapable active state so
+#                                               the NEXT sweep retries it (used on an UNVERIFIED delete).
+#   reaping <id>                             -> mark a lease `reaping` unconditionally (low-level).
 #   is-reapable <id>                         -> exit 0 iff state is registerable AND expiry_at is in
-#                                               the PAST; else exit 1. (Used by pod_reaper.sh under lock.)
+#                                               the PAST; else exit 1. (Read-only probe.)
 #   show / list / path / lock-path / find-nonce  -> inspection + the reaper's primitives.
 #
 # <id> is the NONCE for an intent/provisional lease and stays the nonce after provisional/enrich, so
@@ -288,8 +294,8 @@ cmd_close(){
   echo "closed lease $id"
 }
 
-# reaping: pod_reaper.sh sets this INSIDE the lock once it confirms the lease is still expired, just
-# before issuing the DELETE. Refuses to mark a closed lease.
+# reaping: mark a lease `reaping` unconditionally (low-level). pod_reaper.sh uses claim-reaping (the
+# atomic re-check + mark) instead; this is kept for direct/diagnostic use. Refuses to mark a closed lease.
 cmd_reaping(){
   local id=$1; local file; file=$(record_path "$id")
   local state; state=$(classify_record "$file")
@@ -302,6 +308,56 @@ cmd_reaping(){
   esac
   STATE=reaping write_record "$file"
   echo "marked lease $id reaping"
+}
+
+# claim-reaping: the ATOMIC locked-reap claim (code-review Finding 1). In ONE lock acquisition it
+# RE-CHECKS that the lease is still reapable (expiry still in the past) AND marks it `reaping`. Exit 0
+# iff the claim succeeded (caller may now DELETE); exit 1 if a concurrent refresh moved expiry into the
+# future (no mutation — the pod is kept). This collapses the former is-reapable + reaping two-call
+# window where a refresh could land between the unlock and the mark.
+cmd_claim_reaping(){
+  local id=$1; local file; file=$(record_path "$id")
+  # reapable? (same predicate as is-reapable, but evaluated HERE inside the lock)
+  local reapable
+  reapable=$(python3 - "$file" <<'PY'
+import json, sys, time
+try:
+    d = json.load(open(sys.argv[1]))
+    if not isinstance(d, dict):
+        raise ValueError
+except Exception:
+    print("no"); sys.exit(0)
+state = d.get("state")
+exp = d.get("expiry_at")
+if state in ("intent", "provisional", "enriched") and isinstance(exp, int) and exp <= int(time.time()):
+    print("yes")
+else:
+    print("no")
+PY
+)
+  [ "$reapable" = yes ] || { echo "claim-reaping: lease '$id' not reapable (refreshed/closed) — keep" >&2; exit 1; }
+  STATE=reaping write_record "$file"
+  echo "claimed lease $id for reaping"
+}
+
+# unclaim-reaping: revert a `reaping` lease back to a reapable active state (code-review Finding 2) —
+# used when the DELETE could not be verified gone, so the NEXT sweep retries it (a `reaping` lease is
+# skipped by the sweep otherwise). Restores `enriched` if an SSH endpoint is recorded, else `provisional`.
+# expiry_at is left in the past, so the reverted lease is immediately reapable again.
+cmd_unclaim_reaping(){
+  local id=$1; local file; file=$(record_path "$id")
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    reaping) : ;;
+    closed)  die "unclaim-reaping: lease '$id' is closed — refusing";;
+    absent)  die "unclaim-reaping: no lease for '$id'";;
+    invalid) die "unclaim-reaping: lease '$id' is malformed — inspect $file";;
+    *) echo "unclaim-reaping: lease '$id' not in reaping ($state) — no-op"; return 0;;
+  esac
+  local back; back=provisional
+  [ -n "$(get_field "$file" ssh)" ] && back=enriched
+  STATE="$back" write_record "$file"
+  echo "unclaimed lease $id (back to $back for retry)"
 }
 
 # is-reapable: exit 0 iff the lease is in a deletable state AND its expiry_at is in the PAST. A
@@ -394,6 +450,14 @@ main(){
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "reaping: unexpected extra argument(s): $*"
       with_lock "$id" cmd_reaping "$id";;
+    claim-reaping)
+      validate_id "${1:-}"; local id=$1; shift
+      [ $# -eq 0 ] || die "claim-reaping: unexpected extra argument(s): $*"
+      with_lock "$id" cmd_claim_reaping "$id";;
+    unclaim-reaping)
+      validate_id "${1:-}"; local id=$1; shift
+      [ $# -eq 0 ] || die "unclaim-reaping: unexpected extra argument(s): $*"
+      with_lock "$id" cmd_unclaim_reaping "$id";;
     is-reapable)
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "is-reapable: unexpected extra argument(s): $*"
@@ -410,7 +474,7 @@ main(){
     find-nonce)
       [ $# -eq 1 ] || die "usage: pod_lease.sh find-nonce <pod-name>"
       cmd_find_nonce "$1";;
-    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
+    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|reaping|claim-reaping|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
     *) die "unknown subcommand '$sub'";;
   esac
 }
