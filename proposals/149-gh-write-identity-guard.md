@@ -23,15 +23,20 @@ anything that bypasses `wf.sh` is owner-authored. Nothing prevents the bypass.
 
 ## Approach
 
-**Make the ambient `GH_TOKEN` read-only, so a bare `gh` write fails closed.** Stop exporting a
-write-capable owner token into agent shells; export a token that can *read* (issues/PRs/contents/metadata)
-but cannot *mutate*. Reads (`gh … view/list`, `gh api` GETs) keep working ambiently. Any bare mutating
-`gh` (`issue/pr create`, `*comment`, `pr review/merge`, `issue edit/close`, `api -X POST/PATCH/PUT/DELETE`)
-now gets an HTTP 403 from GitHub — a hard, structural failure the agent cannot reflex past. The only path
-that can write is the engineer path, because `wf.sh` mints its own write-capable engineer installation
-token per call and never relies on the ambient one. This is the seam the product owner leans toward, and
-on inspection it is the cleanest: it removes the dangerous capability at the source rather than trying to
-intercept every shape of a `gh` invocation after the fact.
+**Make the ambient `gh` credential read-only, so a bare `gh` write fails closed.** The contract is over
+the **effective `gh` credential store an agent shell can reach**, not merely the exported `GH_TOKEN`: `gh`
+resolves auth from `GH_TOKEN`/`GITHUB_TOKEN` *and* from a stored `gh auth login` credential
+(`hosts.yml`/keyring), and `wf.sh`'s own `need_ambient_gh` falls back to `gh auth status`. So the
+guarantee is: **no write-capable owner credential is reachable by an agent shell through any of those
+paths** — the exported token is read-only *and* no write-capable stored owner `gh auth` credential is
+present (or it is isolated out of the agent shell's `GH_CONFIG_DIR`). Export a token that can *read*
+(issues/PRs/contents/metadata) but cannot *mutate*. Reads (`gh … view/list`, `gh api` GETs) keep working
+ambiently. Any bare mutating `gh` (`issue/pr create`, `*comment`, `pr review/merge`, `issue edit/close`,
+`api -X POST/PATCH/PUT/DELETE`) now gets an HTTP 403 from GitHub — a hard, structural failure the agent
+cannot reflex past. The only path that can write is the engineer path, because `wf.sh` mints its own
+write-capable engineer installation token per call and never relies on the ambient one. This is the seam
+the product owner leans toward, and on inspection it is the cleanest: it removes the dangerous capability
+at the source rather than trying to intercept every shape of a `gh` invocation after the fact.
 
 This is deliberately a **defense-in-depth pair**, not a single mechanism:
 
@@ -62,16 +67,24 @@ This is deliberately a **defense-in-depth pair**, not a single mechanism:
    operator to have sourced an elevated owner token (see Escape hatch). The two are independent and both
    are required for an owner write.
 
-   **The `wf.sh`↔guard bypass contract (load-bearing — resolves the HIGH).** Because a `GH_TOKEN` swap is
-   invisible to a PATH wrapper, `wf.sh` must mark its own internal `gh` calls with an explicit signal the
-   guard recognizes and lets straight through to the real `gh`. Child #2 owns BOTH halves of this contract
-   as one atomic unit: (i) `wf.sh`'s `gh_author`/`gh_push` (and any other internal `gh` call site) set a
-   scoped marker — either an env var like `WF_GH_INTERNAL=1` exported only around the minted-token call, or
-   by invoking a resolved real-`gh` path directly — so the call is unambiguously the engineer path; and
-   (ii) the wrapper passes a call bearing that marker through untouched and never recurses. The child's
-   `.aar-ci` behavior smoke MUST assert both directions: a bare mutating `gh` is blocked, AND a
-   `wf.sh`-routed write (carrying the marker) is allowed. This is the explicit guard contract on the
-   `wf.sh` call sites the design review flagged.
+   **The `wf.sh`↔guard bypass contract (load-bearing — resolves the original HIGH).** Because a `GH_TOKEN`
+   swap is invisible to a PATH wrapper, `wf.sh` must mark its own internal `gh` calls with an explicit
+   signal the guard recognizes and lets straight through to the real `gh`. Child #1 owns BOTH halves of
+   this contract as one atomic unit: (i) `wf.sh`'s `gh_author` (and any other internal `gh` call site) set
+   a scoped marker — either an env var like `WF_GH_INTERNAL=1` exported only around the minted-token call,
+   or by invoking a resolved real-`gh` path directly — so the call is unambiguously the engineer path; and
+   (ii) the wrapper passes a call bearing that marker through untouched and never recurses.
+
+   **The contract MUST also cover the authenticated-`git push` credential-helper path.** `wf.sh`'s
+   `gh_push`/`git_push_author` runs `GH_TOKEN="$tok" git push …`, and `git push` over HTTPS can invoke
+   `gh` itself as a **credential helper** (`gh auth git-credential`). A naive PATH wrapper around `gh`
+   would therefore intercept the credential-helper invocation mid-push and break the engineer push. So the
+   wrapper must recognize and pass through the `gh auth git-credential` (and `gh auth …`) helper
+   invocations unconditionally — those are not user writes — in addition to the marked engineer calls; and
+   the `.aar-ci` behavior smoke MUST exercise the **full engineer push path end-to-end** (a `wf.sh`-routed
+   push succeeds through the wrapper), not only direct `gh issue/comment` calls. Both directions asserted:
+   a bare mutating `gh` is blocked; a `wf.sh`-routed write **and push** (carrying the marker / using the
+   credential helper) are allowed.
 
 **Escape hatch (owner/admin maintenance).** Real owner work still exists (editing branch protection,
 repo settings, an emergency merge-rule relax). That path is explicit and logged, not ambient, and is the
@@ -115,15 +128,25 @@ applies the capability change to itself.
    call-site change that marks internal engineer-token `gh` calls with the recognized bypass signal, and a
    behavior smoke asserting **both** directions (bare write blocked; `wf.sh`-routed write allowed). Owns
    the guard-specific override flag.
-2. **Read-only-ambient detector: `wf.sh doctor` check + a `.aar-ci` fake-`gh` smoke (product).** Defines
-   and implements the *exact* test that an ambient credential is read-only (Finding 3). The detection is a
-   **non-destructive permission introspection** — read the token's effective permissions via
-   `gh api -i` response headers / the installation or fine-grained-PAT permission surface, or fall back to
-   a **controlled, self-targeted canary** that attempts a guaranteed-idempotent no-op write and expects a
-   403 (never a mutation that lands). The fake-`gh` smoke supplies a stub `gh` that reports read-only vs
-   write-capable and asserts `doctor` distinguishes them. Fails loudly if an install still hands agents a
-   write-capable ambient token, so a regression/rollback is caught instead of silently re-opening the
-   footgun.
+2. **Read-only-ambient detector: `wf.sh doctor` check + a `.aar-ci` fake-`gh` smoke (product).** Implements
+   ONE concrete, non-mutating test (Finding 3 — this design picks the method, it is not a placeholder):
+   **a forbidden-by-permission probe that never mutates.** `doctor` issues a write-method API call whose
+   target the token is *not authorized to mutate by content but is authorized to reach by metadata* — the
+   canonical form is `gh api --method PATCH "repos/{owner}/{repo}" -f name="{repo}"` (an identity PATCH:
+   sets the name to its existing value, so even on the unreachable write-capable branch it is a semantic
+   no-op) and inspects the **HTTP status only**: a **403** (Resource not accessible / permission denied)
+   ⇒ the credential is **read-only** (PASS); a **2xx/422** ⇒ the credential **can write** (FAIL, loud). The
+   call deliberately reads the status code via `gh api -i` / `--include` and never trusts the body. This is
+   chosen over header-scope introspection because fine-grained PATs and installation tokens do **not**
+   return classic `x-oauth-scopes` headers, so the permission-denied status is the only portable signal.
+   The `.aar-ci` fake-`gh` smoke supplies a stub `gh` that returns 403 for the read-only fixture and 2xx
+   for the write-capable fixture and asserts `doctor` reports read-only vs write-capable accordingly. Fails
+   loudly if an install still hands agents a write-capable ambient token, so a regression/rollback is
+   caught instead of silently re-opening the footgun. (If on implementation an identity-PATCH proves to
+   land a no-op audit-log event the instance dislikes, the fallback probe is the same shape against a
+   guaranteed-404 path — e.g. `PATCH /repos/{owner}/{repo}/labels/{random-uuid}` — where read-only ⇒ 403
+   and write-capable ⇒ 404; the smoke contract is identical. This is an implementation fallback, not a
+   second design.)
 3. **Codify the contract across ALL its canonical homes — one canonical reference, no duplicate live
    contracts (product, doc-only; Finding 5).** Add the rule to `AGENTS.md` ("the ambient agent GitHub
    credential MUST be read-only; all writes go through the engineer token path"), next to the existing
@@ -138,8 +161,12 @@ applies the capability change to itself.
 - **Demote this instance's ambient agent credential to read-only + wire the separate elevated owner
   token** in the auth-env loader / `~/.config`. This is the load-bearing capability change, but it is
   instance-owned credential config; it is tracked as an instance rollout task (and gated on product
-  children 1–2 being available), not as a product `ready` issue. The product child #2's doctor check is
-  what verifies this rollout actually took effect on any given install.
+  children 1–2 being available), not as a product `ready` issue. Per Finding 1 it must close the **full**
+  ambient write surface, not just the exported token: (a) the exported `GH_TOKEN`/`GITHUB_TOKEN` becomes
+  read-only, AND (b) any write-capable stored owner `gh auth login` credential is removed from or isolated
+  out of the agent shell's `GH_CONFIG_DIR` (so a stored-credential fallback can't re-open the hole). The
+  product child #2's doctor check — which probes the *effective* resolved credential — is what verifies
+  this rollout actually took effect on any given install, covering both paths.
 
 Sequencing: product children 1–3 land first (the guard, the detector, the contract). The instance then
 performs the capability demotion and runs `wf.sh doctor` to confirm the ambient token is read-only and a
