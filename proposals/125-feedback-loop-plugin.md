@@ -39,9 +39,9 @@ The plugin uses the same Agent Skills layout as the existing modules. README and
 optional but recommended: it is how users report product friction and how maintainers process that friction.
 Codex installs symlink the two skill dirs independently.
 
-`feedback_loop_init.sh` must be discoverable from either skill. The canonical implementation can live in one
-place, but `triage-feedback` must ship an executable wrapper or copy so a maintainer-only install can configure
-`FEEDBACK_PRODUCT_REPO` without also installing `file-feedback`.
+`feedback_loop_init.sh` must be discoverable from either skill. Because Codex installs symlink skill
+directories independently, a cross-skill wrapper is not reliable for a maintainer-only install. Ship the full
+script in both skill dirs and add a deterministic CI drift check so the two copies cannot silently diverge.
 
 ### Local config
 
@@ -56,12 +56,10 @@ The config keys are:
 - `FEEDBACK_INSTANCE_BACKLOG_FILE`: optional local backlog destination for deployment-only ideas.
 - `FEEDBACK_INSTANCE_GOTCHAS_ARCHIVE`: optional closed gotcha archive, used by `triage-feedback` when configured.
 - `FEEDBACK_INSTANCE_BACKLOG_ARCHIVE`: optional closed backlog archive, used by `triage-feedback` when configured.
-- `FEEDBACK_PEER_COORDINATION`: optional free-text pointer to the consuming instance's coordination channel,
-  surfaced before touching files or helpers that may be under live ownership.
-- `FEEDBACK_INSTANCE_CHANGELOG`: optional local changelog pointer, surfaced as the release-note destination for
-  instance-visible changes.
-- `FEEDBACK_INSTANCE_PIPELINES_DIR`: optional local pipelines/helper pointer, used as context when triaging
-  instance gotchas that can become code.
+- `FEEDBACK_INSTANCE_GUIDANCE`: optional path or URI to the consuming instance's feedback/coordination
+  guidance. This is where an instance names its peer-coordination channel, changelog, local helper/pipeline
+  homes, live-ownership conventions, and richer archive policy. The product skill surfaces this pointer when it
+  needs instance-specific instructions instead of freezing those slots into the product schema.
 - `FEEDBACK_ISSUE_COMMAND`: optional issue creation/comment command override.
 
 The initializer always requires `FEEDBACK_PRODUCT_REPO` through an environment preseed or an interactive prompt.
@@ -98,8 +96,10 @@ and never writes to `/home/anton/...` unless the instance config explicitly poin
 For instance-only file targets, the skill owns only the generic shape: symptom -> cause -> fix/cost for gotchas,
 and what/why/take/next-step for backlog ideas. When archive keys are configured, `triage-feedback` may perform
 the generic close-by-move operation: remove the resolved entry from the configured live file and append a
-one-line pointer to the configured archive. The product owns only that generic operation and the marker vocabulary;
-the consuming instance owns which files exist, what local entries mean, and any richer archive policy.
+one-line pointer to the configured archive. The product owns that generic operation and a generic marker
+vocabulary (`codified`, `promoted`, `gated`, `parked`). The consuming instance owns which files exist, what local
+entries mean, any legacy markers already present in its archives, and any richer archive policy surfaced through
+`FEEDBACK_INSTANCE_GUIDANCE`.
 
 ### `triage-feedback`
 
@@ -112,11 +112,15 @@ Its reusable core is product issue and PR triage: maintain disposition labels, c
 ready/needs-design/needs-shaping/blocked/parked/other, group duplicates, and route product-scaffold fixes through
 `ship-change`.
 
-The skill must not run automatically; it is an explicit maintainer pass. It can mention an instance's configured
-coordination channel for live ownership checks, but it cannot require `message-aar` or a `CLAIMED_BY` convention.
-When configured, it should use `FEEDBACK_PEER_COORDINATION`, `FEEDBACK_INSTANCE_PIPELINES_DIR`, and
-`FEEDBACK_INSTANCE_CHANGELOG` as concrete pointers for coordination, code-home inspection, and release notes;
-when unset, it should say the relevant instance key is missing instead of naming Anton paths.
+The skill must not run automatically; it is an explicit maintainer pass. It can surface
+`FEEDBACK_INSTANCE_GUIDANCE` before touching instance files or helpers, but it cannot require `message-aar`, a
+`CLAIMED_BY` convention, or any named local pipeline/changelog path. When the guidance pointer is unset, it
+should say the instance guidance key is missing instead of naming Anton paths.
+
+When `aar-engineering` / `ship-change` is absent, `triage-feedback` can still maintain issue dispositions and
+summarize the maintainer plan, but it must not pretend to ship product code. For a product-scaffold fix, it
+drafts the ready issue/PR plan and stops with "install or configure `aar-engineering` to ship this fix" rather
+than inventing an alternate merge path.
 
 Checklist promotion is split by genericity:
 
@@ -161,8 +165,9 @@ Update the lifecycle skills/templates so feedback has a concrete product pointer
   clearer, and cannot misroute an outside install's feedback to Anton's tracker.
 - **Require `aar-engineering` for issue filing.** Rejected: the integration is valuable when configured, but a
   product user should still get a safe draft/fallback when engineer Apps are not installed.
-- **Move all instance archive procedure into product.** Rejected: local gotcha/archive filenames and emoji
-  markers are deployment policy. The product should provide routing and shape, not freeze Anton's file layout.
+- **Move all instance archive procedure into product.** Rejected in the strong form: local filenames, legacy
+  archive history, coordination rules, and rich close policy are deployment-owned. The product owns only the
+  generic close-by-move operation and generic marker vocabulary needed for portable `triage-feedback` behavior.
 
 ## Blast radius
 
@@ -189,8 +194,9 @@ work session and keep instance-only file/archive details in `/home/anton` guidan
 1. Run `feedback_loop_init.sh` non-interactively with Anton's real values so `~/.config/feedback-loop/env` exists
    before any wrapper points at the new product skill.
 2. Flip the local Claude/Codex wrapper skills for `file-feedback` and `triage-feedback` to point at the product
-   plugin source.
-3. Reload or restart live sessions that need the changed skills.
+   plugin source, after checking that no in-flight experiment is currently in its close retro.
+3. Use the instance's fleet-propagation path (`update-fleet` on this deployment) or an equivalent reload/restart
+   for live sessions that need the changed skills, coordinated through the configured instance guidance.
 
 If that instance flip cannot be completed immediately, open a tracked instance follow-up before marking this
 shipped; do not leave two independently-editable live copies as the steady state.
