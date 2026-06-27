@@ -1333,7 +1333,19 @@ Split into one design PR per doc."
   #     Best-effort — a cosmetic body refresh must never block an otherwise-clean merge. Uses the REST API
   #     (gh api PATCH), NOT `gh pr edit`: the latter issues a GraphQL query needing read:org, which a minimal
   #     repo-scoped token lacks, so it silently no-op'd the refresh (#43). REST pulls PATCH needs only `repo`.
-  FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
+  # Prefer THIS branch's OWN design doc (proposals/<issue>-*.md) over a lexically-first sibling: a PR that
+  # MOVES many design docs (e.g. the proposals/->designs/ rename) would otherwise refresh the PR body from an
+  # unrelated doc — `head -1` picks proposals/10-* and rewrites the body to "Closes #10", tripping the
+  # close-gate (#180). The branch name carries the PR's issue (change/<issue>-<slug>); select the changed doc
+  # named for it, and fall back to the first changed doc only when none matches. The `|| true` keeps a no-match
+  # `grep` (set -euo pipefail -> rc 1) from aborting this best-effort refresh.
+  BRISSUE=$(printf '%s\n' "$BR" | sed -nE 's#^change/([0-9]+)-.*#\1#p')
+  FDOC=""
+  if [ -n "$BRISSUE" ]; then
+    FDOC=$( (cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ \
+              | grep -E "/${BRISSUE}-[^/]*\.md$" | head -1) || true)
+  fi
+  [ -n "$FDOC" ] || FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
   if [ -n "$FDOC" ]; then
     FISSUE=$(basename "$FDOC" | sed -E 's/^([0-9]+)-.*/\1/')
     # mktemp -> a guaranteed-unique path (no stale-path/dir collision); fall back to a fixed path if mktemp
