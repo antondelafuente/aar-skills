@@ -27,7 +27,6 @@ import json
 import os
 import pathlib
 import re
-import subprocess
 import sys
 
 root = pathlib.Path(os.environ["CHECK_ROOT"])
