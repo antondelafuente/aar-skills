@@ -77,9 +77,34 @@ else:
 PY
 }
 
+# Classify a record path's on-disk state in ONE word so the shell can fail closed correctly (a corrupt
+# record must NEVER be treated as an empty active one). Prints: absent | invalid | active | stopped | closed.
+classify_record(){ # <file>
+  python3 - "$1" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+if not os.path.exists(path):
+    print("absent"); sys.exit(0)
+try:
+    d = json.load(open(path))
+    if not isinstance(d, dict):
+        raise ValueError
+except Exception:
+    print("invalid"); sys.exit(0)
+if d.get("closed") is True:
+    print("closed")
+elif d.get("stopped") is True:
+    print("stopped")
+else:
+    print("active")
+PY
+}
+
 # Atomically write the record from a python dict built on stdin-supplied kwargs. Always under the lock.
 # Args after <file>: handoff (or "" = leave), add_pods (newline list), set_stopped, set_closed (each
-# "true"/"false"/""), create (true/false). Preserves existing fields it doesn't touch.
+# "true"/"false"/""), create (true/false). Preserves existing fields it doesn't touch. On `create` it
+# writes a fresh record (the on-disk state has already been classified + guarded by the caller); for any
+# non-create mutation, malformed existing JSON fails CLOSED (exit 3) rather than being treated as empty.
 write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create>
   local file=$1 handoff=$2 add_pods=$3 set_stopped=$4 set_closed=$5 create=$6
   HANDOFF="$handoff" ADD_PODS="$add_pods" SET_STOPPED="$set_stopped" SET_CLOSED="$set_closed" CREATE="$create" \
@@ -87,15 +112,22 @@ write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create
 import json, os, sys, tempfile, time
 
 path = sys.argv[1]
+creating = os.environ.get("CREATE") == "true"
 try:
     rec = json.load(open(path))
     if not isinstance(rec, dict):
         raise ValueError
+except FileNotFoundError:
+    rec = {}
 except Exception:
+    if not creating:
+        # malformed existing record on a non-create mutation: fail CLOSED, never silently resurrect.
+        sys.stderr.write("malformed run-supervision record JSON: %s\n" % path)
+        sys.exit(3)
     rec = {}
 
 now = int(time.time())
-if os.environ.get("CREATE") == "true":
+if creating:
     rec = {
         "run_id": os.path.basename(path)[:-5] if path.endswith(".json") else os.path.basename(path),
         "desired_active": True,
@@ -156,16 +188,33 @@ with_lock(){ # <run-id> <fn> [args...]
   "$@"
 }
 
+# Require an option's value to be present AND non-empty (an empty $VAR expanded into --handoff/--lease-pod
+# is a caller bug — fail loudly rather than silently registering nothing).
+require_val(){ # <flag> <value>
+  [ -n "${2:-}" ] || die "$1 requires a non-empty value (got empty/missing)"
+}
+
 cmd_create(){
   local id=$1; shift
-  local handoff=""
+  local handoff="" got_handoff=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --handoff) handoff=${2:-}; shift 2;;
+      --handoff) require_val --handoff "${2:-}"; handoff=$2; got_handoff=1; shift 2;;
       *) die "create: unknown arg '$1'";;
     esac
   done
   local file; file=$(record_path "$id")
+  # Guard the existing on-disk state INSIDE the lock: never reset a terminal record back to desired-active,
+  # and never silently overwrite a corrupt record. `create` is only valid when there is no record yet.
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    absent)  : ;;  # the only clean create
+    stopped) die "create: run '$id' already exists and is stopped (terminal) — refusing to reset to desired-active";;
+    closed)  die "create: run '$id' already exists and is closed (terminal) — refusing to reset to desired-active";;
+    active)  die "create: run '$id' already exists and is active — use 'update' to refresh it";;
+    invalid) die "create: run '$id' has a malformed record on disk — inspect/remove $file before re-creating";;
+    *)       die "create: unexpected record state '$state' for '$id'";;
+  esac
   write_record "$file" "$handoff" "" "" "" "true"
   echo "created run-supervision record: $file (desired-active)"
 }
@@ -175,16 +224,22 @@ cmd_update(){
   local handoff="" pods=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --handoff)   handoff=${2:-}; shift 2;;
-      --lease-pod) pods="${pods}${2:-}"$'\n'; shift 2;;
+      --handoff)   require_val --handoff "${2:-}";   handoff=$2;             shift 2;;
+      --lease-pod) require_val --lease-pod "${2:-}"; pods="${pods}${2}"$'\n'; shift 2;;
       *) die "update: unknown arg '$1'";;
     esac
   done
   local file; file=$(record_path "$id")
-  [ -f "$file" ] || die "update: no record for '$id' (create it first)"
-  # terminal-state guard INSIDE the lock — never resurrect a stopped/closed run
-  if [ "$(get_field "$file" stopped)" = "true" ]; then die "update: run '$id' is stopped (terminal) — refusing to modify"; fi
-  if [ "$(get_field "$file" closed)"  = "true" ]; then die "update: run '$id' is closed (terminal) — refusing to modify"; fi
+  # Classify INSIDE the lock — distinguishes absent / invalid / terminal and fails closed on each.
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    absent)  die "update: no record for '$id' (create it first)";;
+    invalid) die "update: run '$id' has a malformed record on disk — refusing to modify (inspect $file)";;
+    stopped) die "update: run '$id' is stopped (terminal) — refusing to modify";;
+    closed)  die "update: run '$id' is closed (terminal) — refusing to modify";;
+    active)  : ;;
+    *)       die "update: unexpected record state '$state' for '$id'";;
+  esac
   write_record "$file" "$handoff" "$pods" "" "" "false"
   echo "updated run-supervision record: $file"
 }

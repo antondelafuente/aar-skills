@@ -54,6 +54,26 @@ if run update r2 --handoff /evil >/dev/null 2>&1; then no close-blocks-update; e
 # --- invalid run-id rejected (path-traversal safe) ---
 if run create '../evil' >/dev/null 2>&1; then no reject-traversal; else ok reject-traversal; fi
 
+# --- create over an existing record is refused (no resetting terminal/active state) ---
+if run create r1 >/dev/null 2>&1; then no create-over-stopped-refused; else ok create-over-stopped-refused; fi
+[ "$(run show r1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["stopped"])')" = True ] \
+  && ok create-over-stopped-keeps-terminal || no create-over-stopped-keeps-terminal
+run create r3 >/dev/null
+if run create r3 >/dev/null 2>&1; then no create-over-active-refused; else ok create-over-active-refused; fi
+
+# --- malformed existing JSON fails CLOSED on update/stop/close, and is-desired-active says NO ---
+printf 'not json{' > "$TMP/broken.json"
+if run update broken --handoff /x >/dev/null 2>&1; then no corrupt-update-failclosed; else ok corrupt-update-failclosed; fi
+if run stop broken >/dev/null 2>&1; then no corrupt-stop-failclosed; else ok corrupt-stop-failclosed; fi
+if active broken; then no corrupt-not-active; else ok corrupt-not-active; fi
+# the corrupt file was NOT overwritten by the refused update
+grep -q 'not json' "$TMP/broken.json" && ok corrupt-untouched || no corrupt-untouched
+
+# --- empty option values are rejected (caller bug, not a silent no-op) ---
+run create r4 >/dev/null
+if run update r4 --handoff "" >/dev/null 2>&1; then no empty-handoff-rejected; else ok empty-handoff-rejected; fi
+if run update r4 --lease-pod "" >/dev/null 2>&1; then no empty-pod-rejected; else ok empty-pod-rejected; fi
+
 # --- RACE: many concurrent updates against a stop must never re-activate the run (Finding 1) ---
 run create rc --handoff /art/rc/TEMP.md >/dev/null
 for i in $(seq 1 40); do run update rc --lease-pod "p$i" >/dev/null 2>&1 & done
