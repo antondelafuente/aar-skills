@@ -46,6 +46,16 @@ e.g. "if any single arm wins >90% the selection is degenerate".>
 - When summaries are uploaded, print exactly: **`<NAME> DONE <metric1>=<n> <metric2>=<n> …`**.
 - If stuck >15 min, print **`<NAME> BLOCKED: <one-line reason>`** and stop — don't spin.
 
+## Resilience (be resumable by a model-free supervisor — maintain continuously, not at close)
+- Checkpoint run state to DISK, not only the conversation: pod ids, what's collected, the pre-registered decision
+  rules live in the artifact dir / this file / the ledger (a fresh successor only has the disk).
+- Keep a standing successor handoff at `<TEMP.md path>` (pointers only — pod ids, artifact paths, look-again
+  deadline, next action; never trigger-prone prose); refresh it at every checkpoint.
+- Write the run-supervision record at run start and keep it current:
+  `run_supervision_record.sh create <run-id> --handoff <TEMP.md path>`, then `update … --lease-pod <id>` at each
+  checkpoint. At close it's a POST-AUDIT finalizer: `close <run-id>` (finished) / `stop <run-id>` (deliberate
+  quit) — never cleared early. (See the run-experiment resume contract + the CHECKLIST open/close gates.)
+
 ## Constraints
 - Touch only your work dir (+ read the repo, shared envs, inputs).
 - Throwaway environment. Match the reference recipe exactly EXCEPT the variable under test; get the numbers; upload; report.

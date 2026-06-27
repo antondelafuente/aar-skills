@@ -224,4 +224,17 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/verify-claims/skills/verify-
   fi
 fi
 
+# 10. run-supervision-record smoke (#168): the monotonic state machine + fail-closed is-desired-active +
+#     atomic writes + the update-vs-stop/close race — behavior the JSON/syntax checks can't cover. Runs
+#     when the helper or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/scripts/run_supervision_record(_smoke)?\.sh$'; then
+  RSR_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/run_supervision_record_smoke.sh"
+  if [ -f "$RSR_SMOKE" ]; then
+    echo "[checks] run-supervision-record smoke" >&2
+    bash "$RSR_SMOKE" >&2 && ok "run_supervision_record smoke" || err "run_supervision_record smoke FAILED"
+  else
+    err "run_supervision_record.sh changed but run_supervision_record_smoke.sh missing — cannot verify the record helper"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }
