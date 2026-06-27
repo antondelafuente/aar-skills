@@ -35,6 +35,12 @@ while IFS= read -r line || [ -n "$line" ]; do
   [ "$sev" = HIGH ] && high_ids+=("$id")
 done < "$FIND"
 
+# A committed dispositions file must be valid JSON even when this round has no HIGHs — a malformed
+# committed file is invalid gate state and must not pass silently just because nothing blocks today.
+if [ -n "$DISP" ] && [ -f "$DISP" ]; then
+  jq -e . "$DISP" >/dev/null 2>&1 || block "dispositions file is not valid JSON: $DISP"
+fi
+
 # No HIGH findings -> nothing to gate. A missing dispositions file is acceptable ONLY in this case.
 if [ "${#high_ids[@]}" -eq 0 ]; then
   echo "DISPOSITION-GATE: PASS"
@@ -74,7 +80,13 @@ for id in "${high_ids[@]}"; do
         || block "finding $id: fixed commit '$commit' not found in this repo"
       # Must be IN this PR branch — an existing object from an unrelated branch must not satisfy `fixed`.
       git merge-base --is-ancestor "$commit" HEAD 2>/dev/null \
-        || block "finding $id: fixed commit '$commit' is not in this PR branch (not an ancestor of HEAD)" ;;
+        || block "finding $id: fixed commit '$commit' is not reachable from HEAD"
+      # Must be IN THE PR RANGE (<base>..HEAD), not merely any ancestor — an old base/main commit is not a
+      # fix made in this PR.
+      base=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || true)
+      if [ -n "$base" ] && git merge-base --is-ancestor "$commit" "$base" 2>/dev/null; then
+        block "finding $id: fixed commit '$commit' is in the base branch, not a fix made in this PR (must be in <base>..HEAD)"
+      fi ;;
     refuted)
       : ;; # reason is advisory context for the model reviewer; structurally complete
   esac

@@ -83,13 +83,31 @@ d=$(disp '{"altitude":"whatever","findings":[{"id":"F1","severity":"HIGH","statu
 expect BLOCK invalid-altitude "$d" "$(find_ 'F1 HIGH')"
 
 # 15. `fixed` commit that EXISTS but is NOT an ancestor of HEAD (e.g. an unrelated branch) -> BLOCK.
-ORPHAN=$(printf 'orphan' | git commit-tree "$(git rev-parse 'HEAD^{tree}')")
-d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$ORPHAN\"}]}")
-expect BLOCK fixed-non-ancestor "$d" "$(find_ 'F1 HIGH')"
+#     Guard the setup: a vacuous test (orphan creation failed) must FAIL, not silently "pass".
+ORPHAN=$(printf 'orphan' | git commit-tree "$(git rev-parse 'HEAD^{tree}')" 2>/dev/null || true)
+if [ -n "$ORPHAN" ] && ! git merge-base --is-ancestor "$ORPHAN" HEAD 2>/dev/null; then
+  d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$ORPHAN\"}]}")
+  expect BLOCK fixed-non-ancestor "$d" "$(find_ 'F1 HIGH')"
+else
+  echo "FAIL fixed-non-ancestor: could not create a genuine non-ancestor commit"; fails=1
+fi
 
 # 16. malformed findings line (missing severity) -> BLOCK (fail-closed, never fail-open to zero HIGHs).
 d=$(disp '{"altitude":"implementation","findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
 expect BLOCK malformed-findings-line "$d" "$(find_ 'F1')"
+
+# 17. `fixed` commit in the BASE (ancestor of the merge-base with main), not a fix made in this PR -> BLOCK.
+BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || true)
+if [ -n "$BASE" ]; then
+  d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$BASE\"}]}")
+  expect BLOCK fixed-in-base "$d" "$(find_ 'F1 HIGH')"
+else
+  echo "skip fixed-in-base: no base ref (origin/main or main) available"
+fi
+
+# 18. malformed dispositions file with NO HIGH findings -> BLOCK (committed invalid state must not pass).
+d=$(disp '{not valid json')
+expect BLOCK malformed-file-no-high "$d" "$(find_ 'F1 MED')"
 
 if [ "$fails" -eq 0 ]; then echo "disposition_gate_smoke: ALL PASS"; else echo "disposition_gate_smoke: FAILURES"; fi
 exit "$fails"
