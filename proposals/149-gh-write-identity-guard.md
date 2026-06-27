@@ -253,10 +253,14 @@ and the instance applies the capability change to itself.
 
    **Define the product-facing read-only-credential seam (so provenance isn't hand-waved).** Mirror the
    existing `WF_ENGINEER_TOKEN_CMD_*` pattern: the product defines a generic convention an instance
-   implements — a `WF_READONLY_TOKEN_CMD` that prints the ambient read-only token, and the authoritative
-   way `doctor` confirms its read-only scope (the App-installation permissions object for an App token, or a
-   documented attestation the minter provides). `doctor` PASSES on a token reachable via this seam with an
-   authoritatively read-only scope; it FAILS CLOSED on anything else. This makes "ambient = minted
+   implements — a `WF_READONLY_TOKEN_CMD` that prints the ambient read-only token, paired with a
+   **machine-verifiable** provenance contract `doctor` reads (never a mere local assertion): for a GitHub
+   App token, the **permissions JSON** `doctor` fetches from the installation; for any other token type, a
+   **paired token-info command** (`WF_READONLY_TOKEN_INFO_CMD`) that emits the token's canonical
+   permissions tied to the emitted token, which `doctor` parses and checks contains no `write`/`admin`
+   category. `doctor` PASSES only on a token reachable via this seam whose machine-readable permissions are
+   authoritatively read-only; it FAILS CLOSED on anything else (including a seam that returns a token but no
+   verifiable permissions). This makes "ambient = minted
    read-only" a concrete generic interface, not an instance-specific assumption — a fresh install supplies
    `WF_READONLY_TOKEN_CMD` (and the elevated owner token seam) the same way it supplies the engineer-token
    seams today.
@@ -274,8 +278,12 @@ and the instance applies the capability change to itself.
    `pr review`/`pr merge`
    already run through the engineer token (they do, inside `finish`/the review path). Update
    `feedback-loop`/`triage-feedback` docs to call the engineer verbs instead of bare `gh`, each with a
-   per-verb smoke. **This child is an explicit BLOCKING predecessor: it MUST merge before child #1's guard**
-   so the guard never blocks an operation that has no engineer-identity replacement yet.
+   per-verb smoke. **`triage-feedback` is designed to maintain Issues even when `aar-engineering` is
+   absent**, so this child also defines its **degradation**: with no engineer maintainer path available,
+   `triage-feedback` **degrades to drafting the mutation** (the human/owner applies it) rather than falling
+   back to a bare owner `gh` write — it never re-opens the owner-write path the guard closes. **This child
+   is an explicit BLOCKING predecessor: it MUST merge before child #1's guard** so the guard never blocks an
+   operation that has no engineer-identity replacement yet.
 
 **Instance rollout task (NOT a product ship-change child — applied to this deployment directly):**
 
