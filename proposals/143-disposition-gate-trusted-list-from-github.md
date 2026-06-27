@@ -25,11 +25,21 @@ REVHIGH=$(fd_review_high_list "$PRIORREV")
 - **locally modifiable** — any process with write access to `/tmp` can edit it between the review and `finish`
   to drop a `FINDING … HIGH` line, weakening the deterministic backstop the gate exists to provide.
 
-#139 already fails **closed** when the file is absent (good); this issue hardens the *trust* of the file's
-**contents** when it is present. The authoritative, tamper-resistant copy of the same findings already exists:
-the cross-family review `wf.sh` posts to the PR under the **reviewer-bot identity**, whose body embeds the raw
-`FINDING … HIGH` block. An author cannot edit another identity's PR review/comment, so GitHub is the durable
-trust anchor `/tmp` only approximated.
+#139 already fails **closed** when the file is absent (good); this issue hardens the *durability and trust* of
+the file's **contents** when it is present. A more authoritative copy of the same findings already exists: the
+cross-family review `wf.sh` posts to the PR under the **reviewer-bot identity**, whose body embeds the raw
+`FINDING … HIGH` block. That record is **durable** (survives reboot / fresh worktree / a different agent
+picking up the PR) and **raises the tamper bar** — defeating it means posting a validly-marked review under the
+reviewer-bot login, not just appending a line to a world-writable `/tmp` file.
+
+**What this does and does not buy (threat model).** `wf.sh` mints and uses the reviewer-bot token *in the same
+local process* as the author run (`reviewer_token` → `engineer_token`), so this is **not** a cryptographic
+trust boundary against a co-located actor that can mint that token — such an actor could post a forged reviewer
+review just as it could edit `/tmp`. The honest gain is **durability + casual-corruption hardening + a higher
+tamper bar**, not full non-repudiation. Closing the gap completely requires the reviewer record to be produced
+by an actor the author process cannot impersonate (a separate CI identity / native required review) — the
+**enforcement-boundary** work tracked in #135, out of scope for this hardening. This change is strictly better
+than the `/tmp` status quo on every axis and leaves the residual trust gap exactly where #135 already owns it.
 
 ## Approach
 
@@ -71,8 +81,12 @@ A new helper `fd_review_high_github <repo> <pr> <pk> <rtok> <reviewer_login>`:
 4. Extracts the embedded `FINDING … HIGH` block and runs the existing `fd_review_high_list` over it (the
    raw lines survive verbatim inside the body's code fence, so the parser is unchanged).
 
-The **reviewer-bot login** is `WF_ENGINEER_LABEL_<opposite-family>` (e.g. `codex-engineer[bot]` when the
-author is `claude`) — an already-configured instance value (currently unused in `wf.sh`).
+The **reviewer-bot login** is derived from the canonical engineer-identity seam already used for commits —
+`git_author_name(WF_ENGINEER_GIT_AUTHOR_<opposite-family>)` (e.g. `codex-engineer[bot]` when the author is
+`claude`), via the existing `engineer_git_author` / `git_author_name` helpers. The git-author **name** field
+equals the GitHub App's comment `user.login` verbatim, so no new identity seam is introduced. (The older
+`WF_ENGINEER_LABEL_*` text-label seam was dropped as unused in #63; this reuses the live git-author seam
+instead of resurrecting it.)
 
 ### 3. Use it in `finish`; fail closed if unrecoverable
 
@@ -82,16 +96,19 @@ state's own HIGH ids (`fd_high_list`), the duplicate-id check, and the call into
 review found) **BLOCKs**, exactly as the absent-`/tmp` case does today — the gate never falls back to the
 untrusted local file.
 
-**No reviewer-login configured / unenforced installs.** When `WF_ENGINEER_LABEL_<opposite>` is unset (a
-permissive `WF_ALLOW_AMBIENT_IDENTITY=1` install with no engineer Apps), there is no reviewer identity to
-anchor trust on. The gate cannot establish the trusted list and **fails closed** with a clear message — the
-same fail-closed posture #139 already takes when no list is present. (Enforced installs, the ones that gate
-merges, always have the label.)
+**No reviewer-login configured / unenforced installs.** When the reviewer's
+`WF_ENGINEER_GIT_AUTHOR_<opposite>` is unset (a permissive `WF_ALLOW_AMBIENT_IDENTITY=1` install with no
+engineer Apps), there is no reviewer identity to anchor trust on. The gate cannot establish the trusted list
+and **fails closed** with a clear message — the same fail-closed posture #139 already takes when no list is
+present. (Enforced installs, the ones that gate merges, always have the git-author seam configured — `doctor`
+already checks it.)
 
 ## Alternatives considered
 
-- **Keep `/tmp`, add a checksum/signature.** Rejected — still local and author-writable; any signing key the
-  author can reach the author can re-sign with. GitHub's per-identity write permission *is* the signature.
+- **Keep `/tmp`, add a checksum/signature.** Rejected — still local and transient, and any signing key the
+  author process can reach it can re-sign with; it adds complexity without the durability win. (GitHub posting
+  is not a true signature either, given the same-process reviewer token — see the threat-model note — but it
+  *is* durable and raises the tamper bar, which `/tmp`-plus-checksum does not.)
 - **Store the trusted list as a PR-local canonical artifact (a marked comment) like the disposition state.**
   Rejected as the primary source: the disposition state is *author*-posted; a parallel author-posted "trusted
   list" has the same trust problem. The reviewer-bot-authored review already IS the tamper-resistant artifact —
@@ -113,13 +130,21 @@ merges, always have the label.)
 - **Behavioral:** the gate now requires a recoverable reviewer review **on GitHub** (it already required a
   local review output); a PR with disposition state but no recoverable reviewer review BLOCKs (fail-closed) —
   the correct posture, and the normal flow always posts one during `design-review`/`code-review`/`finish`.
-- **Trust:** closes the `/tmp`-tamper / `/tmp`-absence hole the issue describes; the trusted anchor moves to a
-  record the author cannot write.
-- **Reversibility:** a self-contained revert of the `wf.sh` change restores the `/tmp` read; no migration, no
-  persisted state, no cross-component contract change.
+- **Trust / durability:** closes the `/tmp`-absence and casual-corruption hole the issue describes and raises
+  the tamper bar; the anchor moves to a durable reviewer-authored record. Full tamper-resistance against a
+  co-located reviewer-token-minting actor is explicitly *not* claimed (see the threat-model note — that is
+  #135's enforcement-boundary scope).
+- **Reversibility:** a self-contained revert of the `wf.sh` change restores the `/tmp` read; no persisted state
+  to migrate (in-flight disposition PRs just re-run one review — see Rollout).
 
 ## Rollout + rollback
 
 Single-phase `ship-change` run (code PR, gated on `--code`). Validated by the `.aar-ci` checks + the fake-HOME
 behavior smoke, plus a targeted check that `fd_review_high_github` extracts the same HIGH id set from a posted
-review body that `fd_review_high_list` extracts from the raw file. Rollback is a normal revert of the diff.
+review body that `fd_review_high_list` extracts from the raw file.
+
+**In-flight disposition-aware PRs** (rollout note): review records posted *before* this lands carry no
+`WF-REVIEW` marker, so the recovered list would be empty and `finish` would BLOCK — fail-closed, never silently
+wrong. Guidance (surfaced in the BLOCK message): re-run `code-review` / `design-review` once on any active
+disposition-aware PR after this lands to post a marked review, then `finish`. There is no persisted-state
+migration — just one fresh review. Rollback is a normal revert of the diff.
