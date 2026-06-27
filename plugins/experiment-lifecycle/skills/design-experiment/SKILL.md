@@ -99,6 +99,12 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
   content, not name). Point at battle-tested worked-example drivers; don't make the executor write from scratch.
 - **Use the `run-experiment` skill** for the loop + gates. **Cost ceiling** + who the **designer-of-record** is (so the
   executor can route design-intent questions back to you).
+- **The resume contract (so a model-free supervisor can relaunch a dead run):** the `START` template's
+  resilience wording tells the executor to checkpoint run state to disk (pod ids, what's collected, decision
+  rules — not only the conversation), keep a standing `TEMP.md` successor handoff current, and write a
+  run-supervision record at run start (cleared as a post-audit finalizer at close). The matching `CHECKLIST`
+  open + close gates are below. Keep that wording; the executor reads it on every run. (The contract + the
+  `run_supervision_record.sh` helper live in `run-experiment`.)
 - **The self-sufficiency pass (do this before handoff):** read `DESIGN.md` + `START.md` **as a stranger** — anything
   load-bearing that's only in your head goes INTO the docs first. Operational facts (paths, scripts) belong in
   `START.md`; the executor having them is not "context we're testing" — guessing a path is not the test, executing the

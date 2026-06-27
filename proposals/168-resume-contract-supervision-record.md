@@ -53,37 +53,59 @@ detector. It is added to `run-experiment` (the executor's runbook) and pointed a
 
 The record is **machine-consumed state, NOT docs-only** — so it ships as one product implementation
 rather than prose every consumer re-derives. A small POSIX-shell helper
-(`run_supervision_record.sh`) with a fail-closed, **atomic-write** API:
+(`run_supervision_record.sh`) implemented as a **serialized, monotonic state machine** (fail-closed,
+atomic-write):
 
 - `create <run-id> [--handoff PATH]` — mark the run **desired-active** at run start.
 - `update <run-id> [--handoff PATH] [--lease-pod ID]...` — refresh the `handoff_path` and the linked
-  lease pod-ids at checkpoints (additive on pod-ids).
+  lease pod-ids at checkpoints (additive on pod-ids). **`update` can never clear `stopped` or
+  re-activate a closed record** — once a run is stopped or closed, that state is terminal; `update`
+  fails closed on it rather than resurrecting a deliberately-stopped run.
 - `stop <run-id>` — write the **deliberate-stop marker** (a `/quit` or manual kill: the supervisor must
-  NOT resurrect this).
-- `close <run-id>` — mark the record **inactive** (run finished).
-- `is-desired-active <run-id>` — exit 0 iff the run is desired-active AND has no stop marker (the
-  single predicate the supervisor branches on); exit 1 otherwise, including a missing record
+  NOT resurrect this). Terminal.
+- `close <run-id>` — mark the record **inactive** (run finished). Terminal.
+- `is-desired-active <run-id>` — exit 0 iff the run is desired-active AND has no stop marker AND is not
+  closed (the single predicate the supervisor branches on); exit 1 otherwise, including a missing record
   (fail-closed: an unknown run is never resurrected).
+
+**Concurrency (Finding-driven).** Atomic file replacement alone is not enough: a concurrent `update`
+racing a `stop`/`close` could otherwise read-modify-write over the terminal state and re-activate a
+stopped run. So every mutation takes a **per-record `flock`** for the read-modify-write window, and the
+terminal-state guard runs *inside* that lock — `update` re-reads under the lock and refuses if the record
+is already `stopped`/`closed`. The race (`update` vs `stop`/`close`) is covered by the behavior smoke.
 
 The record is a small JSON file under an instance-overridable root
 (`${AAR_RUN_SUPERVISION_DIR:-$HOME/.config/run-supervision}/<run-id>.json`). It carries
-**relaunch-scoped** fields only — `desired_active`, `stopped`, `handoff_path`, `lease_pod_ids`,
-timestamps — and **links to** the `gpu-job` pod lease(s) (child 2) by pod id. It never holds
-pod-deletion policy (that's the lease's domain). Writes go through a temp-file + `mv` so a crash mid-write
-never leaves a half-written record. The product helper has **no instance specifics** — session names,
-the concrete relaunch commands, the systemd wiring are all instance, consumed via the API.
+**relaunch-scoped** fields only — `desired_active`, `stopped`, `closed`, `handoff_path`,
+`lease_pod_ids`, timestamps — and **links to** the `gpu-job` pod lease(s) (child 2) by pod id. It never
+holds pod-deletion policy (that's the lease's domain). Writes go through a temp-file + `mv` under the
+lock so a crash mid-write never leaves a half-written record. The product helper has **no instance
+specifics** — session names, the concrete relaunch commands, the systemd wiring are all instance,
+consumed via the API.
 
 ### 3. The executor's point-of-need template gates (`design-experiment/templates/`)
 
 The templates are where the executor actually reads its obligations — not the SKILL prose. So:
 
-- **`CHECKLIST_TEMPLATE.md` — an OPEN gate** (blocking): "standing successor handoff current; pod lease
-  registered; run-supervision record written (desired-active)." Beside the existing self-wake-armed open
-  gate.
-- **`CHECKLIST_TEMPLATE.md` — a CLOSE gate** (blocking): "run-supervision record cleared/inactive,"
-  added beside the existing "self-wake/watchdog cleared" teardown gate. The ordering is load-bearing: a
-  finished or stopped run must clear `desired-active` **before** the supervisor could observe its session
-  gone, or the supervisor would resurrect a run that's legitimately done.
+- **`CHECKLIST_TEMPLATE.md` — an OPEN gate** (blocking): "standing successor handoff current;
+  run-supervision record written (desired-active); each live pod registered for reaping." Beside the
+  existing self-wake-armed open gate. **Pod registration is capability-gated (Finding-driven):** the
+  `gpu-job` pod-lease API is child 2 and not yet built, so the gate's pod-registration clause is
+  satisfied **either** by a registered lease (once child 2 lands) **or** by the existing per-pod
+  idle-teardown watchdog (`gpu-job`'s `watchdog.sh`, scoped to the pod id). So child 1 lands with a
+  gate the current machinery can already pass, and child 2 tightens it to the lease.
+- **`CHECKLIST_TEMPLATE.md` — a CLOSE gate** (blocking) that verifies **close readiness**, NOT an early
+  clear. This adopts the **readiness-vs-finalizer split** the in-tree #30 resolution fixed for exactly
+  this gate (`proposals/30-ephemeral-dispatch-dirs.md`): the audited checklist gate verifies the
+  run-supervision record exists and the close path is armed; the actual `desired-active`-clear / `close`
+  is the **post-audit finalizer** (for a dispatched run, the same closer that kills the session; for a
+  non-dispatched run, the executor's own post-audit close step). The ordering is load-bearing and the
+  reason the clear is NOT an early audited gate: if the executor cleared `desired-active` at the top of
+  Close and then crashed before the closer was durably in charge, the supervisor would (correctly)
+  refuse to relaunch a not-desired-active run while no closer exists to tear down the pod — an orphaned,
+  un-closed session. So the record stays desired-active until the close path is durably in charge; the
+  gate beside the existing "self-wake/watchdog cleared" teardown gate verifies that readiness, and the
+  `close` call is the finalizer after the audit.
 - **`START_TEMPLATE.md` wording** telling the executor where to maintain the standing handoff and the
   run-supervision record.
 
@@ -98,9 +120,15 @@ The templates are where the executor actually reads its obligations — not the 
   pod **deletion** is `gpu-job`'s domain, run/session **relaunch policy** is `experiment-lifecycle`'s.
   Folding desired-active/stop/handoff into the lease would put relaunch policy in a tool that doesn't own
   it. The two records link by pod id; neither owns the other's policy.
-- **One combined open+close checklist item.** Rejected: the close gate's *ordering* relative to teardown
-  is the load-bearing property (clear desired-active before the session is observed gone). It earns its
-  own gate beside the existing teardown gate, not a sub-bullet of the open one.
+- **One combined open+close checklist item.** Rejected: the close gate has a distinct load-bearing
+  property (the readiness-vs-finalizer split — the audited gate verifies the close path is armed; the
+  `desired-active`-clear is the post-audit finalizer). It earns its own gate beside the existing teardown
+  gate, not a sub-bullet of the open one.
+- **An audited close gate that clears `desired-active` directly.** Rejected (Finding-driven): it
+  conflicts with the in-tree #30 resolution, which fixed exactly this gate to verify *readiness* and make
+  the clear a post-audit finalizer — clearing early then crashing before the closer is durably in charge
+  leaves an un-closed, unsupervised session the supervisor will (correctly) refuse to relaunch. This
+  child adopts #30's readiness-gate wording.
 
 ## Blast radius
 

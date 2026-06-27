@@ -32,6 +32,11 @@
       Parking with only an in-process monitor is FAIL for autonomous detached runs; a blocking watcher that keeps the
       executor turn alive is controller-supervised, not autonomous detached.
       (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + box-side idle-teardown watchdog).  ev:
+- ☐ [BLOCK] Resume contract armed (so a model-free supervisor can relaunch a dead run): standing successor
+      handoff (`TEMP.md`) current; run-supervision record written and **desired-active**
+      (`run_supervision_record.sh create <run-id> --handoff <TEMP.md>`); and EACH live pod registered for
+      reaping — satisfied by a `gpu-job` pod lease once that lands, OR (transitional) by the per-pod
+      idle-teardown `watchdog.sh` scoped to the pod id.                                              ev:
 - ☐ Read the consuming instance's feedback/gotcha guidance, or the `FEEDBACK_INSTANCE_GUIDANCE`
       target when using feedback-loop (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample
@@ -41,6 +46,11 @@
 - ☐ [BLOCK] Cross-family close audit run + every finding responded (ACCEPT/DISPUTE/DEFER).       ev: AUDIT.md
 - ☐ [BLOCK] Teardown verified via the DEPLOYING account's control plane (REST 404 / GraphQL
       empty with the DEPLOY key — never SSH liveness); self-wake/watchdog cleared.               ev:
+- ☐ [BLOCK] Run-supervision record close READY (NOT cleared early): the record exists and the close path is
+      durably in charge, so the desired-active clear is the POST-AUDIT finalizer. Then run that finalizer —
+      `run_supervision_record.sh close <run-id>` (finished) or `stop <run-id>` (deliberate /quit, never
+      relaunch) — AFTER the close audit, so a finished run can't be resurrected and an early clear can't
+      orphan a still-billing pod.                                                                 ev:
 - ☐ Retro filed via feedback-loop's file-feedback when installed/configured; otherwise recorded
       through the consuming instance's feedback guidance.                                         ev:
 

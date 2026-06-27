@@ -93,6 +93,41 @@ arm the idle-cost teardown backstop.
 > independent wake path, so it is not a valid autonomous detached executor. Other substrates: the equivalent recurring
 > wake.
 
+## The resume contract — be resumable by a model-free supervisor (do this as you go)
+
+The self-wake above catches you going *idle*. A separate failure is the agent process **dying or wedging**
+mid-run (a crash, an API blip long enough to kill the session, a usage-policy block that ends the thread). On an
+instance that runs a model-free relaunch supervisor (the #54 crash-resilience design), that supervisor will try to
+**relaunch you and resume the run** — but a blind relaunch only recovers *useful* work if you held up your end.
+Three obligations, maintained continuously (not at close):
+
+- **Checkpoint state to disk, not only to conversation.** Everything a successor needs to continue —
+  what's launched, **pod ids**, what's been collected, the pre-registered decision rules — lives in the run's
+  artifact dir / `START.md` / ledger. `--continue` replays the conversation, but a *fresh* successor only has the
+  disk. Anything load-bearing that's only in your chat history is lost when the session is.
+- **Keep an always-current successor handoff.** Maintain `TEMP.md` (your instance's handoff path) as a
+  **standing**, refreshed-at-every-checkpoint pointer file — pod ids, artifact paths, the active look-again
+  deadline, the next action. **Pointers only, never trigger-prone prose** (a block-prone run — misalignment-organism
+  material — can leave your thread unable to write its own handoff later, so it must already be current). This is the
+  input the supervisor feeds a fresh successor when same-session `--continue` is impossible (corrupted session,
+  policy block).
+- **Write a run-supervision record at run start, and keep it current.** This is the machine-readable
+  desired-state the supervisor reads to decide whether a gone session should be relaunched at all — so it
+  relaunches a genuine crash but **never resurrects a deliberate `/quit` or a finished run.** It is real state,
+  written through one product helper (atomic, fail-closed), not prose:
+
+  > **Claude Code / this instance:** the helper is `run_supervision_record.sh` in this skill's `scripts/`
+  > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start: `create <run-id>
+  > --handoff <TEMP.md path>` (marks the run **desired-active**). At each checkpoint: `update <run-id> --handoff
+  > <path> --lease-pod <id>…` (refresh the handoff + link the pod ids the run holds — these link to `gpu-job`'s
+  > pod leases by id). The supervisor branches on `is-desired-active <run-id>`. The concrete relaunch commands +
+  > the supervisor wiring are instance, not this helper.
+
+- **Never leave a pod behind an in-conversation-only note.** A pod's existence and its cost-cap deadline must be
+  on disk — the keepalive contract + the standing handoff + the linked pod ids in the record — so a reaper can
+  find it without you. (At close, clearing the record is a **post-audit finalizer**, not an early step — see
+  Step 5.)
+
 ## Topology: detached driver (default) vs on-compute agent (rare)
 
 - **Detached shell driver — THE DEFAULT.** scp a self-contained `*.sh`, run it detached (`setsid nohup`), poll a
@@ -145,9 +180,8 @@ driver instead.
 - **Log the run in your ledger** (per the profile). Every GPU run goes in.
 - Pull the headline numbers back and report them.
 - **Start `RESULTS.md` now** (from your instance's record template) — fill what you have; it must be complete before close.
-- **Block-prone content** (e.g. misalignment-organism material)? Keep a `TEMP.md` successor-handoff updated at
-  checkpoints (pointers only, never trigger text) — one usage-policy block can leave your thread unable to write its own
-  handoff later.
+- **Keep the standing successor handoff current** (the resume contract, below): refresh `TEMP.md` and the
+  run-supervision record at each checkpoint.
 
 ## Step 5 — Close (kill-on-completion is the DEFAULT)
 
@@ -178,6 +212,15 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Clear the self-wake.** Once the record exists, is committed + pushed, and compute is torn down: delete this
   experiment's recurring waker and its look-again marker. A finished run with a still-firing waker is a stale-waker
   footgun.
+- **Close the run-supervision record — the post-audit FINALIZER (ordering is load-bearing).** Clearing
+  desired-active is **not** an early Close step and **not** the audited gate — the checklist gate verifies *close
+  readiness* (the record exists, the close path is armed), and the actual clear happens **after** the audit, as the
+  *finalizer*. The reason: if you cleared desired-active at the top of Close and then crashed before teardown
+  finished, the supervisor would (correctly) refuse to relaunch a not-desired-active run while a pod still bills
+  with no brain to tear it down — an orphaned, un-closed session. So keep the run **desired-active until the close
+  path is durably in charge**, then run the finalizer: `run_supervision_record.sh stop <run-id>` for a deliberate
+  stop (a `/quit`/kill — never to be relaunched), or `close <run-id>` for a finished run (marks it inactive). After
+  this, the supervisor will not resurrect the run.
 - **Retro — file feedback** (you are the product's user): file product/scaffold friction via feedback-loop's
   `file-feedback` when installed/configured; record deployment-only incidents or ideas through the consuming instance's
   feedback guidance. Include the design-feedback: list the gaps you hit (mechanical defaults invented +
@@ -223,6 +266,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - Never reimplement deploys — call the `gpu-job` backend.
 - Acquired compute needs profile provisioning, not just the identity bootstrap.
 - **Arm the self-wake / idle-cost backstop before any detached run or billable background work; run to completion; never park silently.**
+- **Be resumable by a model-free supervisor:** checkpoint state to disk (pod ids, what's collected, decision
+  rules), keep the standing handoff (`TEMP.md`) current, write a run-supervision record at run start, and clear it
+  as a POST-AUDIT finalizer (`stop`/`close`) — never resurrect a deliberate quit, never clear desired-active early.
 - **Kill-on-completion is the default.** Tear down once the upload is *verified* (every unique artifact). Keep one unit
   running only for a concrete queued follow-up (expiry-stamped). Log run + teardown.
 - Teardown is **unit-id-scoped** and uses the **deploying account's key** — never blanket-delete idle compute.
