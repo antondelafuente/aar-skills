@@ -105,6 +105,8 @@ for id in "${high_ids[@]}"; do
     fixed)
       commit=$(printf '%s' "$entry" | jq -r '.commit // empty' 2>/dev/null)
       [ -n "$commit" ] || block "finding $id: fixed requires a commit"
+      # Must be a stable hex object id — a moving ref (HEAD/branch/tag) would not pin the claimed fix.
+      [[ "$commit" =~ ^[0-9a-f]{7,40}$ ]] || block "finding $id: fixed commit must be a hex SHA, not a symbolic ref (HEAD/branch/tag), got '$commit'"
       git rev-parse --verify --quiet "${commit}^{commit}" >/dev/null 2>&1 \
         || block "finding $id: fixed commit '$commit' not found in this repo"
       git merge-base --is-ancestor "$commit" HEAD 2>/dev/null \

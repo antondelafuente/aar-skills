@@ -31,9 +31,16 @@ expect() { # expect <PASS|BLOCK> <name> <disp-path-or-MISSING> <findings-path>
 # 1. No HIGH findings -> PASS (dispositions file irrelevant / may be absent).
 expect PASS no-high-no-file "$TMP/absent.json" "$(find_ 'F1 MED')"
 
-# 2. HIGH fixed with a real reachable commit -> PASS.
-d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
-expect PASS high-fixed-ok "$d" "$(find_ 'F1 HIGH')"
+# 2. HIGH fixed with a real in-PR commit -> PASS. Explicit base (HEAD^) makes the case deterministic
+#    regardless of origin/main: HEAD is in (HEAD^..HEAD].
+PARENT=$(git rev-parse --verify 'HEAD^' 2>/dev/null || true)
+if [ -n "$PARENT" ]; then
+  d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
+  out=$(DISPOSITION_BASE_REF="$PARENT" "$GATE" "$d" "$(find_ 'F1 HIGH')" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then echo "ok   high-fixed-ok"; else echo "FAIL high-fixed-ok: want PASS got BLOCK :: $out"; fails=1; fi
+else
+  echo "skip high-fixed-ok: HEAD has no parent"
+fi
 
 # 3. HIGH deferred_to_child_design at umbrella with child_issue -> PASS.
 d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"deferred_to_child_design","child_issue":"#139"}]}')
