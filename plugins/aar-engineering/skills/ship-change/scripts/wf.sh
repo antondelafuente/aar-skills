@@ -1336,7 +1336,16 @@ Split into one design PR per doc."
   #     Best-effort — a cosmetic body refresh must never block an otherwise-clean merge. Uses the REST API
   #     (gh api PATCH), NOT `gh pr edit`: the latter issues a GraphQL query needing read:org, which a minimal
   #     repo-scoped token lacks, so it silently no-op'd the refresh (#43). REST pulls PATCH needs only `repo`.
-  FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- designs/ proposals/ | head -1)
+  # Prefer THIS branch's own design doc (designs/<issue>-*.md) over a lexically-first sibling: a branch
+  # that moves many design docs (e.g. the proposals/->designs/ rename) would otherwise refresh the PR body
+  # from an unrelated doc. Fall back to the first changed doc when none matches the branch issue.
+  BRISSUE=$(printf '%s\n' "$BR" | sed -nE 's#^change/([0-9]+)-.*#\1#p')
+  FDOC=""
+  if [ -n "$BRISSUE" ]; then
+    FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- designs/ proposals/ \
+             | grep -E "/${BRISSUE}-[^/]*\.md$" | head -1)
+  fi
+  [ -n "$FDOC" ] || FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- designs/ proposals/ | head -1)
   if [ -n "$FDOC" ]; then
     FISSUE=$(basename "$FDOC" | sed -E 's/^([0-9]+)-.*/\1/')
     # mktemp -> a guaranteed-unique path (no stale-path/dir collision); fall back to a fixed path if mktemp
