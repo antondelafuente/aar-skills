@@ -247,6 +247,15 @@ carry an open sub-decision, so they are `needs-design` — only the work that ca
   the runner block/proceed condition, and the re-clearance trigger on any post-approval brief change. The
   design-gate analogue of the close-gate's **Triage-artifact schema** child — neither exists in the lifecycle
   yet, and the executor cannot verify clearance without it.
+- **Record sensitivity / visibility contract** — posting design/records/reviews to GitHub by default raises a
+  visibility question the status-quo local-file gates never had: experiment content can be sensitive
+  (unreleased data, private model behavior, block-prone rollout text). The umbrella already keeps raw
+  artifacts *out* of the trail (artifact-store **pointers**, not payloads; "pointers only, never trigger
+  text") and lets the instance research repo be **private**, but the explicit contract is open design:
+  private-repo requirements, the pointer-only/redaction rules for each record type, and what a PR review may
+  **quote** from a record. The GitHub-posting, canonical-path record-layout, and close-review implementation
+  pieces are **`blocked-by`** this — the experiment-PR path must not be authorized until the visibility
+  contract lands.
 
 **`ready` (no open design):** none stands fully independent. The record layout below *looked* ready but
 depends on where `experiments/<exp>/` lives (the worktree/profile contract), so it is `blocked-by`. Honest
@@ -260,10 +269,11 @@ result at umbrella altitude: every piece is a `needs-design` child or `blocked-b
   the worktree/profile contract (which defines where `experiments/<exp>/` lives) and the triage-schema child
   (for the triage record).
 - `design-experiment` PR-open + `--design` review posting + fact-record linking — blocked-by the helper, the
-  per-experiment worktree/branch contract (Step 1), **and the instance-profile interface** (repo / base
-  branch / identity resolution it needs to open the PR).
+  per-experiment worktree/branch contract (Step 1), the instance-profile interface (repo / base
+  branch / identity resolution it needs to open the PR), **and the record sensitivity/visibility contract**.
 - `run-experiment` push-to-PR + close-review + merge gate — blocked-by the helper, the worktree/branch
-  contract, the instance-profile interface, the triage schema, and terminal states.
+  contract, the instance-profile interface, the triage schema, terminal states, **and the record
+  sensitivity/visibility contract**.
 
 ## Rollout + rollback
 
