@@ -12,8 +12,10 @@ final committed design doc. It picks the closing-issue doc with `head -1` of the
 For an ordinary PR that touches one design doc this is fine. But a PR that MOVES many docs under `proposals/`
 breaks it: `git diff --name-only` lists every moved doc, and `head -1` picks the lexically-first unrelated
 one. Found in wave 1 on PR #174 (the `proposals/ -> designs/` rename for #65): `head -1` selected
-`proposals/10-native-reviews.md`, the refresh rewrote the PR body to "Closes #10", and because #10 is not a
-`ready` issue the close-gate then BLOCKED the merge. So a body-refresh meant to be cosmetic and best-effort
+`proposals/10-native-reviews.md`, the refresh rewrote the PR body's closing reference to issue #10, and
+because #10 is not a `ready` issue the close-gate then BLOCKED the merge. (Note: this design doc deliberately
+avoids the literal `Closes`+`#10` keyword pair in prose, since GitHub would otherwise parse THIS PR as closing
+#10 — the very failure described.) So a body-refresh meant to be cosmetic and best-effort
 silently retargets the PR's closing reference and trips the close-gate — blocking #65 and any future
 doc-moving PR.
 
