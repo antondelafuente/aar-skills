@@ -194,19 +194,32 @@ check "claude-authored audit saw author family" "grep -q '^AAR_SUBSTRATE=claude$
 check "claude-authored audit saw empty verifier override" "grep -q '^AUDIT_VERIFIER_CMD=$' \"$FAKE_AUDIT_LOG\""
 check "claude-authored audit saw empty BASH_ENV" "grep -q '^BASH_ENV=$' \"$FAKE_AUDIT_LOG\""
 
-echo "=== author-aware review env: codex author keeps Claude verifier but still clears BASH_ENV ==="
+echo "=== author-aware review env: codex author keeps explicit Claude verifier ==="
 : > "$GH_FAKE_LOG"; FAKE_AUDIT_LOG="$TMP/audit-codex.env"
 out=$(GH_TOKEN=ambient-token \
   WF_ENGINEER_TOKEN_CMD_CLAUDE='printf claude-token' \
   WF_ENGINEER_TOKEN_CMD_CODEX='printf codex-token' \
   AUDIT_EXPERIMENT="$TMP/fake-audit.sh" \
-  AUDIT_VERIFIER_CMD='claude -p "$(cat)" > "$OUT_TMP"' \
-  BASH_ENV="$TMP/bad-bash-env.sh" \
+  AUDIT_VERIFIER_CMD='claude-keepme -p "$(cat)" > "$OUT_TMP"' \
   FAKE_AUDIT_LOG="$FAKE_AUDIT_LOG" \
   bash "$WF" design-review "$REVIEW_REPO" codex 2>&1); rc=$?
 echo "$out"; cat "$FAKE_AUDIT_LOG"
 check "codex-authored design-review exits zero with Claude verifier" "[ $rc -eq 0 ]"
-check "codex-authored audit kept a Claude verifier" "grep -q '^AUDIT_VERIFIER_CMD=.*claude' \"$FAKE_AUDIT_LOG\""
+check "codex-authored audit kept the explicit verifier marker" "grep -q '^AUDIT_VERIFIER_CMD=claude-keepme ' \"$FAKE_AUDIT_LOG\""
+check "codex-authored audit saw empty BASH_ENV" "grep -q '^BASH_ENV=$' \"$FAKE_AUDIT_LOG\""
+
+echo "=== author-aware review env: codex author still clears inherited BASH_ENV ==="
+: > "$GH_FAKE_LOG"; FAKE_AUDIT_LOG="$TMP/audit-codex-bashenv.env"
+out=$(GH_TOKEN=ambient-token \
+  WF_ENGINEER_TOKEN_CMD_CLAUDE='printf claude-token' \
+  WF_ENGINEER_TOKEN_CMD_CODEX='printf codex-token' \
+  AUDIT_EXPERIMENT="$TMP/fake-audit.sh" \
+  BASH_ENV="$TMP/bad-bash-env.sh" \
+  FAKE_AUDIT_LOG="$FAKE_AUDIT_LOG" \
+  bash "$WF" design-review "$REVIEW_REPO" codex 2>&1); rc=$?
+echo "$out"; cat "$FAKE_AUDIT_LOG"
+check "codex-authored design-review exits zero with verifier inherited at wf startup" "[ $rc -eq 0 ]"
+check "codex-authored audit saw the startup-inherited Claude verifier" "grep -q '^AUDIT_VERIFIER_CMD=.*poisoned from BASH_ENV' \"$FAKE_AUDIT_LOG\""
 check "codex-authored audit saw empty BASH_ENV" "grep -q '^BASH_ENV=$' \"$FAKE_AUDIT_LOG\""
 
 echo "=== invalid model reviewer: doctor rejects Codex-family verifier for Codex author ==="
