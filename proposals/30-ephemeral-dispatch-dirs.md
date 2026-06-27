@@ -81,14 +81,24 @@ just terminated.
 
 **The close ordering — the executor only *launches* the closer; the closer owns `desired-active`-clear + kill
 atomically** (Finding-driven; two real ordering hazards forced this precise sequence). Two constraints pin it.
-First, **the host-close gate must not be coupled to the close audit.** `run-experiment`'s independent
-cross-family close audit runs *before* the self-wake is cleared, and host-close is the *very last* Close
-action — so requiring host-close evidence to be part of the audited CHECKLIST state is circular (the audit has
-already run). So the gate's evidence is a **control-plane fact, not an audited commit**: the executor asserts
-"`closing` marker written + detached closer durably launched," and the *dispatcher/closer* — an external
-finalizer that outlives the session — owns verifying the post-kill `closed` marker. The CHECKLIST `[BLOCK]`
-gate checks the pre-kill control-plane fact; it never asks the executor to commit-and-audit something only
-knowable after its session dies.
+First, **there are TWO gates at two altitudes — an audited checklist gate AND a post-audit finalizer gate —
+and they must not be conflated.** `run-experiment`'s contract is "commit `CHECKLIST.md` at close → the
+cross-family close audit verifies it," and that audit runs *before* the self-wake clears, while host-close is
+the *very last* Close action. So the actual *host-closed* fact is unknowable at audit time; forcing it into the
+audited CHECKLIST is circular. The split:
+- **Audited CHECKLIST `[BLOCK]` gate (in the brief, verified by the close audit):** asserts only that host-close
+  was *initiated* — the `closing` marker is written and the detached closer was durably launched. This is fully
+  knowable while the session is alive and *before* the audit, so it sits legitimately inside the existing
+  audited-checklist contract with no change to that contract's meaning.
+- **Post-audit finalizer gate (control-plane, owned by the dispatcher/closer — NOT an audited commit):** the
+  *host-closed* confirmation (session gone, generation-keyed `closed` marker written) happens *after* the audit
+  and *after* the session dies, so it cannot be a CHECKLIST commit the executor makes. It is a finalizer the
+  external closer satisfies and the dispatcher/operator reads from the control-plane record.
+
+So nothing asks the executor to commit-or-audit anything only knowable after its session is gone: the audited
+gate is the pre-kill "initiated" fact; the finalizer is the post-kill "closed" fact, owned outside the brief.
+(This implies a small `run-experiment`/template note distinguishing audited checklist gates from post-audit
+finalizer gates — captured in the product child below.)
 
 Second, **the run must stay recoverable until the closer is durably in charge** — so `desired-active` is *not*
 cleared early. If the executor cleared `desired-active` at the top of Close and then crashed before the closer
@@ -160,7 +170,7 @@ executor already reads, not buried instance-side and not passed as tmux seed tex
 the brief+scaffold a zero-context executor is contracted to read, and relying on it reintroduces exactly the
 implicit-context fragility dispatch exists to kill). The handle names: the exact command to run at Close, the
 host-state marker's path and schema, the evidence that proves the close was initiated, and an explicit
-host-presence declaration (the tri-state below). The next paragraph fixes *which* record — and it is not the
+host-presence declaration (the closed `dispatch_host` enum below). The next paragraph fixes *which* record — and it is not the
 frozen brief.
 
 **Who writes the handle, and where — #54's run-supervision record, NOT the reviewed brief** (Finding-driven,
@@ -184,24 +194,29 @@ scaffold's canonical forcing function for Close gates, the *gate* (not the handl
 universal `[BLOCK]` checklist gate requiring host-closed evidence read from the run-supervision record, so the
 host-close can't be silently skipped the way buried prose gets skipped.
 
-**The gate is capability-gated and explicitly tri-state — never substrate-blind, and never silently skippable
-by a broken launcher** (Finding-driven). The `[BLOCK]` gate reads a **`dispatch_host` declaration** that the
-substrate's dispatcher records, and resolves to exactly one of three states — an absent value is *not*
-silently N.A.:
-- **`persistent + handle`** → the substrate declares a persistent dispatch host and supplies the
-  `dispatch_host_close` handle → the gate is a real `[BLOCK]`: the executor must run host-close and show the
-  `closing`-marker evidence.
-- **`none` (+ reason)** → the substrate explicitly declares *no* persistent dispatch host (a Codex
-  thread/watcher that just exits) → the gate resolves **N.A.** on that declared reason.
-- **`unset` once a substrate has *claimed* persistent-host dispatch** → **FAIL (launcher bug)**, not N.A.: a
-  persistent-host substrate whose dispatcher forgot to write the handle is a broken launcher that would
-  otherwise leak idle sessions forever, so the gate fails closed and surfaces it rather than waving it through.
+**The gate is capability-gated by a closed `dispatch_host` enum — never substrate-blind, never silently
+skippable by a broken launcher** (Finding-driven). The `[BLOCK]` gate reads a **`dispatch_host` field** the
+substrate's dispatcher records. The field is a **closed enum of exactly two declared values plus the
+absent/unset case** — and absent is *not* silently N.A.:
+- **`persistent`** (carries the `dispatch_host_close` handle) → the substrate declares a persistent dispatch
+  host and supplies the handle → the gate is a real `[BLOCK]`: the executor must run host-close and show the
+  `closing`-marker + closer-launched evidence.
+- **`none`** (carries a required `reason` string) → the substrate explicitly declares *no* persistent dispatch
+  host → the gate resolves **N.A.** on that declared reason. The `reason` field is what distinguishes a
+  permanent no-host substrate (`reason: "codex thread/watcher exits on its own"`) from a *transitional*
+  declaration (`reason: "claude host-close not yet shipped — see #30 child 2"`): both are `dispatch_host=none`
+  (so the enum stays genuinely closed — there is no secret fourth `none-yet` value), and the human-readable
+  `reason` carries the migration intent and owner.
+- **unset / absent, once a substrate has *claimed* persistent-host dispatch** → **FAIL (launcher bug)**, not
+  N.A.: a persistent-host substrate whose dispatcher forgot to write the field is a broken launcher that would
+  leak idle sessions forever, so the gate fails closed and surfaces it.
 
-This preserves the ordering-safety property without the silent-skip hole: in the transitional window before
-`dispatch-claude.sh --host-close` ships, the Claude dispatcher records `dispatch_host=none-yet` (an explicit,
-auditable transitional declaration) so the gate is a *declared* N.A. — not the ambiguous "absent ⇒ N.A." that
-a genuine launcher bug is indistinguishable from. The day `--host-close` ships, the dispatcher flips its
-declaration to `persistent + handle` and the same gate becomes a real `[BLOCK]` with no product change.
+This preserves ordering-safety without the silent-skip hole: in the transitional window before
+`dispatch-claude.sh --host-close` ships, the Claude dispatcher records `dispatch_host=none` with the
+transitional `reason` (an explicit, auditable declaration with a migration note) → declared N.A., not the
+ambiguous "absent ⇒ N.A." a launcher bug is indistinguishable from. The day `--host-close` ships, the
+dispatcher flips the field to `persistent` (+ handle) and the same gate becomes a real `[BLOCK]`, no product
+change.
 
 The load-bearing decision is **"auto-mark reapable, not auto-`rm -rf` on completion."** A finished executor is
 not a *reviewed* executor: the worktree may hold the failed logs, partial artifacts, or exact debug state a
@@ -260,7 +275,7 @@ substrate supplies the *mechanism* and the field's *values*.
   kill); one coherent lifecycle, not two parallel ones.
 - **Treat an absent handle as N.A. (two-state gate).** Rejected: it lets a *broken* persistent-host launcher
   that simply forgot to write the handle skip the close obligation forever, indistinguishably from a substrate
-  that legitimately has no host. The gate is tri-state (`persistent+handle` / declared `none` / `unset`⇒FAIL).
+  that legitimately has no host. The gate keys off a closed `dispatch_host` enum (`persistent`+handle / `none`+reason / unset⇒FAIL).
 
 ## Blast radius
 
@@ -274,12 +289,15 @@ substrate supplies the *mechanism* and the field's *values*.
   "version bump on every behavior change" rule — it is not a no-op doc edit. No CI logic moves; the
   install/discovery surface is unchanged beyond the manifest version. This design PR itself is
   `proposals/*.md` only.
-- **Cross-design dependency (the load-bearing coupling):** the handle's home and the `desired-active`-before-kill
-  ordering both ride on **#54's run-supervision record** (its `create/update/stop/close/is-desired-active` API
-  + record path/schema). So the product child here **depends on #54's child-1 shipping that record API first**,
-  and the gate-evidence wording must reference #54's `is-desired-active`/`close` rather than inventing a second
-  record. (This is a real ordering constraint surfaced in design review — recorded here so the `ready` children
-  carry it.)
+- **Cross-design dependency + the helper/schema extension (the load-bearing coupling):** the handle's home and
+  the `desired-active`-before-kill ordering both ride on **#54's run-supervision record** (its
+  `create/update/stop/close/is-desired-active` API + record path/schema + tests). So the product child here
+  **depends on #54's child-1 shipping that record API first**, and is itself a concrete extension of it: it
+  **adds the `dispatch_host` (closed enum + `reason`) and `dispatch_host_close` fields to #54's record schema,
+  extends #54's helper API + tests to read/write them, and requires instance dispatchers to go through that
+  helper** (not re-derive the record shape). The gate-evidence wording references #54's
+  `is-desired-active`/`close` rather than inventing a second record. (A real ordering + DRY constraint surfaced
+  in design review — recorded so the `ready` children carry it.)
 - **Instance (this box), where the mechanism lives:** `dispatch-claude.sh` gains the non-destructive
   `--host-close` verb (clear `desired-active` via #54's API → write `closing` marker → spawn a
   *deadline-bounded* detached closer that kills the session, writes `closed`, prunes — or writes `failed` on
@@ -308,10 +326,11 @@ substrate supplies the *mechanism* and the field's *values*.
 - **Sequencing:** this is a two-phase design PR (doc-only). It has a hard upstream dependency: **#54's child-1
   run-supervision record API must land first**, because the handle lives on that record and the close ordering
   consumes its `close`/`is-desired-active`. On merge #30 spawns `ready` children: (1) the product contract —
-  the `run-experiment` Close clause, the `design-experiment` dispatch-contract line, the `CHECKLIST`-template
-  static `[BLOCK]` gate (evidence read from #54's record), and the `dispatch_host` declaration +
-  `dispatch_host_close` handle defined as fields on #54's record, **plus the experiment-lifecycle version bump
-  + CHANGELOG entry**; (2) the instance non-destructive `dispatch-claude.sh --host-close <exp>` verb (clear
+  the `run-experiment` Close clause (incl. the **audited-checklist-gate vs post-audit-finalizer-gate**
+  distinction), the `design-experiment` dispatch-contract line, the `CHECKLIST`-template static `[BLOCK]`
+  "host-close initiated" gate (evidence read from #54's record), **the extension of #54's record
+  schema + helper API + tests with the `dispatch_host` closed-enum (+`reason`) and `dispatch_host_close`
+  fields**, **plus the experiment-lifecycle version bump + CHANGELOG entry**; (2) the instance non-destructive `dispatch-claude.sh --host-close <exp>` verb (clear
   `desired-active` via #54's API → write `closing` marker → spawn a deadline-bounded detached closer that kills
   the session + writes `closed` + prunes, or `failed` on timeout; **generation-keyed** marker stored in the
   control-plane state dir outside the worktree; spawn initializes a `running` marker; reusing the existing
@@ -321,23 +340,23 @@ substrate supplies the *mechanism* and the field's *values*.
   + cleanup are discoverable at the point of need; (3) the `run-experiment` executor's final
   host-close action that invokes (2) at Close.
 
-  **Ordering correction (Finding-driven — the tri-state gate is NOT safe before any launcher change).** Because
+  **Ordering correction (Finding-driven — the gate is NOT safe before any launcher change).** Because
   the gate FAILs on an `unset` declaration once a substrate is in scope, and the *current* dispatcher writes no
   `dispatch_host` declaration at all, child (1)'s gate must **not** land alone — it would make every unmarked
   Claude dispatch FAIL immediately. So a tiny **prerequisite (1a)** ships *with or before* the gate: the
-  dispatcher writes the explicit transitional `dispatch_host=none-yet` declaration onto #54's record at spawn
-  (a few lines, no `--host-close` logic). That makes the gate resolve a *declared* N.A. for Claude in the
+  dispatcher writes an explicit `dispatch_host=none` declaration with the transitional `reason` onto #54's
+  record at spawn (a few lines, no `--host-close` logic). That makes the gate resolve a *declared* N.A. for Claude in the
   transitional window — never `unset`⇒FAIL — without yet requiring the full host-close mechanism. The gate then
   turns into a real `[BLOCK]` for the Claude substrate only once (2)+(3) ship `--host-close` and the dispatcher
-  flips its declaration to `persistent + handle`. So the safe landing order is: **#54 record API → (1a)
+  flips its declaration to `persistent` (+ handle). So the safe landing order is: **#54 record API → (1a)
   declaration write + (1) gate → (2)+(3) host-close mechanism + flip to `persistent`.** A Codex substrate that
   truly has no persistent host declares `dispatch_host=none` and is permanently N.A.
 - **Rollback:** the product change is a doc clause — revert the squash commit through the normal lifecycle.
   The instance completion path is opt-in by construction, **but rollback must flip the declaration, not just
-  drop the call** (Finding-driven): once the dispatcher declares `persistent + handle`, the `[BLOCK]` gate
+  drop the call** (Finding-driven): once the dispatcher declares `persistent` (+ handle), the `[BLOCK]` gate
   *requires* the host-close call, so merely "stop calling it" would fail closed. So disabling the mechanism
   means **flipping the dispatcher's `dispatch_host` declaration back to the transitional/disabled state**
-  (`none-yet`), which returns the gate to a declared N.A. — or, for a full product rollback, reverting the
+  (`dispatch_host=none` with a disabled `reason`), which returns the gate to a declared N.A. — or, for a full product rollback, reverting the
   checklist-gate clause itself. **A disabled declaration also reclassifies already-markered hosts:** any host
   carrying a `running`/`closing` marker when the mechanism is disabled is treated like `legacy-unmarked` for
   reap — clean+pushed cleanup, no `--force` needed — so flipping the declaration doesn't strand
