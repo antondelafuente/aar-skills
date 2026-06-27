@@ -58,15 +58,18 @@ is cut short), then **spawns a detached closer process outside its own session a
 not the executor — does the bounded wait, kills the tmux session, prunes, and writes the final
 `host_state=closed` marker. The kill thus happens from a process that survives it.
 
-**Ordering against #54's relaunch supervisor — `desired-active=false` BEFORE the kill** (Finding-driven,
-load-bearing). #54 ships a model-free relaunch supervisor that *resurrects* a session it observes gone while
-its run-supervision record is still `desired-active`. So a naive "kill the session" here would race that
-supervisor and **resurrect a legitimately finished run**. `--host-close` therefore *consumes #54's existing
-`close` operation*: the closer **clears `desired-active` (marks the record inactive) FIRST**, and only then
-kills the session — the exact ordering #54 already mandates ("clear `desired-active` BEFORE the supervisor
-could observe its session gone"). This is the same record from the paragraph above (#54's run-supervision
-record is the handle's home *and* the resurrection-control state), so host-close is one coherent extension of
-#54, not a second parallel lifecycle: clear desired-active → kill session → prune → `closed`.
+**Ordering against #54's relaunch supervisor — `desired-active=false` immediately before the kill, in the same
+durable step** (Finding-driven, load-bearing). #54 ships a model-free relaunch supervisor that *resurrects* a
+session it observes gone while its run-supervision record is still `desired-active`. So a naive "kill the
+session" would race that supervisor and **resurrect a legitimately finished run**. `--host-close` therefore
+*consumes #54's existing `close` operation* — but the clear must be **immediately before** the kill and bound
+to it in one durable step, not done early (see the close-ordering paragraph below: clearing it early opens a
+crash window where the run is neither recoverable nor being closed). So the closer **clears `desired-active`
+and kills the session atomically**, satisfying #54's mandate ("clear `desired-active` BEFORE the supervisor
+could observe its session gone") without the early-clear hazard. This is the same record from the paragraph
+above (#54's run-supervision record is the handle's home *and* the resurrection-control state), so host-close
+is one coherent extension of #54, not a second parallel lifecycle: durably-launch closer → [closer: clear
+desired-active + kill session] → prune → `closed`.
 
 This makes the attestation split clean and honest. The executor attests only the **pre-kill** half it can —
 the `closing` marker is written and the detached closer was launched as the last Close action — never "I
@@ -76,19 +79,29 @@ CHECKLIST evidence is therefore "`closing` marker present + closer launched," wh
 self-audit rule (verify state by inspection, not memory) without asking the executor to inspect a process it
 just terminated.
 
-**The two-phase close ordering — commit the evidence BEFORE the kill handoff** (Finding-driven). Because the
-executor must *also* tick, commit, push, and self-audit the host-close CHECKLIST evidence — and the closer is
-about to kill the session it would do that in — the steps must be strictly ordered so the kill never races the
-executor's own bookkeeping. **Phase 1 (executor, in-session):** clear `desired-active`, write the `closing`
-marker, record the host-close evidence in `CHECKLIST.md`, **commit + push** that record, and run the close
-self-audit — all while the session is still alive. The thing the executor attests is precisely this
-*pre-kill* state, which is fully knowable before any kill. **Phase 2 (handoff, then detached):** *only after*
-Phase 1's commit/push/audit completes does the executor launch the detached closer and return; the closer then
-kills the session and writes the durable `closed` record **outside** the session. The contract explicitly
-accepts the closer's post-kill `closed` marker (control-plane, generation-keyed) as the authority for the
-*post-kill* half — the executor is never asked to commit anything after its session is gone. So the gate's
-required evidence is Phase-1 evidence (committed pre-kill), and the post-kill truth lives in the closer's
-durable record, not in a commit the dead session can't make.
+**The close ordering — the executor only *launches* the closer; the closer owns `desired-active`-clear + kill
+atomically** (Finding-driven; two real ordering hazards forced this precise sequence). Two constraints pin it.
+First, **the host-close gate must not be coupled to the close audit.** `run-experiment`'s independent
+cross-family close audit runs *before* the self-wake is cleared, and host-close is the *very last* Close
+action — so requiring host-close evidence to be part of the audited CHECKLIST state is circular (the audit has
+already run). So the gate's evidence is a **control-plane fact, not an audited commit**: the executor asserts
+"`closing` marker written + detached closer durably launched," and the *dispatcher/closer* — an external
+finalizer that outlives the session — owns verifying the post-kill `closed` marker. The CHECKLIST `[BLOCK]`
+gate checks the pre-kill control-plane fact; it never asks the executor to commit-and-audit something only
+knowable after its session dies.
+
+Second, **the run must stay recoverable until the closer is durably in charge** — so `desired-active` is *not*
+cleared early. If the executor cleared `desired-active` at the top of Close and then crashed before the closer
+was durably launched, #54 would (correctly) refuse to relaunch a not-desired-active run while no closer exists
+to kill the host — an orphaned, unsupervised, un-closed session. So the ordering is: **(1) executor, while
+fully recoverable:** write the `closing` marker (a *recoverable* state — #54 still treats the run as
+desired-active and would relaunch a crash here) and durably launch the detached closer; that is the executor's
+last attestable act. **(2) detached closer, atomically:** clear `desired-active` *and immediately* kill the
+session as one durable step (the #54-mandated "clear before the supervisor observes the session gone", now
+genuinely immediate), then prune and write the durable generation-keyed `closed` marker outside the session.
+The `desired-active`-clear and the kill live together in the closer, so there is no window where the run is
+neither recoverable nor being closed. The executor never commits anything after its session is gone; the
+post-kill truth lives in the closer's control-plane record.
 
 **Where the marker lives, and its schema** (Finding-driven). The marker must live **outside the git
 worktree** — in the dispatcher's own control-plane state dir — *not* a file inside the worktree. This is
@@ -325,6 +338,11 @@ substrate supplies the *mechanism* and the field's *values*.
   *requires* the host-close call, so merely "stop calling it" would fail closed. So disabling the mechanism
   means **flipping the dispatcher's `dispatch_host` declaration back to the transitional/disabled state**
   (`none-yet`), which returns the gate to a declared N.A. — or, for a full product rollback, reverting the
-  checklist-gate clause itself. Either way the world reverts to today's manual-reap behavior with no data at
-  risk, because deletion was never automatic. The standing escape hatch is unchanged: `dispatch-claude.sh
+  checklist-gate clause itself. **A disabled declaration also reclassifies already-markered hosts:** any host
+  carrying a `running`/`closing` marker when the mechanism is disabled is treated like `legacy-unmarked` for
+  reap — clean+pushed cleanup, no `--force` needed — so flipping the declaration doesn't strand
+  mid-flight-markered hosts behind the marker-aware refusal path. (For a full product rollback, marker
+  creation + the marker-aware `--list`/reap semantics revert together as one instance change.) Either way the
+  world reverts to today's manual-reap behavior with no data at risk, because deletion was never automatic. The
+  standing escape hatch is unchanged: `dispatch-claude.sh
   --reap <exp>` / `--reap-all` for manual cleanup, `--list` to see what's outstanding.
