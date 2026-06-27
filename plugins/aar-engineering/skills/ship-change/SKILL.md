@@ -184,7 +184,14 @@ Then `wf.sh finish` runs the disposition-aware review (suppresses validly-dispos
 deterministic structural gate over the state's HIGH entries (a HIGH left `unresolved`, or a malformed
 disposition, BLOCKS — fail-closed, independent of the model). Recovery: a malformed disposition file fails the
 gate with the offending finding; fix it and re-`save`. No state on a PR → the normal stateless review (this is
-opt-in). Pair with the fresh-eyes companion (#140) so the stateful gate never trusts a pre-existing hole past.
+opt-in).
+
+**Fresh-eyes companion (#140) — automatic, no action needed.** On a disposition-aware `finish`, the gate also
+runs ONE un-anchored stateless sweep and posts it as a `## Fresh-eyes sweep` PR comment. Those are **candidate
+findings only**: do **not** `fdispo seed` them, and they are **not** a verdict. The disposition-aware merge
+review semantically adjudicates them (surfaces any genuinely-new/pre-existing hole as a residual HIGH); only
+the **residual merge-review findings** are what you disposition. The sweep just guarantees the stateful gate
+never trusts a pre-existing hole past.
 
 ## GitHub reader surface
 

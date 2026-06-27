@@ -211,9 +211,9 @@ review_audit_env(){  # review_audit_env <author> <constitution>
   # clean review file could then be reused as the merge verdict — a gate bypass). Clear it unconditionally.
   if [ "$author" = claude ] && is_claude_verifier_cmd "${AUDIT_VERIFIER_CMD:-}"; then
     note "ignoring same-family AUDIT_VERIFIER_CMD for author=claude; using default Codex verifier"
-    printf '%s\0' BASH_ENV= AUDIT_VERIFIER_CMD= AUDIT_DRY_RUN= DISPOSITION_FILE= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+    printf '%s\0' BASH_ENV= AUDIT_VERIFIER_CMD= AUDIT_DRY_RUN= DISPOSITION_FILE= FRESH_SWEEP_FILE= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
   else
-    printf '%s\0' BASH_ENV= AUDIT_DRY_RUN= DISPOSITION_FILE= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+    printf '%s\0' BASH_ENV= AUDIT_DRY_RUN= DISPOSITION_FILE= FRESH_SWEEP_FILE= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
   fi
 }
 
@@ -464,6 +464,49 @@ fd_save(){  # fd_save <wt> <repo> <pr> <tok> — post the cache as a new canonic
     "$FD_MARKER" "$(cat "$cache")" | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1
 }
 # fd-helpers-end (extraction sentinel for fd_state_smoke.sh)
+
+# fresh_sweep (#140): an UN-ANCHORED stateless dimensional review (no disposition injection — review_audit_env
+# clears DISPOSITION_FILE; the --code/--scaffold prompts carry no prior-round anchoring) to catch a pre-existing
+# hole the disposition-anchored review would trust past. Writes a DISTINCT wf_fresh_<branch>.md artifact (never
+# the wf_code_*/wf_scaffold_* file #139 consumes), posts it COMMENT-ONLY and NON-gating, and echoes the artifact
+# path. CANDIDATE-only: it never seeds state or feeds the deterministic gate; the disposition-aware merge review
+# semantically adjudicates it. A sweep failure is non-fatal (the disposition-aware gate still runs).
+fresh_sweep(){  # fresh_sweep <wt> <author> <mode> <target> <pr>  -> echoes the artifact path (best-effort)
+  local wt=$1 author=$2 mode=$3 target=$4 pr=$5
+  local audit rev; audit=$(locate_audit "$wt")
+  rev="${TMPDIR:-/tmp}/wf_fresh_$(wt_branch "$wt" | tr '/' '_').md"
+  rm -f "$rev"   # never reuse a stale sweep
+  local audit_env=()
+  while IFS= read -r -d '' item; do audit_env+=("$item"); done < <(review_audit_env "$author" "${AUDIT_CONSTITUTION:-$wt/AGENTS.md}")
+  note "fresh-eyes sweep (un-anchored stateless ${mode#--}; candidate findings, NON-gating)…"
+  # The sweep itself is the MANDATORY backstop — return non-zero on failure so finish fails closed. Only the
+  # PR-comment posting below is best-effort. (NOT require_valid_review here — it dies; the caller decides.)
+  if ! env "${audit_env[@]}" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log"; then
+    note "fresh-eyes sweep run FAILED — tail: $(tail -2 "$rev.run.log" 2>/dev/null)"; return 1
+  fi
+  grep -qE '^SUMMARY: high=[0-9]+ med=[0-9]+ low=[0-9]+' "$rev" 2>/dev/null \
+    || { note "fresh-eyes sweep produced no parseable output"; rm -f "$rev"; return 1; }
+  local h m l; h=$(count_high "$rev"); m=$(count_med "$rev"); l=$(count_low "$rev")
+  # If the SUMMARY claims findings but none are parseable as FINDING lines, the candidates would silently vanish
+  # from the adjudicator — treat that as a malformed (failed) sweep so the mandatory backstop holds.
+  if [ "$((h + m + l))" -gt 0 ] && ! grep -qE '^FINDING ' "$rev" 2>/dev/null; then
+    note "fresh-eyes sweep SUMMARY claims findings but no parseable FINDING lines — treating as malformed"; rm -f "$rev"; return 1
+  fi
+  note "fresh-eyes sweep: $h HIGH / $m MED / $l LOW candidate(s) -> $rev"
+  if [ -n "$pr" ]; then
+    local repo rtok; repo=$(gh_repo "$wt"); rtok=$(reviewer_token "$author" 0)
+    if [ -z "$rtok" ] && ! ambient_identity_allowed; then
+      note "fresh-eyes sweep: no reviewer engineer identity — skipping the (non-gating) PR comment"
+    else
+      local body
+      body=$( { printf '## Fresh-eyes sweep — un-anchored stateless read (CANDIDATE findings; NON-gating; do NOT `fdispo seed` these)\n\nThese are an amnesiac full re-read to catch a pre-existing hole. They are NOT a verdict and NOT auto-seeded; the disposition-aware merge review semantically adjudicates them, and only its residual findings are dispositioned.\n\n'; markdown_code_details "Sweep candidates ($h HIGH/$m MED/$l LOW)" "$(cat "$rev")"; } )
+      printf '%s' "$body" | gh_author "$rtok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
+        || note "WARN: could not post the fresh-eyes sweep comment (non-fatal)"
+    fi
+  fi
+  printf '%s\n' "$rev"
+}
+
 # the reviewed + merged content must be the COMMITTED content: refuse to act on a dirty tree (uncommitted or
 # untracked changes would make checks/review see content that isn't what merges, and --force removal would
 # then destroy it).
@@ -629,7 +672,14 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
       local fd_file
       if fd_file=$(fd_load "$wt" "$fd_repo" "$pr" "$rtok"); then
         audit_env+=("DISPOSITION_FILE=$fd_file")
-        note "disposition-aware: $(jq '[.findings[]|select(.status!="unresolved")]|length' "$fd_file" 2>/dev/null)/$(jq '.findings|length' "$fd_file" 2>/dev/null) findings dispositioned"
+        # #140: if a fresh-eyes sweep artifact exists for this branch, hand it to the reviewer for SEMANTIC
+        # adjudication (surface any HIGH not covered by a disposition). FRESH_SWEEP_FILE was cleared from the
+        # inherited env by review_audit_env, so it is only ever the trusted finish-produced artifact.
+        # Only the APPROVING merge-gate review (approving=1) adjudicates the fresh sweep — and finish produces a
+        # current artifact immediately before it. A non-final review must never pick up a stale wf_fresh.
+        local fresh_art; fresh_art="${TMPDIR:-/tmp}/wf_fresh_$(wt_branch "$wt" | tr '/' '_').md"
+        [ "$approving" = 1 ] && [ -f "$fresh_art" ] && audit_env+=("FRESH_SWEEP_FILE=$fresh_art")
+        note "disposition-aware: $(jq '[.findings[]|select(.status!="unresolved")]|length' "$fd_file" 2>/dev/null)/$(jq '.findings|length' "$fd_file" 2>/dev/null) findings dispositioned$([ -f "$fresh_art" ] && echo "; +fresh-sweep adjudication")"
       else
         note "WARN: disposition state present but corrupt JSON — this review runs stateless (finish will fail closed)"
       fi
@@ -1226,6 +1276,17 @@ Split into one design PR per doc."
   case "$FDRC" in
     2) die "disposition-state lookup failed (GitHub error) — failing closed; re-run finish" ;;
     0) FD=$(fd_load "$WT" "$REPO" "$PR" "$ATOK") || die "canonical disposition state on PR #$PR is corrupt (invalid JSON) — fix the disposition comment and re-run finish"
+       # #140 fresh-eyes companion: BEFORE the gate/merge-review, run ONE un-anchored stateless sweep over the
+       #      same target and post it. Its wf_fresh_<branch> artifact is auto-handed to the disposition-aware
+       #      merge review (run_review) for SEMANTIC adjudication. Candidate-only — it never feeds the
+       #      deterministic structural gate below, so a rephrased dispositioned finding can't false-block.
+       if [ "$DESIGN_MODE" = 1 ]; then
+         fresh_sweep "$WT" "$AUTHOR" --scaffold "$WT/$DESIGN_DOC" "$PR" >/dev/null || die "fresh-eyes sweep (mandatory #140 backstop) failed — re-run finish (only its PR comment is best-effort)"
+       else
+         FRESHDIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
+         ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$FRESHDIFF"
+         fresh_sweep "$WT" "$AUTHOR" --code "$FRESHDIFF" "$PR" >/dev/null || die "fresh-eyes sweep (mandatory #140 backstop) failed — re-run finish (only its PR comment is best-effort)"
+       fi
        FDLIST="${TMPDIR:-/tmp}/wf_fd_high_${BR//\//_}.txt"
        # TRUSTED findings list: prefer the latest code-review output (reviewer-derived, not author-editable) so a
        # deleted/downgraded disposition can't bypass the gate; fall back to the state's own HIGH ids only when no
