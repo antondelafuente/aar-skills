@@ -127,6 +127,15 @@ established for `wf.sh`: design/close reviews take an **explicit** runner/design
 a Codex-run experiment from being reviewed by Codex (same-family), the exact failure the cross-family
 guarantee exists to prevent.
 
+**Merge-authority code loads from a trusted source, never the branch under review.** Because the helper now
+carries *write/merge* authority, an experiment PR that edited the helper could otherwise run its own
+branch-modified mutation code as its own merge gate — the same trust hole `locate_audit` already closes for
+the reviewer ("a PR that edits the reviewer cannot run its own modified reviewer as its merge gate"). The
+helper must resolve merge-authority code from the trusted base/install (mirroring `locate_audit`'s
+trusted-but-current resolution) and ship a poisoned-helper smoke matching `locate_audit_smoke`. Working out
+*which* primitives are merge-authority (trusted-base) vs. plain posting (runtime) is the substance of the
+helper's `needs-design` child — so the extraction is **not** a `ready` task.
+
 ## Instance-profile contract (decoupling)
 
 The target research repo is **instance config, not hardcoded** — so the flow is reusable by any consuming
@@ -163,8 +172,11 @@ is reproducible even if instance config later changes.
 ## Blast radius
 
 - **Product skills** (`automated-researcher`): `design-experiment` and `run-experiment` gain the
-  branch/PR/review-posting steps and the four-gate record contract. No change to the `verify-claims` audit
-  engine — reused as-is.
+  branch/PR/review-posting steps and the four-gate record contract. The `verify-claims` audit *engine* is
+  reused, but its current `AAR_SUBSTRATE=claude` default is **legacy for direct local invocation only** —
+  the experiment-PR path goes through the helper, which **requires** an explicit runner/designer family and
+  fails closed; only that path carries the cross-family guarantee. (Folding explicit-family selection into the
+  engine's own contract is an option for the helper child.)
 - **Shared helper (decision 5):** the GitHub-identity + review-posting primitives are extracted into
   **`verify-claims`** (the shared cross-family runtime), and `aar-engineering`/`wf.sh` is refactored to
   consume it — so `experiment-lifecycle` never depends on the build plugin. This is the one cross-cutting edit.
@@ -177,32 +189,35 @@ is reproducible even if instance config later changes.
 
 ## Decomposition (spawned issues)
 
-This is the **umbrella/shape** design: it fixes the lifecycle shape and the decisions that are genuinely
-settled, and decomposes the rest. Two sub-decisions are still genuinely open, so they spawn as
-`needs-design` children (not `ready` — a `ready` child must carry no open design):
+This is the **umbrella/shape** design: it fixes the lifecycle shape and the genuinely-settled decisions
+(decisions 1–5, the gate model, the canonical path), and decomposes the rest honestly. The novel pieces each
+carry an open sub-decision, so they are `needs-design` — only the work that carries *no* open design is
+`ready`, and dependent work is filed `blocked-by` its parents (per the two-phase contract).
 
-**`needs-design` children (open sub-designs):**
-- **Triage-artifact schema** — the machine-readable close-gate artifact (path, finding identifiers, allowed
-  statuses {fixed | justified-with-reason | deferred}, pass/fail rules). No such schema exists in the
-  lifecycle yet, so it needs its own pass.
-- **Terminal experiment states** — the contract for blocked / invalid / abandoned / null-conclusion runs:
-  which states exist, what evidence each requires, and when such a record may merge as "no valid conclusion."
+**`needs-design` children (each carries an open sub-decision):**
+- **Shared-helper extraction** — into `verify-claims`, *with* the merge-authority trust/source-selection
+  contract (which primitives load from trusted-base vs runtime) + the poisoned-helper smoke. The home is
+  decided; the trust split is the open design.
+- **Triage-artifact schema** — path, finding identifiers, allowed statuses {fixed | justified-with-reason |
+  deferred}, pass/fail rules. None exists in the lifecycle yet.
+- **Terminal experiment states** — blocked / invalid / abandoned / null-conclusion: which states exist, what
+  evidence each requires, when such a record merges as "no valid conclusion."
+- **Instance-profile discovery/init interface** — the concrete config path, schema, init owner, and brief
+  snapshot rules. Today it is only a narrative seam.
 
-**`ready` children (settled — implementable directly):**
-- Extract the shared GitHub helper (identity + fail-closed cross-family posting) into **`verify-claims`**;
-  refactor `wf.sh` to consume it.
-- `design-experiment`: open the `run/<exp>` PR, post the `--design` review, link the `verify_claim` record,
-  hand off on clearance.
-- `run-experiment`: push records to `experiments/<exp>/`, teardown on verified upload, post the close review,
-  merge on the triage gate (consuming the schema from its `needs-design` parent).
-- Instance-profile **discovery/init** interface (per the field list above) + the `experiments/<exp>/`
-  canonical record path.
+**`ready` (no open design — independent of the above):**
+- `run-experiment` **record-pushing**: commit `DESIGN.md`/`START.md`/`RESULTS.md` + gate outputs + pointers
+  to the `experiments/<exp>/` canonical path. Pure plumbing, depends on nothing open.
+
+**`blocked-by` (file once parents land):**
+- `design-experiment` PR-open + `--design` review posting + fact-record linking — blocked-by the helper.
+- `run-experiment` close-review + merge gate — blocked-by the helper, the triage schema, and terminal states.
 
 ## Rollout + rollback
 
-Doc-only design PR; lands the shape on `main` via the `--scaffold` gate, then the children above are filed
-(`needs-design` first, since the `ready` run-experiment child consumes the triage schema). Each is
-implemented as a normal `ship-change` run. Staged: pilot the flow on a single real experiment before making
+Doc-only design PR; lands the shape on `main` via the `--scaffold` gate, then the children above are filed:
+the four `needs-design` sub-designs first (they unblock the rest), the `ready` record-pushing piece anytime,
+and the `blocked-by` wiring once its parents land. Each is implemented as a normal `ship-change` run. Staged: pilot the flow on a single real experiment before making
 the branch/PR path the default in `run-experiment`. Rollback is a normal revert of the spawned skill edits —
 the lifecycle falls back to the status-quo local-file gates with no data loss, since the audits themselves
 are unchanged.
