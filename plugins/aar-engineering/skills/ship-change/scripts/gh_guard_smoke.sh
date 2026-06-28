@@ -95,6 +95,15 @@ for r in "repo view o/r" "repo list" "release view v1" "release download v1" "se
   : > "$FAKE_GH_LOG"
   if guard $r >/dev/null 2>&1 && grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $r' passes (read)"; else fail "'gh $r' should pass"; fi
 done
+# 2g'. an UNLISTED core family's mutating verb is redirected by the default-safe rule; its read passes (review)
+for w in "project create" "project delete 1" "discussion create" "gpg-key add"; do
+  : > "$FAKE_GH_LOG"
+  if ! guard $w >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $w' blocked (default-safe mutating)"; else fail "'gh $w' should be blocked"; fi
+done
+for r in "project list" "project view 1" "gpg-key list"; do
+  : > "$FAKE_GH_LOG"
+  if guard $r >/dev/null 2>&1 && grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $r' passes (read)"; else fail "'gh $r' should pass"; fi
+done
 # 2h. a value-taking flag's VALUE must not be echoed as the verb shape on block (review F3)
 LEAK2=$(guard issue --foo 'SECRET_FLAG_VALUE' create -b x 2>&1 || true)
 if ! printf '%s' "$LEAK2" | grep -q 'SECRET_FLAG_VALUE'; then pass "blocked shape does not echo an unlisted flag value"; else fail "blocked shape leaked a flag value (F3)"; fi

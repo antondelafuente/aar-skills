@@ -201,8 +201,11 @@ case "$sub" in
     ;;
 
   *)
-    # unknown subcommand: fail SAFE toward the redirect only for the obvious write verbs; otherwise pass
-    # through (the capability layer remains the boundary). Conservative default: pass through.
+    # any OTHER subcommand (incl. core families we don't enumerate — project, discussion, gpg-key, ssh-key,
+    # and any future ones): fail SAFE toward the redirect when the verb is an obvious mutating one, otherwise
+    # pass through (the capability layer remains the security boundary). This default-safe rule means a new
+    # write-capable family is redirected by the ergonomic guard without needing a per-family case (#165 review).
+    if is_mutating_verb "$verb"; then guard_die "$sub $safe_verb"; fi
     exec_real_gh "$@"
     ;;
 esac
