@@ -61,12 +61,23 @@ FINDING 1); the runtime/merge-authority labels record *which functions are gate-
 run from the worktree copy" license applies only to **static, credential-free commands** — every command that
 mints a token, pushes, posts to GitHub, or runs/posts a reviewer base-enters (decision 2, round-5 FINDING 1).
 
-**Identity + auth (MERGE-AUTHORITY).** Resolve and mint the engineer-bot identity for a given family, fail
-closed when a named identity is required and missing — `engineer_token`, `engineer_token_cmd`,
-`engineer_token_seam`, `engineer_git_author`, `family_suffix`, `opposite_family`, `reviewer_token`,
-`author_token_optional`, `gh_author`, `git_push_author`. These are merge-authority: they decide *who acts* with
-privileged credentials, and a branch that could rewrite "which family is the reviewer" or "mint the author's
-own token to self-approve" would subvert the cross-family gate. Base-sourced.
+**Identity + auth (MERGE-AUTHORITY) — through a NEUTRAL identity interface, not `WF_ENGINEER_*` directly
+(final-review FINDING 2).** The helper resolves and mints the bot identity for a given family and fails closed
+when a required identity is missing — `engineer_token`, `engineer_token_cmd`, `engineer_token_seam`,
+`engineer_git_author`, `family_suffix`, `opposite_family`, `reviewer_token`, `author_token_optional`,
+`gh_author`, `git_push_author`. These are merge-authority: they decide *who acts* with privileged credentials,
+and a branch that could rewrite "which family is the reviewer" or "mint the author's own token to self-approve"
+would subvert the cross-family gate. Base-sourced. **But the helper's identity *input* is a neutral
+identity-provider object, NOT the `WF_ENGINEER_*` env names directly:** the helper takes, per family, a
+token-minting command + a `Name <email>` author string (an abstract identity provider). **`wf.sh` adapts its
+`WF_ENGINEER_TOKEN_CMD_*` / `WF_ENGINEER_GIT_AUTHOR_*` seams into that object; experiment-lifecycle adapts the
+[#153] instance-profile `[github.identity.<family>]` seams into the *same* object.** This is load-bearing for the
+product/instance boundary: #153 deliberately gives the research flow its **own** family-keyed seam names so
+experiment-record identities are distinct from the scaffold-engineer identities — so the helper must NOT bake in
+the SWE `WF_ENGINEER_*` names, or the research flow could not supply its own credentials without reusing
+scaffold-engineer identity. The neutral interface is the seam that lets both consumers feed their own identities
+in; the helper's family-keyed *minting + opposite-family enforcement* logic is shared, the *seam names* are the
+consumer's.
 
 **PR open (MERGE-AUTHORITY) + body rendering (split).** Opening a draft PR for a branch chooses the repo/branch
 it targets and acts under a privileged identity, so the *open* path is merge-authority. PR-body generation is
@@ -141,11 +152,13 @@ The split (the full assignment is in decision 1's function surface; the principl
   "may run from the worktree copy" license applies only to **static, credential-free commands** (help/usage,
   purely-local diagnostics that touch no token and no `gh`) — NOT to `design-review`/`doctor`, which handle
   credentials and therefore base-enter (round-5 FINDING 1).
-- **Poisoned-helper smoke.** Ship a smoke test matching `locate_audit_smoke.sh`: construct a branch that edits
-  `gh-lifecycle.sh`'s merge-authority code to a known-bad behavior (e.g. force `count_high` to return 0, or
-  rewrite `opposite_family` to return the author's own family), run the gate, and assert the gate used the
-  trusted-base copy (the poison did NOT take effect). This is the mechanical proof the split holds, and it is a
-  deliverable of the extraction child, run by `.aar-ci/checks.sh`.
+- **Trust-chain smoke (the mechanical proof).** Matching `locate_audit_smoke.sh` but covering the whole
+  authority chain: construct a branch that poisons every branch-resident link — `gh-lifecycle.sh`'s
+  merge-authority code (e.g. force `count_high` to return 0, or rewrite `opposite_family` to return the author's
+  own family), the loader, and the driver/launcher copies — run the gate, and assert the gate used the
+  trusted-base copy at every link (no poison took effect). The split + the base-entrypoint rule are proven
+  together; it is a deliverable of the extraction child, run by `.aar-ci/checks.sh`. (Detailed in the
+  trusted-entrypoint subsection below.)
 
 #### The trusted loader — resolving the bootstrap circularity (FINDING 2)
 
@@ -202,10 +215,13 @@ all.** The rule:
   caller to) the base launcher — it never runs the gate itself.
 - **The launcher carries the only trusted bootstrap, and it lives in base/install — not on the branch.** Because
   the launcher is not part of the reviewed diff, a PR that poisons the worktree's driver cannot remove or
-  condition it. The **poisoned-driver smoke proves it**: the smoke poisons the *driver file on the branch* (not
-  just the library), invokes a merge-authority command, and asserts the gate ran the trusted base behavior (the
-  poison did not take effect, and the branch driver did not become the boundary). Strictly stronger than the
-  poisoned-*helper* smoke.
+  condition it. The **trust-chain smoke proves the WHOLE chain.** The full authority chain is launcher →
+  driver → loader → library, so the smoke poisons **every branch-resident shell file in that chain**
+  (driver *and* loader *and* library — and the launcher, exercised as a poisoned-branch copy that must not be the
+  one that runs), invokes a merge-authority command, and asserts the gate ran the trusted base behavior at every
+  link (no poisoned link executed; the branch copies did not become the boundary). This is strictly stronger
+  than poisoning the helper alone (final-review FINDING 4): proving the library is base-sourced is not enough if
+  the loader or launcher that *reaches* it could be branch-sourced.
 - **Scope/cost note.** The base-launcher entry is needed only for the merge-authority *commands* (those that can
   merge/approve/select-closing-ref/mint a privileged write/push/post/run-a-reviewer), not for static
   credential-free subcommands (help/usage, purely-local diagnostics). The extraction child decides the exact set of
@@ -216,10 +232,10 @@ The chain that terminates **entirely outside the reviewed worktree**: installed/
 driver → base-sourced loader → base-sourced merge-authority library; the worktree driver is data, a refusing
 stub for merge-authority commands. The split is drawn at the function level rather than file level so the
 boundary survives future edits: a new function lands on one side of the line explicitly. The extraction child
-implements the base launcher + the loader + the base-ref materialization for the merge-authority set + **both**
-smokes (poisoned helper *and* poisoned driver); the boundary itself is no longer open design (this doc settles
-which functions are merge-authority and that the merge-authority entrypoint lives in base/install, never on the
-branch).
+implements the base launcher + the loader + the base-ref materialization for the merge-authority set + the
+**whole-chain trust smoke** (poisons every branch-resident link — launcher, driver, loader, library — and proves
+none execute); the boundary itself is no longer open design (this doc settles which functions are merge-authority
+and that the merge-authority entrypoint lives in base/install, never on the branch).
 
 ### 3. Host — a neutral GitHub-lifecycle runtime helper, not the build plugin, not the audit plugin
 
@@ -236,8 +252,8 @@ branch).
   the audit engine to GitHub plumbing it is correctly ignorant of today.
 
 **Decision: a new dedicated plugin, `aar-github-lifecycle`, shaped as a normal skill plugin** —
-`plugins/aar-github-lifecycle/` with `.claude-plugin/plugin.json` + `skills/github-lifecycle/SKILL.md` +
-`skills/github-lifecycle/scripts/` holding `gh-lifecycle.sh`, the trusted loader `gh-lifecycle-load.sh`, and the
+`plugins/aar-github-lifecycle/` with `.claude-plugin/plugin.json` + `skills/aar-github-lifecycle/SKILL.md` +
+`skills/aar-github-lifecycle/scripts/` holding `gh-lifecycle.sh`, the trusted loader `gh-lifecycle-load.sh`, and the
 poisoned-helper smoke. A dedicated plugin (rather than folding the library into an existing runtime plugin like
 `experiment-lifecycle`) is chosen because: **(a)** it has exactly one well-scoped job — the GitHub mechanism —
 and both consumers (`aar-engineering`/ship-change *and* `experiment-lifecycle`) sit *above* it, so it must not
@@ -253,7 +269,7 @@ with **no resolvable `skills/*/SKILL.md`**. A no-skill plugin would be undiscove
 helper ships a real (thin) `SKILL.md`. That `SKILL.md` documents the consumed library — what it exports, the
 runtime/merge-authority split, and that it is *sourced by drivers, not invoked by an agent directly* — which is
 also the right home for the contract this doc establishes. Scripts live **inside** the skill dir
-(`skills/github-lifecycle/scripts/`) per the layout rule, so consumers resolve them by the standard
+(`skills/aar-github-lifecycle/scripts/`) per the layout rule, so consumers resolve them by the standard
 source-first plugin-skill path (#69's discovery convention), with the merge-authority subset re-materialized
 from the base ref by the trusted loader (decision 2). The exact `plugin.json` version-bump wiring and the
 `.aar-ci` hook are settled here as the contract; the extraction child implements them.
@@ -276,10 +292,14 @@ a fresh machine is a silent install break. The contract:
   (round-5 FINDING 1 / round-6 FINDING 1).** A fresh-installed consumer reads from its install cache, and the
   install shape that spans **both** Claude plugin-cache **and** Codex/Agent-Skills (skill-only) installs is the
   **skill dir** — a skill-only install exposes only `skills/<name>/`, not the plugin root. So the declaration
-  lives **inside the consumer's installed skill surface** (e.g. `skills/<name>/.aar-deps`, a one-line `requires:
-  aar-github-lifecycle`), present in *both* install shapes. The consumer resolves its dependency by reading its
-  *own packaged* declaration (via the same source-first skill-dir discovery #69 uses); on failure it prints the
-  **exact companion install command** so a fresh install is self-correcting. `.aar-ci` does **not** become the
+  lives **inside the consumer's installed skill surface** (`skills/<name>/.aar-deps`). **The plugin and skill
+  ids are identical — `aar-github-lifecycle` is both the plugin name AND its skill dir name** (per the
+  `plugins/<name>/skills/<name>/` convention), so a skill-only/Codex consumer resolves the helper by one
+  unambiguous id. The `.aar-deps` schema names that exact resolvable id **and** the install command per install
+  shape: `requires: aar-github-lifecycle`, plus the marketplace/plugin install command (Claude) and the
+  symlink-source path (Codex skill-only). The consumer resolves its dependency by reading its *own packaged*
+  declaration (via the same source-first skill-dir discovery #69 uses); on failure it prints the **exact
+  companion install command for the detected install shape** so a fresh install is self-correcting. `.aar-ci` does **not** become the
   file consumers read — it **validates** the packaged contract (a `checks.sh` assertion that each consumer's
   packaged `.aar-deps` is present and names the helper). (If a harness later supports a native `plugin.json`
   dependency field, that is an additive convenience; the packaged skill-surface `.aar-deps` stays the canonical
@@ -364,10 +384,10 @@ The boundary is: helper enforces family on what it runs; #154 enforces it on wha
 
 ## Blast radius
 
-- **New plugin** `aar-github-lifecycle` — skill-shaped (`skills/github-lifecycle/SKILL.md` +
-  `skills/github-lifecycle/scripts/{gh-lifecycle.sh, gh-lifecycle-load.sh, poisoned-helper + poisoned-driver
-  smokes}` + `.aar-ci` hook), so it passes the module-shape convention and the fake-HOME install gate. The
-  SKILL.md documents the library; the library is *sourced by drivers*, not invoked by an agent.
+- **New plugin** `aar-github-lifecycle` — skill-shaped, plugin id == skill id (`skills/aar-github-lifecycle/SKILL.md`
+  + `skills/aar-github-lifecycle/scripts/{gh-lifecycle.sh, gh-lifecycle-load.sh (loader), base launcher,
+  whole-chain trust smoke}` + `.aar-ci` hook), so it passes the module-shape convention and the fake-HOME install
+  gate. The SKILL.md documents the library; the library is *sourced by drivers*, not invoked by an agent.
 - **Install surface** (decision 4): `.claude-plugin/marketplace.json` + the README install list (incl. the Codex
   symlink doc) gain the new plugin; each consumer plugin gains a packaged `.aar-deps` declaration (the
   runtime-readable dependency contract, present in the install cache); `.aar-ci/checks.sh` gains a validator for
@@ -402,26 +422,29 @@ Doc-only design PR (this one): lands the contract on `main` via the `--scaffold`
 extraction child(ren). Staging of the *implementation* (helper availability **before** `wf.sh` depends on it —
 round-6 FINDING 2):
 
-1. **Land the helper plugin first, with `wf.sh` still self-contained.** The new `aar-github-lifecycle` plugin
-   (library + loader + base launcher + both smokes) lands and is installable — added to marketplace/README, with
-   the consumer `.aar-deps` declarations and the validator — while `wf.sh` still carries its own in-file
-   primitives and does not yet depend on the helper. This guarantees the helper is available before anything
-   requires it, so an `aar-engineering` install can never update into a stranded shipping path missing its
-   companion.
-2. **Then refactor `wf.sh` to consume the helper, atomically with the dependency declaration.** `wf.sh` switches
-   to sourcing the shared library; the merge-authority subset is materialized from the trusted base ref and
-   reached only via the installed/base launcher (decision 2 — the worktree driver is a refusing stub for
-   credential/GitHub commands); the cross-plugin smoke (decision 4, both install shapes) gates it so the refactor
-   cannot merge unless the consumer resolves its declared dependency in a virgin HOME; the **poisoned-helper
-   smoke, the poisoned-driver smoke, and the existing `locate_audit_smoke`** all pass; `wf.sh`'s subcommand
+1. **Land the helper plugin first, with `wf.sh` still self-contained and NO consumer `.aar-deps` yet.** The new
+   `aar-github-lifecycle` plugin (library + loader + base launcher + the whole-chain trust smoke) lands and is installable —
+   added to marketplace/README — while `wf.sh` still carries its own in-file primitives and does not yet depend
+   on the helper. **No consumer declares the dependency in this step** (a `.aar-deps` is added per *actual first
+   use*, final-review FINDING 3): declaring it before the consumer uses it would force a premature required
+   install on current users. This step only guarantees the helper is *available* before anything requires it, so
+   an `aar-engineering` install can never later update into a stranded shipping path missing its companion.
+2. **Then refactor `wf.sh` to consume the helper, atomically with `aar-engineering`'s OWN `.aar-deps`.** `wf.sh`
+   switches to sourcing the shared library; the merge-authority subset is materialized from the trusted base ref
+   and reached only via the installed/base launcher (decision 2 — the worktree driver is a refusing stub for
+   credential/GitHub commands); **`aar-engineering`'s `.aar-deps` (declaring the helper) lands in this same PR**,
+   so the declaration appears exactly when `wf.sh` first needs it; the cross-plugin smoke (decision 4, both
+   install shapes) gates it so the refactor cannot merge unless the consumer resolves its declared dependency in
+   a virgin HOME; the **whole-chain trust smoke and the existing `locate_audit_smoke`** all pass; `wf.sh`'s subcommand
    surface and output are unchanged. This PR ships through ship-change's *own* `--code` gate — the machinery
    refactors itself under its current gate, the safest order. Trust-bootstrap subtlety: because this PR edits
    merge-authority code AND the driver entrypoint, its *own* merge gate runs the **base-ref** (pre-change) copy
    of both — the new behavior is only ever exercised by ship-change runs *after* it lands, the intended trust
    property, not a gap.
 3. **Only after (2) is merged and a ship-change run has exercised the shared library** do the experiment
-   consumers (#156 / #157) wire to it. The experiment-PR path is not made default in `run-experiment` until
-   it has been piloted on a single real experiment (per #130's staged rollout).
+   consumers (#156 / #157) wire to it, **each adding `experiment-lifecycle`'s `.aar-deps` in its own PR** (again
+   per actual first use). The experiment-PR path is not made default in `run-experiment` until it has been
+   piloted on a single real experiment (per #130's staged rollout).
 
 The implementation contract also updates the **AGENTS.md plugin taxonomy** (round-6 FINDING 3): the canonical
 "Two layers" / product-vs-SWE-plugin split currently lists `gpu-job`/`verify-claims`/`experiment-lifecycle` as
