@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Named wrapper for the aar-profile init owner (#153 / #194): the contract names `aar-profile-init`,
+# so the named interface is the one on disk. Thin shim to aar_profile.py init.
+exec python3 "$(dirname "$0")/aar_profile.py" init "$@"

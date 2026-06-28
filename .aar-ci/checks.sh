@@ -133,6 +133,21 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   done
 fi
 
+# 1f. experiment-lifecycle ships the aar-profile init owner (aar_profile.py + the named wrappers + its smoke)
+#     in both independently-installed skill dirs (#153 child 2 / #194), same per-skill-copy precedent as the
+#     SCHEMA.md reference above. Keep the copies byte-identical.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|run-experiment)/scripts/(aar_profile\.py|aar-profile-init|aar-profile-validate|aar_profile_smoke\.sh)$'; then
+  DE_DIR="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/scripts"
+  RE_DIR="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts"
+  for f in aar_profile.py aar-profile-init aar-profile-validate aar_profile_smoke.sh; do
+    if [ -f "$DE_DIR/$f" ] && [ -f "$RE_DIR/$f" ] && cmp -s "$DE_DIR/$f" "$RE_DIR/$f"; then
+      ok "aar-profile copy matches: $f"
+    else
+      err "aar-profile copy drift ($f); keep design-experiment and run-experiment copies byte-identical"
+    fi
+  done
+fi
+
 # 2. shell syntax — *.sh AND extensionless shell scripts (e.g. .githooks/* hooks) detected by shebang
 for p in "${PATHS[@]}"; do
   [ -f "$p" ] || continue
@@ -283,6 +298,21 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scrip
     bash "$PR_SMOKE" >&2 && ok "pod_reaper smoke" || err "pod_reaper smoke FAILED"
   else
     err "pod_reaper.sh changed but pod_reaper_smoke.sh missing — cannot verify the reaper logic"
+  fi
+fi
+
+# 12. aar-profile init/validate smoke (#194): the schema checks, refuse-unknown-MAJOR, fail-closed on
+#     missing/mistyped, the --resolve wiring layer, init round-trip, and the shadowed-.json warning — behavior
+#     the JSON/syntax checks can't catch. Runs when the helper/wrappers/smoke OR the SCHEMA.md the helper
+#     mirrors changes (the SCHEMA.md trigger is the field-table drift guard: a doc field change the code must
+#     mirror is caught by the smoke's fixtures).
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|run-experiment)/(scripts/(aar_profile\.py|aar-profile-init|aar-profile-validate|aar_profile_smoke\.sh)|references/SCHEMA\.md)$'; then
+  AP_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/scripts/aar_profile_smoke.sh"
+  if [ -f "$AP_SMOKE" ]; then
+    echo "[checks] aar-profile init/validate smoke" >&2
+    bash "$AP_SMOKE" >&2 && ok "aar_profile smoke" || err "aar_profile smoke FAILED"
+  else
+    err "aar-profile helper/SCHEMA.md changed but aar_profile_smoke.sh missing — cannot verify init/validate"
   fi
 fi
 
