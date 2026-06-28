@@ -31,6 +31,14 @@ counter that, once a PR has gone through N merge-gate review rounds and *still* 
 still blocking the merge (it never auto-merges). It is a louder, differently-worded block, not a different
 gate: the human/author decides whether to re-split.
 
+**Scope: this bounds the *merge-gate* review loop specifically.** That is the credit sink with no
+human-judgment exit — `finish`'s final-SHA review re-runs every attempt, the merge is hard-blocked
+(`enforce_admins` ON), and PR #192's seven CHANGES_REQUESTED rounds are exactly merge-gate review rounds.
+Interim `code-review`/`design-review` are *author-initiated* and self-limiting (the author chooses whether
+to spend another interim pass and can stop at any time), so they are deliberately **not** counted; bounding
+them would be a different, larger change with no forcing function behind it. The backstop addresses the loop
+that the author *cannot* exit by choice — the one the gate itself drives.
+
 The load-bearing decisions:
 
 1. **What a "round" is, and when it increments.** A round is *one completed merge-gate reviewer pass whose
@@ -41,11 +49,14 @@ The load-bearing decisions:
    merge review ran (structural gate block, fresh-eyes failure, reviewer crash). So the count tracks real
    reviewer passes, not `finish` invocations.
 
-2. **Idempotent increment (no inflation).** Re-running `finish` without a genuinely new reviewer result must
-   not inflate the count. The state records the **fingerprint of the last review that incremented the
-   counter** (a hash of the review's HIGH finding-id set); the increment happens only when the current
-   merge-review fingerprint differs from the recorded one. A repeated identical merge review (same HIGH
-   findings) is the same round, counted once.
+2. **Idempotent increment (no inflation, no undercount).** Re-running `finish` without a genuinely new
+   reviewer *pass* must not inflate the count — but a real new pass on a changed commit must always count,
+   *even when the same blocker survives* (the PR #192 case is precisely "same theme recurs across genuinely
+   new commits", so a HIGH-id-set-only fingerprint would wrongly undercount it). The fingerprint is therefore
+   **the reviewed SHA combined with the residual-HIGH id set** (`<reviewed-HEAD-sha>:<sorted HIGH ids>`,
+   hashed). A new commit advances HEAD → new SHA → new fingerprint → the round increments. A bare `finish`
+   re-run with no new commit and the identical review (same SHA, same HIGHs) reproduces the recorded
+   fingerprint → no increment. This counts real reviewer passes and never double-counts an identical retry.
 
 3. **The schema field.** A top-level integer `round` (default `0`, back-compatible: a pre-existing state
    with no `round` reads as `0`) plus a top-level `last_review_fingerprint` string. Both live alongside the
@@ -103,6 +114,8 @@ SWE pipeline only (`ship-change` / `wf.sh` + the disposition state schema). Touc
 - SKILL.md's disposition-aware-gate section: a sentence on the backstop. (No separate
   `references/DISPOSITIONS.md` change — that file is the issue-tracker disposition vocabulary, not the
   finding-disposition gate.)
+- `plugins/aar-engineering/.claude-plugin/plugin.json`: the plugin **version bump** required by
+  `.aar-ci/checks.sh` whenever a non-manifest plugin file changes (SKILL.md / wf.sh are in this plugin).
 - No product-research-skill, instance, or GitHub-protection change. No change to the stateless path.
   Existing disposition smoke tests stay green; new behavior gets a focused smoke case.
 

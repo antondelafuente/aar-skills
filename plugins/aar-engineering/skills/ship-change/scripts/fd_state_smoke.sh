@@ -66,5 +66,28 @@ rl=$(fd_review_high_list "$TMP/rev.md")
 exp_id=$(fd_fid "empty input crashes merge_records")
 printf '%s\n' "$rl" | grep -qx "$exp_id HIGH" && ok review-high-matches-seed-id || no "review-high-matches-seed-id (want $exp_id)"
 
+# fd_bump_round / fd_round: non-convergence backstop counter (#137). Idempotent on identical <sha + HIGH set>;
+# increments on a new SHA OR a changed HIGH set; back-compat (absent round => 0).
+rc="$TMP/round.json"; : > "$rc"
+hi1="$TMP/hi1.txt"; printf 'aaaaaaaaaaaa\nbbbbbbbbbbbb\n' > "$hi1"
+[ "$(fd_round "$rc")" = 0 ] && ok round-absent-zero || no "round-absent-zero ($(fd_round "$rc"))"
+r=$(fd_bump_round "$rc" "sha1111" "$hi1"); [ "$r" = 1 ] && ok round-first-bump || no "round-first-bump ($r)"
+[ "$(fd_round "$rc")" = 1 ] && ok round-persisted || no "round-persisted ($(fd_round "$rc"))"
+r=$(fd_bump_round "$rc" "sha1111" "$hi1"); [ "$r" = 1 ] && ok round-idempotent-same-sha-same-high || no "round-idempotent ($r)"
+# same SHA, but HIGH set changed -> new fingerprint -> increment.
+hi2="$TMP/hi2.txt"; printf 'aaaaaaaaaaaa\ncccccccccccc\n' > "$hi2"
+r=$(fd_bump_round "$rc" "sha1111" "$hi2"); [ "$r" = 2 ] && ok round-bump-on-changed-high || no "round-changed-high ($r)"
+# NEW commit (new SHA), SAME surviving HIGH set -> still increments (the #192 under-scoped signature).
+r=$(fd_bump_round "$rc" "sha2222" "$hi2"); [ "$r" = 3 ] && ok round-bump-on-new-sha-same-high || no "round-new-sha ($r)"
+# HIGH-id ORDER must not matter (sorted in the fingerprint): reorder hi2 -> same fingerprint as last -> no bump.
+hi2r="$TMP/hi2r.txt"; printf 'cccccccccccc\naaaaaaaaaaaa\n' > "$hi2r"
+r=$(fd_bump_round "$rc" "sha2222" "$hi2r"); [ "$r" = 3 ] && ok round-order-insensitive || no "round-order ($r)"
+# empty HIGH file (convergence) on a fresh SHA still produces a distinct fingerprint -> bump.
+hie="$TMP/hie.txt"; : > "$hie"
+r=$(fd_bump_round "$rc" "sha3333" "$hie"); [ "$r" = 4 ] && ok round-bump-empty-high-new-sha || no "round-empty-high ($r)"
+# fd_round fails safe on a malformed round value.
+echo '{"round":"notanumber"}' > "$TMP/bad.json"
+[ "$(fd_round "$TMP/bad.json")" = 0 ] && ok round-malformed-zero || no "round-malformed-zero ($(fd_round "$TMP/bad.json"))"
+
 if [ "$fails" -eq 0 ]; then echo "fd_state_smoke: ALL PASS"; else echo "fd_state_smoke: FAILURES"; fi
 exit "$fails"
