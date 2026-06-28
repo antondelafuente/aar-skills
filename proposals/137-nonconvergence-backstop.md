@@ -99,7 +99,10 @@ The load-bearing decisions:
      the canonical `round` from the PR and carries forward `MAX(local, canonical)` with its matching
      fingerprint + `last_reviewed_sha`. An author save can therefore never *lower or delete* the counter and
      reset the backstop; `finish`'s own advancing save still wins (its cache already holds the higher,
-     just-incremented round).
+     just-incremented round). That canonical re-read is **required**, not best-effort: if it fails (GitHub
+     error) `fd_save` fails closed (no post) rather than risk overwriting a higher canonical counter with a
+     stale local cache. A `round` that is present but not a non-negative integer JSON *number* (a numeric
+     string, float, or negative — type-checked, not rendered-string-checked) is rejected as corruption.
 
    Idempotence holds across a failed save because the PR comment is the source of truth: a re-run reloads the
    last *persisted* state and re-increments from there.

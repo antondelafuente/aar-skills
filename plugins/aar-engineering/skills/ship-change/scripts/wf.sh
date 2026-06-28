@@ -551,11 +551,16 @@ fd_bump_round(){  # fd_bump_round <cache> <reviewed-sha> <high-ids-file> <had-hi
 fd_round(){ jq -r '(.round // 0)' "$1" 2>/dev/null | grep -E '^[0-9]+$' || echo 0; }   # current round; absent => 0
 fd_last_reviewed_sha(){ jq -r '(.last_reviewed_sha // "")' "$1" 2>/dev/null || echo ""; }  # SHA of the last counted round
 # Validate the `round` field BEFORE trusting it as the load-bearing backstop counter. Absent / null => fine
-# (back-compat 0). A PRESENT non-integer (a corrupt or hand-edited disposition save) is corruption: rc 2 so
-# finish fails closed instead of silently resetting the counter to 0 (which fd_round would otherwise do).
-fd_round_valid(){  # fd_round_valid <cache>  -> rc 0 ok (absent/null/integer), rc 2 present-but-non-integer
-  local v; v=$(jq -r 'if has("round") and .round != null then .round else "ABSENT" end' "$1" 2>/dev/null) || return 2
-  case "$v" in ABSENT) return 0 ;; *[!0-9]*|'') return 2 ;; *) return 0 ;; esac
+# (back-compat 0). A PRESENT value that is not a non-negative INTEGER JSON NUMBER (a corrupt or hand-edited
+# disposition save — including a numeric STRING like "3", a float, or a negative) is corruption: rc 2 so finish
+# fails closed instead of silently resetting the counter (which fd_round would otherwise do). Validates the JSON
+# TYPE in jq, not the rendered string, so `"3"` does not sneak through. rc 2 also on unreadable/invalid JSON.
+fd_round_valid(){  # fd_round_valid <cache>  -> rc 0 ok (absent/null/non-neg-integer), rc 2 otherwise
+  local v
+  v=$(jq -r 'if (has("round")|not) or .round==null then "OK"
+             elif (.round|type)=="number" and (.round|floor)==.round and .round>=0 then "OK"
+             else "BAD" end' "$1" 2>/dev/null) || return 2
+  [ "$v" = OK ] && return 0 || return 2
 }
 # Post the non-convergence backstop PR comment ONCE (#137): a hidden marker makes it idempotent across repeated
 # tripped `finish` runs — if a backstop comment already exists on the PR, skip re-posting. Best-effort (the
@@ -672,11 +677,16 @@ fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
   fi
 }
 # fd_save posts the local cache as the new canonical comment, after guarding the monotonic counter
-# (fd_merge_canonical_round). RETURNS the gh post rc.
+# (fd_merge_canonical_round). The canonical read is REQUIRED, not best-effort: if it FAILS (GitHub error) we
+# cannot know whether the post would regress `round`, so we fail closed (rc 3, no post) rather than risk
+# overwriting a higher canonical counter with a stale local cache. A clean read that finds NO canonical comment
+# yet (empty body) is a legitimate first save and proceeds. RETURNS: gh post rc on a real post; 3 if the
+# required canonical read failed.
 fd_save(){  # fd_save <wt> <repo> <pr> <tok>
-  local wt=$1 repo=$2 pr=$3 tok=$4 cache cbody; cache=$(fd_cache "$wt")
+  local wt=$1 repo=$2 pr=$3 tok=$4 cache cbody rrc=0; cache=$(fd_cache "$wt")
   cbody=$(gh_author "$tok" -R "$repo" pr view "$pr" --json comments \
-    --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null || true)
+    --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null) || rrc=$?
+  [ "$rrc" = 0 ] || return 3   # canonical read failed -> cannot guarantee monotonicity -> fail closed, do NOT post
   fd_merge_canonical_round "$cache" "$cbody"
   printf '%s\n\n## Finding dispositions — disposition-aware merge gate (canonical, latest)\n\n```json\n%s\n```\n' \
     "$FD_MARKER" "$(cat "$cache")" | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1

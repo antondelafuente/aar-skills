@@ -102,6 +102,15 @@ fd_round_valid "$TMP/v_int.json" && ok roundvalid-int-ok || no "roundvalid-int-o
 fd_round_valid "$TMP/bad.json"; [ "$?" = 2 ] && ok roundvalid-string-rc2 || no "roundvalid-string-rc2"
 echo '{"round":2.5}' > "$TMP/v_float.json"
 fd_round_valid "$TMP/v_float.json"; [ "$?" = 2 ] && ok roundvalid-float-rc2 || no "roundvalid-float-rc2"
+# A NUMERIC STRING must NOT sneak through (type-checked, not rendered-string-checked).
+echo '{"round":"3"}' > "$TMP/v_numstr.json"
+fd_round_valid "$TMP/v_numstr.json"; [ "$?" = 2 ] && ok roundvalid-numeric-string-rc2 || no "roundvalid-numeric-string-rc2"
+# A negative integer is not a valid round either.
+echo '{"round":-1}' > "$TMP/v_neg.json"
+fd_round_valid "$TMP/v_neg.json"; [ "$?" = 2 ] && ok roundvalid-negative-rc2 || no "roundvalid-negative-rc2"
+# Zero is a valid round.
+echo '{"round":0}' > "$TMP/v_zero.json"
+fd_round_valid "$TMP/v_zero.json" && ok roundvalid-zero-ok || no "roundvalid-zero-ok"
 
 # fd_bump_round returns rc 1 (no echo) when the cache write fails — caller fails closed, never trusts a
 # phantom increment. Simulate by making the cache dir unwritable so the jq+mv cannot land.
