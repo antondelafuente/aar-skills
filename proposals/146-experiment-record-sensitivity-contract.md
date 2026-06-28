@@ -212,13 +212,15 @@ payload from the artifact store. The comment must not echo that payload back ont
 - A review comment may quote **only T2-tier content** (AAR-authored design/result prose) and the **structured,
   non-payload fields** of T1 records (finding id/severity/summary, triage status). It may reference any
   payload only by **pointer** (`artifact_ref`), never by inline quote.
-- A bounded exception: the reviewer may inline up to **`max_quote_chars` (default 0)** characters of payload
-  *only if* the instance policy raises that ceiling above 0 (e.g. a private repo where short excerpts are
-  acceptable). Default-deny: at 0, no payload quote is ever emitted; the reviewer cites the pointer instead.
-  This keeps the public-repo default safe and lets a private instance opt into short excerpts deliberately.
+- **No inline-payload exception, on any repo (Finding-3).** Payload is *always* pointer-only — there is no
+  `max_quote_chars` ceiling and no private-repo inline-excerpt allowance. An earlier draft let a private repo
+  inline short excerpts; that made repo privacy load-bearing for payload confidentiality, so a later
+  private→public flip would world-expose every inlined excerpt. Dropping the exception keeps the invariant the
+  contract actually wants: **tier redaction holds regardless of repo visibility**, so a visibility flip never
+  retroactively exposes payload. The reviewer always cites the pointer.
 
-**Posted reviews are rendered from the structured sanitized audit record, not free-text-validated
-(Finding-3 fix).** Trying to *prove* a free-form review body is payload-free would reintroduce exactly the
+**Posted reviews are rendered from the structured sanitized audit record, not free-text-validated.**
+Trying to *prove* a free-form review body is payload-free would reintroduce exactly the
 heuristic redaction path this contract rejects. So the helper (#150) does not scan raw reviewer prose: a posted
 review is **rendered from the structured sanitized audit record** (the same structured-emit the audit producers
 gain) — safe fields inline, payload as `artifact_ref`. Raw free-form reviewer text is treated as a free-form T1
@@ -246,17 +248,19 @@ tier_overrides = { RESULTS_narrative = "T1" }   # values are tier names; may onl
 brief_safe_fields_remove = ["model_display_label"]  # instance may only REMOVE from the product allowlist (tighten)
 brief_safe_fields_enable = ["model_display_label"]  # extend ONLY via the product-owned schema enum (#155);
                                                     #   a RELEASED-public label only; raw/pre-release model_id is ALWAYS payload
-max_quote_chars = 0                              # PR-quote ceiling; default 0 (no payload quote); >0 requires [github].private=true
 redaction_marker = "[[redacted: %s]]"            # format; default as shown
+# NOTE: there is NO max_quote_chars / inline-payload ceiling — payload is ALWAYS pointer-only (Finding-3),
+#       so repo privacy is never load-bearing for payload confidentiality.
 
 # The mechanical-trigger inputs THIS contract owns (not #153's [github]/[recipes]): the lists the
 # `standard`-verification trigger and the artifact-index resolver check against.
 prerelease_model_ids   = ["..."]                 # model IDs whose presence forces effective sensitivity=sensitive
 private_dataset_handles = ["..."]                # dataset handle prefixes that force sensitive
-[record_visibility.artifact_index]               # the immutable handle→URI resolver (Finding-4); a typed pointer
-kind = "uri"                                     #   reuses #153's recipe-pointer shape (kind=repo|uri)
-uri  = "r2://.../artifact-index"                 #   private resolver: handle namespace, handle→URI map, private hashes
-sha256 = "<hex>"
+[record_visibility.artifact_index]               # the immutable handle→URI resolver (Finding-4)
+resolver_cmd_env = "AAR_ARTIFACT_INDEX_RESOLVER_CMD"  # SEAM NAME (env var naming a credentialed resolve command),
+                                                 #   NEVER a raw URI — so the snapshot/trail carry the seam name, not r2://… (Finding-2)
+schema_version   = 1                             # the resolver-contract version (handle namespace, map, private hashes, tombstone/rotation)
+config_sha256    = "<hex>"                        # content hash of the resolver config the run resolved against (drift/audit; not a payload hash)
 ```
 
 **Per-experiment visibility, merged with the instance floor (most-restrictive wins).** Sensitivity is *not*
@@ -325,10 +329,10 @@ ceiling is per-experiment, and the validator enforces the stricter of the two at
 non-sensitive work, and #153 already makes the repo instance config with a **required `[github].private` bool
 the instance asserts**. This gate is the enforcer #153 named: it compares the asserted `[github].private`
 against the **live repo's actual visibility** and **fails closed on a public repo asserted private** (the exact
-enforcement #153 delegated to #146). A per-experiment `require_private_repo: true` in the sidecar, or
-`max_quote_chars > 0`, additionally requires the live repo be private (you cannot opt into inline payload
-excerpts on a public trail). A fresh instance gets `[github].private` per its own #153 profile and
-`max_quote_chars = 0` — public-safe regardless, because the tier defaults keep all payload off the trail.
+enforcement #153 delegated to #146). A per-experiment `require_private_repo: true` in the sidecar additionally
+requires the live repo be private. A fresh instance gets `[github].private` per its own #153 profile and is
+public-safe regardless, because the tier defaults keep all payload off the trail and there is no inline-payload
+allowance to opt into (Finding-3).
 **The private-repo requirement is therefore a defense-in-depth check on the instance's own assertion, not the
 primary control; the primary control is the tier classification + redaction, which holds even on a public
 repo.** (The genuine product choice — private-by-default at the floor vs. tier-classification-with-public-allowed
@@ -353,19 +357,23 @@ authoritative verdict; missing/garbled → BLOCK):
    trigger fired (pre-release model ID / private-dataset handle / sensitive-marked artifact) → effective
    sensitivity forced to `sensitive`; an unparseable model/data reference → treat as `sensitive`. A tier override that *loosens* (instance or per-experiment) → BLOCK (config error). A
    `brief_safe_fields_enable` key not in the product-owned schema enum → BLOCK.
-2. **Post-time (a PR review comment / PR body).** The helper (#150) runs the validator over the review/PR-body
-   text before calling GitHub. Payload quote over `max_quote_chars` → BLOCK. `max_quote_chars > 0` on a
-   non-private repo → BLOCK. **Also at PR-open:** a `sensitivity: sensitive` experiment whose effective
+2. **Post-time (a PR review comment / PR body).** The helper (#150) runs the validator over the
+   rendered-from-structured review/PR-body before calling GitHub. Any inline payload quote → BLOCK (payload is
+   always pointer-only; there is no ceiling). **Also at PR-open:** a `sensitivity: sensitive` experiment whose effective
    (instance-floor ⊓ per-experiment) policy would post to a non-private repo, or inline any payload → BLOCK
    before the PR is created.
 3. **Push-time (the publish boundary — the primary remote gate, Finding-1).** The long-lived draft PR branch
    is *itself* a published surface (#130: "that long-lived draft PR is the in-flight visibility surface"), so
-   the real publish boundary is **`git push` / PR-update**, not merge. The validator runs over the **exact tree/
-   commit range being pushed** before every push that updates the remote branch or PR — a hand-edited or
-   bypassed-produce-time commit is caught *here*, before it reaches the remote history, not only at merge. On a
-   public repo this is enforced as a **pre-push hook + the helper's (#150) push path** so an ad-hoc `git push`
-   is also gated. The exact tree is validated (not just the diff) so a payload reintroduced in a later commit
-   and reverted still cannot transit the remote.
+   the real publish boundary is **`git push` / PR-update**, not merge. The validator runs over the **exact tree
+   being pushed** before it reaches the remote — a hand-edited or bypassed-produce-time commit is caught *here*,
+   not only at merge. **This is made server-authoritative, not trusted to a client hook (Finding-1):** a local
+   pre-push hook is only a convenience pre-check (an unhooked or raw `git push` would bypass it, and the
+   scaffold ships no pre-push hook today). Authority comes from **restricting `run/*` branch updates on the
+   research repo to the validated helper (#150) identity** via branch protection — a push from any other
+   identity is rejected by the server, and the helper validates the tree before it pushes. So the gate does not
+   depend on the pusher running a hook; raw pushes by a non-helper identity simply cannot update `run/*`. (This
+   reuses the same identity-restricted-push posture #153/`wf.sh` already use for engineer identities; the
+   `[github.protection]` block #153 defines declares the expectation, and the close-gate pre-checks it.)
 4. **Merge-time (the close gate, re-check — defense-in-depth).** The merge gate re-runs the validator over the
    **full tree being merged** so a bypassed push gate still cannot land a T0 body, a free-form T1 body, or
    un-redacted T1 payload on `main`. This mirrors ship-change's "re-review the final diff" property — but it is
@@ -384,10 +392,16 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
   run-experiment artifact-store seam (reached via #153's typed `[recipes.artifact_store]` pointer). It **does**
   define the **immutable artifact-index/resolver** the trail's opaque handles require (Finding-4: a handle
   namespace, an immutable handle→URI mapping, private hash storage, resolver discovery, tombstone/rotation) —
-  owned here because it is part of the trail contract, and **declared via the `[record_visibility.artifact_index]`
-  typed pointer** in the profile (reusing #153's recipe-pointer shape). The contract fixes the **pointer shape**
-  (opaque `handle` on the trail; integrity hash resolved privately) and the index that resolves it; the store
-  behind the index is the existing seam. The contract only fixes the **pointer shape** the trail
+  owned here because it is part of the trail contract, and **declared via a credentialed seam, not a raw URI
+  (Finding-2):** `[record_visibility.artifact_index]` carries a `resolver_cmd_env` (an env-var *name* holding a
+  command that resolves a handle privately, exactly #153's identity-by-reference pattern) plus a
+  `schema_version` + `config_sha256` — all snapshot-safe. The raw resolver URI / credentials are **never
+  snapshotted and never on the trail** (that would be the very leak F4 fixes for pointers, and #153 snapshots
+  every non-secret field — so a raw URI here would hit the trail). The executor resolves a handle live via the
+  snapshotted seam name (the one narrow live step #153 already permits for credentials), never by re-reading the
+  live profile. The contract fixes the **pointer shape** (opaque `handle` on the trail; integrity hash resolved
+  privately) and the resolver *seam*; the store behind it is the existing artifact-store seam. The contract only
+  fixes the **pointer shape** the trail
   uses.
 - It does not implement the validator or wire it into the skills — the validator *library* is the `ready`
   child; the wiring is the `blocked-by` child (see Rollout).
@@ -471,7 +485,7 @@ narrow piece that does not, and files the rest blocked):
 
 - **`ready` — the record-visibility validator *library*.** A pure function `validate(record_type, body,
   policy) → safe_render | BLOCK` plus the public-safe default policy and its own unit smoke (a T0 body inline,
-  a free-form T1 body inline, a loosening tier override, a payload quote over `max_quote_chars`, an unknown
+  a free-form T1 body inline, a loosening tier override, any inline payload quote, an unknown
   record type, a missing trigger inventory on a public-trail `standard`, a raw-path `handle`, an inline `sha256`
   on a sensitive pointer, a missing `visibility.toml` — each must BLOCK). This is `ready` because it has **no** GitHub / helper / profile / skill
   dependency — it is a self-contained classifier+redactor tested against fixture record bodies. The tiers, the
