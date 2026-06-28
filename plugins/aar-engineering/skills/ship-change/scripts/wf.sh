@@ -1190,7 +1190,7 @@ readonly_probe_source(){
 # (read-only), 3 inconclusive (non-auth error). Sets RO_PUSH_OUT to the captured output.
 RO_PUSH_RC=3; RO_PUSH_OUT=""
 readonly_probe_one_push_url(){
-  local url=$1 tmp rc to=${WF_GIT_PROBE_TIMEOUT:-20}
+  local url=$1 tmp rc to=${WF_GIT_PROBE_TIMEOUT:-20} shim helpers h
   RO_PUSH_RC=3; RO_PUSH_OUT=""
   tmp=$(mktemp -d) || { RO_PUSH_OUT="mktemp failed"; RO_PUSH_RC=3; return; }
   (
@@ -1202,13 +1202,41 @@ readonly_probe_one_push_url(){
         -c user.name="wf-doctor" -c user.email="wf-doctor@local" \
         commit -q --no-verify --allow-empty -m probe 2>/dev/null
   ) || { rm -rf "$tmp"; RO_PUSH_OUT="could not stage a probe commit"; RO_PUSH_RC=3; return; }
-  # Disable every interactive/ambient-helper PROMPT but keep the AMBIENT credential surface (stored helper /
-  # SSH key) live — that is exactly what we must catch. Bound the probe with `timeout` so a DNS/network/helper
-  # stall can never hang doctor (#166 code-review F2 / AGENTS.md bounded background waits); a timeout reads as
-  # inconclusive (strict-fail at the section level), never an indefinite park.
-  # --no-verify + core.hooksPath=/dev/null so a pre-push hook can never run during the probe (#166 F1 r7).
+  # MUTATION-SAFE credential layer (#166 code-review F1 r8): a successful auth on a `--dry-run` push makes git
+  # call the credential helper's `store` (verified empirically), which MUTATES the user's credential store. So
+  # we install a read-only SHIM as the SOLE helper: it forwards ONLY `get` to the inherited helper chain (so we
+  # still detect an ambient credential) and NO-OPS `store`/`erase` (so the probe can never write the store).
+  shim="$tmp/cred-ro-shim.sh"
+  # snapshot the inherited helper chain (system+global+any env-config), so the shim can forward `get` to them.
+  helpers=$(git config --get-all credential.helper 2>/dev/null || true)
+  {
+    printf '#!/bin/bash\n'
+    printf 'op=$1\n'
+    printf 'if [ "$op" != get ]; then cat >/dev/null 2>&1 || true; exit 0; fi  # no-op store/erase (never mutate)\n'
+    printf 'in=$(cat)\n'
+    # forward `get` to each inherited helper until one returns a password; emit the first hit.
+    while IFS= read -r h; do
+      [ -n "$h" ] || continue
+      # resolve the helper command form git uses: a leading "!" is a shell command; "name" -> git-credential-name;
+      # an absolute/relative path is run directly. Reuse git's own resolution by invoking `git credential-<...>`
+      # is non-trivial here, so we handle the common forms.
+      case "$h" in
+        '!'*) printf 'out=$(printf "%%s\\n" "$in" | %s get 2>/dev/null); if printf "%%s" "$out" | grep -q "^password="; then printf "%%s\\n" "$out"; exit 0; fi\n' "${h#!}" ;;
+        /*|./*) printf 'out=$(printf "%%s\\n" "$in" | %q get 2>/dev/null); if printf "%%s" "$out" | grep -q "^password="; then printf "%%s\\n" "$out"; exit 0; fi\n' "$h" ;;
+        *) printf 'out=$(printf "%%s\\n" "$in" | git credential-%q get 2>/dev/null); if printf "%%s" "$out" | grep -q "^password="; then printf "%%s\\n" "$out"; exit 0; fi\n' "$h" ;;
+      esac
+    done <<<"$helpers"
+    printf 'exit 0\n'
+  } > "$shim"
+  chmod +x "$shim"
+  # Disable every interactive/ambient-helper PROMPT but keep the AMBIENT credential surface reachable for `get`
+  # via the read-only shim — that is exactly what we must catch, WITHOUT the store/erase mutation. Bound with
+  # `timeout` so a DNS/network/helper stall can never hang doctor (#166 F2 / AGENTS.md bounded background waits).
+  # We RESET the helper chain (-c credential.helper=) then set ONLY the shim, so no inherited helper runs store.
   RO_PUSH_OUT=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
-        timeout "$to" git -C "$tmp" -c core.askPass= -c core.hooksPath=/dev/null -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
+        timeout "$to" git -C "$tmp" -c core.askPass= -c core.hooksPath=/dev/null \
+        -c credential.helper= -c "credential.helper=$shim" \
+        -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
         push --dry-run --no-verify "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" 2>&1) ; rc=$?
   rm -rf "$tmp"
   if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then RO_PUSH_OUT="timed out after ${to}s: $RO_PUSH_OUT"; RO_PUSH_RC=3; return; fi
@@ -1221,8 +1249,11 @@ readonly_probe_one_push_url(){
       RO_PUSH_RC=3; return ;;
   esac
   case "$RO_PUSH_OUT" in
-    # genuine AUTH rejections (the credential was tested and refused) -> read-only on this surface.
-    *[Aa]uthentication\ failed*|*[Pp]ermission\ denied*|*403*|*[Cc]ould\ not\ read\ Username*|*terminal\ prompts\ disabled*|*[Ff]atal:\ could\ not\ read\ Username*)
+    # genuine AUTH/AUTHZ rejections (the credential was tested and refused) -> read-only on this surface.
+    # GitHub SSH authz denials: `ERROR: Permission to owner/repo.git denied to user`, a read-only deploy key
+    # (`remote: ERROR: … deploy key … read-only`), and the write-access-denied phrasings (#166 code-review F3).
+    *[Aa]uthentication\ failed*|*[Pp]ermission\ denied*|*403*|*[Cc]ould\ not\ read\ Username*|*terminal\ prompts\ disabled*|*[Ff]atal:\ could\ not\ read\ Username*|\
+    *Permission\ to\ *\ denied\ to\ *|*Write\ access\ to\ repository\ not\ granted*|*read-only*|*does\ not\ have\ push\ permission*|*The\ requested\ URL\ returned\ error:\ 40[13]*)
       RO_PUSH_RC=2 ;;
     *) RO_PUSH_RC=3 ;;   # anything else -> inconclusive (strict-fail), never an unproven PASS
   esac

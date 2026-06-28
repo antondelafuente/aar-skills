@@ -309,6 +309,94 @@ if grep -q 'API_WRITE_ATTEMPT' "$MUTLOG"; then
   fi
 fi
 
+# --- F1 r8: the git probe installs a mutation-safe credential layer. Structural: the push resets the helper
+#     chain and uses ONLY the read-only shim, and the shim no-ops store/erase. Behavioral: a real-git push with
+#     a LOGGING credential helper inherited must NOT trigger the helper's `store`/`erase` (proven empirically to
+#     fire on a successful dry-run otherwise), while `get` is still forwarded.
+if grep -q 'credential.helper= -c "credential.helper=\$shim"' "$WF" && grep -q 'no-op store/erase (never mutate)' "$WF"; then
+  pass "F1 r8: probe resets the helper chain + installs a read-only shim (structural)"
+else
+  fail "F1 r8: probe does not reset+shim the credential helper"
+fi
+# behavioral shim unit: build a shim like the function does (forward get to a logging helper, no-op store/erase)
+CREDLOG="$TMP/cred-ops.log"; : > "$CREDLOG"
+LOGHELPER="$TMP/loghelper.sh"
+cat > "$LOGHELPER" <<EOF
+#!/bin/bash
+echo "REAL_HELPER_OP: \$1" >> "$CREDLOG"
+[ "\$1" = get ] && printf 'username=x\npassword=SECRET\n'
+exit 0
+EOF
+chmod +x "$LOGHELPER"
+SHIM="$TMP/shim.sh"
+cat > "$SHIM" <<EOF
+#!/bin/bash
+op=\$1
+if [ "\$op" != get ]; then cat >/dev/null 2>&1 || true; exit 0; fi
+in=\$(cat)
+out=\$(printf "%s\n" "\$in" | "$LOGHELPER" get 2>/dev/null); if printf "%s" "\$out" | grep -q "^password="; then printf "%s\n" "\$out"; exit 0; fi
+exit 0
+EOF
+chmod +x "$SHIM"
+# get -> forwarded (helper logs a get, password returned); store/erase -> no-op (helper NOT invoked)
+printf 'protocol=https\nhost=github.com\n\n' | "$SHIM" get >/dev/null 2>&1
+printf 'protocol=https\nhost=github.com\nusername=x\npassword=SECRET\n\n' | "$SHIM" store >/dev/null 2>&1
+printf 'protocol=https\nhost=github.com\n\n' | "$SHIM" erase >/dev/null 2>&1
+if grep -q 'REAL_HELPER_OP: get' "$CREDLOG" && ! grep -qE 'REAL_HELPER_OP: (store|erase)' "$CREDLOG"; then
+  pass "F1 r8: shim forwards get but no-ops store/erase (no credential-store mutation)"
+else
+  fail "F1 r8: shim did not isolate get from store/erase (ops: $(tr '\n' ' ' < "$CREDLOG"))"
+fi
+
+# --- F3: GitHub SSH authz-denial messages classify as read-only (auth-rejected), not inconclusive.
+WT3="$TMP/wt-authz"; mkdir -p "$WT3"
+"$REAL_GIT" -C "$WT3" init -q
+"$REAL_GIT" -C "$WT3" remote add origin "git@github.com:o/r.git"
+# fake git emits the GitHub authz-denial phrasing for the SSH push; detector must read read-only (not inconclusive)
+cat > "$BIN/git" <<EOF
+#!/bin/bash
+is_push=0; purl=""
+for a in "\$@"; do
+  if [ "\$is_push" = 1 ] && [ "\${a#-}" = "\$a" ] && [ -z "\$purl" ]; then purl="\$a"; fi
+  [ "\$a" = push ] && is_push=1
+done
+if [ "\$is_push" = 1 ]; then
+  echo "GIT_PUSH_ATTEMPT: \$*" >> "$MUTLOG"
+  case "\$purl" in
+    git@*|ssh://*) echo "ERROR: Permission to o/r.git denied to some-user." >&2; echo "fatal: Could not read from remote repository." >&2; exit 128 ;;
+    *) echo "fatal: Authentication failed for '\$purl'" >&2; exit 128 ;;
+  esac
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$BIN/git"
+: > "$MUTLOG"
+RO_TARGET="$WT3" run_strict "RO_aaa" "" "" denied rejected || true
+echo "$RO_OUT" | grep -q 'ambient git push: read-only' && pass "F3: GitHub SSH 'Permission to X denied to Y' -> read-only (auth-rejected)" || fail "F3: SSH authz-denial not classified read-only"
+# restore the standard fake git for any later assertions
+cat > "$BIN/git" <<EOF
+#!/bin/bash
+is_push=0; purl=""
+for a in "\$@"; do
+  if [ "\$is_push" = 1 ] && [ "\${a#-}" = "\$a" ] && [ -z "\$purl" ]; then purl="\$a"; fi
+  [ "\$a" = push ] && is_push=1
+done
+if [ "\$is_push" = 1 ]; then
+  echo "GIT_PUSH_ATTEMPT: \$*" >> "$MUTLOG"
+  case "\$purl" in
+    git@*|ssh://*) outcome=\${READONLY_SMOKE_GIT_SSH:-rejected} ;;
+    *)             outcome=\${READONLY_SMOKE_GIT_HTTPS:-rejected} ;;
+  esac
+  case "\$outcome" in
+    accepted) echo "To \$purl (dry run)"; exit 0 ;;
+    hostkey)  echo "Host key verification failed." >&2; exit 128 ;;
+    *) echo "fatal: Authentication failed for '\$purl'" >&2; exit 128 ;;
+  esac
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$BIN/git"
+
 # --- plain doctor prints the read-only section as a labeled reporter (does not require engineer identity to PASS
 #     for the read-only verdict to print). We only assert the section + verdict line appear.
 PLAIN_OUT=$(PATH="$BIN:$PATH" GH_TOKEN="RO_aaa" READONLY_SMOKE_API=denied READONLY_SMOKE_GIT=rejected \
