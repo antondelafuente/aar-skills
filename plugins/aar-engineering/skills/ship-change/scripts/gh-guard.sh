@@ -111,7 +111,7 @@ if [ "$sub_idx" -ge 0 ]; then next_word $((sub_idx+1)); verb=$NEXT_WORD; fi
 case "$verb" in
   create|comment|edit|close|reopen|delete|merge|review|ready|lock|unlock|pin|unpin|transfer|develop|\
   login|refresh|setup-git|logout|set|remove|rm|rename|archive|unarchive|fork|sync|upload|enable|disable|\
-  add|clear|import|restore|deploy|cancel|rerun|view|list|status|diff|checks|checkout|co)
+  add|clear|import|restore|deploy|cancel|rerun|run|view|list|status|diff|checks|checkout|co)
     safe_verb=$verb ;;
   *) safe_verb=write ;;
 esac
@@ -121,7 +121,7 @@ esac
 is_mutating_verb(){
   case "$1" in
     create|delete|remove|rm|edit|set|rename|archive|unarchive|fork|sync|transfer|\
-    upload|enable|disable|add|clear|import|restore|deploy|cancel|rerun|lock|unlock|pin|unpin) return 0 ;;
+    upload|enable|disable|add|clear|import|restore|deploy|cancel|rerun|run|lock|unlock|pin|unpin) return 0 ;;
     *) return 1 ;;
   esac
 }
