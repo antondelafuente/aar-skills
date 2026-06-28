@@ -1108,6 +1108,18 @@ is_github_remote_url(){
   [ "$h" = github.com ] || [ "$h" = ssh.github.com ]
 }
 
+# is_clean_repo_slug <s> — true ONLY for a bare `owner/repo` (exactly one slash; no scheme/userinfo/host/port/
+# whitespace), so a URL-shaped target (which can carry a userinfo token) is NEVER embedded into a
+# `gh api repos/<slug>` path (#166 F1 r17b). Allows the GitHub-name charset plus '.'/'-'/'_'.
+is_clean_repo_slug(){
+  case "$1" in
+    ""|*[!A-Za-z0-9._/-]*) return 1 ;;   # empty or any disallowed char (covers @ : / / space, etc.)
+    */*/*) return 1 ;;                    # more than one slash
+    */*) return 0 ;;                      # exactly one slash -> owner/repo
+    *) return 1 ;;
+  esac
+}
+
 readonly_token_cmd(){ echo "${WF_READONLY_TOKEN_CMD:-}"; }            # the instance read-only minter seam
 readonly_token_info_cmd(){ echo "${WF_READONLY_TOKEN_INFO_CMD:-}"; }  # its paired machine-verifiable perms
 
@@ -1156,8 +1168,10 @@ readonly_provenance_verdict(){
   info_cmd=$(readonly_token_info_cmd)
   if [ -n "$info_cmd" ]; then
     # the info command emits canonical permissions JSON for the token on its stdin (so it can verify the perms
-    # are tied to THIS token, not a generic claim). Fail closed if it errors or emits nothing.
-    if perms_json=$(printf '%s' "$tok" | eval "$info_cmd" 2>/dev/null) && [ -n "$perms_json" ]; then
+    # are tied to THIS token, not a generic claim). BOUND it with `timeout` so a hanging instance seam can't
+    # hang doctor (#166 code-review F2 r17b); fail closed (unprovable) if it errors, times out, or emits nothing.
+    local to=${WF_GIT_PROBE_TIMEOUT:-20}
+    if perms_json=$(printf '%s' "$tok" | timeout "$to" bash -c "$info_cmd" 2>/dev/null) && [ -n "$perms_json" ]; then
       if perms_has_write "$perms_json"; then echo write; else echo readonly; fi
       return 0
     fi
@@ -1204,8 +1218,10 @@ readonly_probe_source(){
   verdict=$(readonly_provenance_verdict "$tok")
   advisory=""
   # The advisory probe is a LIVE network call; skip it under the no-network mode (WF_DOCTOR_SKIP_LIVE_PROBES=1)
-  # so plain `doctor` stays hermetic in smokes. Provenance (the gate) still runs.
-  if [ "${WF_DOCTOR_SKIP_LIVE_PROBES:-0}" != 1 ] && [ -n "$repo" ]; then
+  # so plain `doctor` stays hermetic in smokes. Provenance (the gate) still runs. ALSO require `$repo` to be a
+  # CLEAN owner/repo slug — never embed a URL-shaped target (which can carry a userinfo token) into the
+  # `gh api repos/<repo>` path, or the token would leak into the API request/logs (#166 code-review F1 r17b).
+  if [ "${WF_DOCTOR_SKIP_LIVE_PROBES:-0}" != 1 ] && is_clean_repo_slug "$repo"; then
     advisory=$(readonly_advisory_probe "$tok" "$repo" 2>/dev/null) || advisory=inconclusive
   fi
   case "$verdict" in
@@ -1418,7 +1434,8 @@ doctor_readonly_section(){
   fi
   # --- the read-only minter seam itself (if wired): confirm it yields an authoritative read-only token -----
   if [ -n "$(readonly_token_cmd)" ]; then
-    if minted=$(eval "$(readonly_token_cmd)" 2>/dev/null) && [ -n "$minted" ]; then
+    # BOUND the minter with `timeout` so a hanging instance seam can't hang doctor (#166 F2 r17b).
+    if minted=$(timeout "${WF_GIT_PROBE_TIMEOUT:-20}" bash -c "$(readonly_token_cmd)" 2>/dev/null) && [ -n "$minted" ]; then
       minted_verdict=$(readonly_provenance_verdict "$minted")
       case "$minted_verdict" in
         readonly) echo "    WF_READONLY_TOKEN_CMD: ok (mints an authoritatively read-only token)" ;;

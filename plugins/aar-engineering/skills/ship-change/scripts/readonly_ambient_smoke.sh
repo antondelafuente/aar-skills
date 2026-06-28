@@ -428,6 +428,65 @@ if grep 'GIT_PUSH_ATTEMPT' "$MUTLOG" | grep -q 'evil.example'; then
 else
   pass "F1 r16b: authority-spoof origin skipped (not probed against the attacker host)"
 fi
+
+# F1 r17b: a URL-shaped / credential-bearing TARGET must NEVER be embedded into the advisory `gh api
+# repos/<slug>` path (token leak). The fake gh records every api call; assert none carries a URL-shaped repo.
+# DREPO for a worktree with a credential-bearing origin would be the full URL — is_clean_repo_slug must reject
+# it so the advisory probe is skipped.
+APILOG="$TMP/api-calls.log"; : > "$APILOG"
+cat > "$BIN/gh" <<EOF
+#!/bin/bash
+for a in "\$@"; do [ "\$a" = credential ] && { cat>/dev/null 2>&1||true; exit 0; }; done
+sub=""; for a in "\$@"; do case "\$a" in -*) ;; *) sub=\$a; break;; esac; done
+if [ "\$sub" = api ]; then echo "API_CALL: \$*" >> "$APILOG"; fi
+case "\$sub" in
+  auth) [ "\$2" = token ] && { printf '%s\n' "\${READONLY_SMOKE_STORED_TOKEN:-}"; exit 0; }; exit 1 ;;
+  api) printf 'HTTP/2.0 403 Forbidden\n'; exit 1 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$BIN/gh"
+WT17="$TMP/wt-credurl"; mkdir -p "$WT17"
+"$REAL_GIT" -C "$WT17" init -q
+"$REAL_GIT" -C "$WT17" remote add origin "https://user:SUPERSECRETTOKEN@gitlab.example.com/o/r.git"
+: > "$MUTLOG"
+RO_TARGET="$WT17" run_strict "RO_aaa" "" "" denied rejected || true
+if grep 'API_CALL' "$APILOG" | grep -Eq 'repos/(https|.*@|.*//)' ; then
+  fail "F1 r17b: a URL-shaped repo target was embedded into a gh api path (token leak)"
+else
+  pass "F1 r17b: advisory gh api never embeds a URL-shaped target (only clean owner/repo slugs)"
+fi
+echo "$RO_OUT" | grep -q 'SUPERSECRETTOKEN' && fail "F1 r17b: credential-bearing target leaked into output" || pass "F1 r17b: credential-bearing target not leaked anywhere"
+write_fake_git "$BIN/git"   # restore the standard fake git
+# restore the standard fake gh (the smoke's main one)
+cat > "$BIN/gh" <<EOF
+#!/bin/bash
+sub=""; verb=""; args=("\$@"); i=0; n=\${#args[@]}
+while [ "\$i" -lt "\$n" ]; do a=\${args[\$i]}; case "\$a" in -R|--repo|-H|--hostname) i=\$((i+2));; -*) i=\$((i+1));; *) sub=\$a; verb=\${args[\$((i+1))]:-}; break;; esac; done
+case "\$sub" in
+  auth) case "\$verb" in token) printf '%s\n' "\${READONLY_SMOKE_STORED_TOKEN:-}"; exit 0;; status) [ -n "\${READONLY_SMOKE_STORED_TOKEN:-}" ] && exit 0 || exit 1;; *) exit 0;; esac;;
+  api)
+    method="GET"; j=0; m=\${#args[@]}
+    while [ "\$j" -lt "\$m" ]; do case "\${args[\$j]}" in -X|--method) method=\${args[\$((j+1))]:-GET};; -X*) method=\${args[\$j]#-X};; --method=*) method=\${args[\$j]#--method=};; esac; j=\$((j+1)); done
+    mu=\$(printf '%s' "\$method" | tr '[:lower:]' '[:upper:]')
+    if [ "\$mu" != GET ] && [ "\$mu" != HEAD ]; then
+      body=""; for f in "\${args[@]}"; do [ "\$f" = "--input" ] && body=\$(cat); done
+      echo "API_WRITE_ATTEMPT: args=[\$*] body=[\$body]" >> "\$READONLY_SMOKE_MUTLOG"
+      case "\${GH_TOKEN:-}" in RW_*) printf 'HTTP/2.0 200 OK\n'; exit 0;; RWX_*) printf 'HTTP/2.0 422 Unprocessable Entity\n'; exit 1;; *) printf 'HTTP/2.0 403 Forbidden\n'; exit 1;; esac
+    fi
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$BIN/gh"
+
+# F2 r17b (structural): the provenance seam commands (info + minter) are run under `timeout` and fail closed.
+if grep -q 'timeout "$to" bash -c "$info_cmd"' "$WF" \
+   && grep -q 'timeout "${WF_GIT_PROBE_TIMEOUT:-20}" bash -c "$(readonly_token_cmd)"' "$WF"; then
+  pass "F2 r17b: provenance info + minter seams run under timeout (no unbounded hang)"
+else
+  fail "F2 r17b: provenance seam commands are not timeout-bounded"
+fi
 if echo "$RO_OUT" | grep -q 'not a GitHub remote'; then
   # assert NO push targeted the non-GitHub origin URL (the push-target is the arg right after `push` + flags);
   # a push whose remote URL is a `https://gitlab…`/non-github scheme would mean the non-GitHub origin was probed
