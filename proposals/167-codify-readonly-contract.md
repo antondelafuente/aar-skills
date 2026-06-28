@@ -42,12 +42,17 @@ There is exactly one live contract; the point-of-use surfaces point at it.
    go through the engineer-token path. This is a behavior-description fix, so it bumps the plugin version
    per the constitution.
 
-3. **Point the point-of-use prose at the canonical statement.** `SKILL.md` and `RUNBOOK.md` already
-   carry the read-only rule (pulled forward with the #166 detector). Add a "(canonical: `AGENTS.md`)"
-   pointer at those two restatements so it's unambiguous which one is the source of truth and the others
-   are point-of-need reminders — the same editorial pattern `AGENTS.md` already uses for the
-   bounded-background-waits rule ("Each waiting surface restates the minimal rule at point of need; this
-   is the editorial home"). No prose is duplicated anew.
+3. **Point the point-of-use prose at the canonical statement, and fix the residual stale framing in it.**
+   `SKILL.md` and `RUNBOOK.md` already carry the read-only rule (pulled forward with the #166 detector).
+   Add a "(canonical: `AGENTS.md`)" pointer at those restatements so it's unambiguous which one is the
+   source of truth and the others are point-of-need reminders — the same editorial pattern `AGENTS.md`
+   already uses for the bounded-background-waits rule ("Each waiting surface restates the minimal rule at
+   point of need; this is the editorial home"). Two restatements still describe ambient `gh` as usable
+   for "owner/admin maintenance" (`SKILL.md` "Engineer identities are strict…" bullet; `RUNBOOK.md`
+   "Ambient gh vs workflow identity" section), which contradicts the #149 contract — owner writes are NOT
+   ambient; they require the explicit two-step elevated-owner-token + `WF_GH_ALLOW_OWNER_WRITE=1` path.
+   Revise those two so ambient is described as read-only inspection only and owner/admin writes are named
+   as the elevated path. No new prose is duplicated.
 
 This is the #149 design's child #3, doc-only by construction: the seams and detector already exist in
 code, so codifying the contract is pure documentation + one metadata-string fix.
