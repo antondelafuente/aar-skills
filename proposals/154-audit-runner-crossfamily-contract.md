@@ -32,8 +32,9 @@ do: the family that ran the work must be **stated explicitly** (no silent defaul
 guard to the `audit_experiment` close/`--design`/`--data` modes (today only `--scaffold`/`--code` have it),
 and we give `verify_claim` — which has no family logic at all today — the same explicit-family-in,
 fail-closed-on-same-family contract, including the family inference from its verifier command. The result
-is one uniform rule across all six rungs: **no family stated → BLOCK; verifier family == runner family →
-BLOCK.** This is the contract the rest of the #130 cluster consumes; it owns family enforcement for the
+is one uniform rule across all six rungs: **no subject family stated → BLOCK; verifier family == the rung's
+subject family → BLOCK** (where the "subject" is rung-specific — design author, data producer, executor, or
+change author; see the contract below). This is the contract the rest of the #130 cluster consumes; it owns family enforcement for the
 read-only rungs so the GitHub helper (#150) never has to.
 
 The contract is enforced **where these audits actually run** — in the `verify-claims` plugin
@@ -48,9 +49,20 @@ audit runner do the blocking, not by carrying its own copy of the rule.
 
 Two inputs per rung, with identical semantics across both scripts:
 
-- **`AAR_SUBSTRATE`** — the family that RAN the work being audited (`claude` | `codex`, exact match). Read
-  by `audit_experiment.sh` on **all** modes (today: only `--scaffold`/`--code`). For `verify_claim.sh` the
-  same variable names the family whose experiment produced the claims.
+- **`AAR_SUBSTRATE`** — the family that produced **the artifact this rung audits** (`claude` | `codex`,
+  exact match). This is **not** uniformly "the runner" — in the #130 design→execute seam the design author
+  and the executor can be *different agents/families*, so each rung names a **rung-specific subject**:
+  - `verify_claim` → the family that authored the **claims / the design's facts** (the design author);
+  - `audit_experiment --design` → the **design author**;
+  - `audit_experiment --data` → the family that **produced the data** (the executor running generation);
+  - `audit_experiment` close → the **executor** (who ran the experiment and wrote the records);
+  - `--scaffold` / `--code` → the **change author** (unchanged from today).
+  The mechanical check is the same everywhere — *the auditor's family must differ from this subject's* — but
+  the **caller is responsible for setting `AAR_SUBSTRATE` to the correct rung-specific subject**, not a
+  blanket "runner." The #130 cluster (#156 `design-experiment`, #157 `run-experiment`) owns wiring the right
+  subject per rung; this contract defines *what subject each rung means* and fails closed if it is unstated.
+  Read by `audit_experiment.sh` on **all** modes (today: only `--scaffold`/`--code`); `verify_claim.sh`
+  reads the same variable.
 - **The verifier command** names the *auditor's* family. `audit_experiment.sh` already infers it from
   `AUDIT_VERIFIER_CMD` (`*claude*` → claude, `*codex*` → codex, else `custom`). `verify_claim.sh` uses a
   *different* variable today (`VERIFIER_CMD`); this doc makes it apply the **same inference** to whatever
@@ -70,8 +82,8 @@ The two rules, applied uniformly to every model-judged rung:
    wrong-defaulted auditor and pass.
 
 A consumer (the helper, `design-experiment`, `run-experiment`, or a human running the audit directly)
-satisfies the contract by exporting `AAR_SUBSTRATE=<runner family>` and pointing the verifier command at the
-opposite family. If it does neither, the rung fails closed.
+satisfies the contract by exporting `AAR_SUBSTRATE=<this rung's subject family>` (per the rung table above)
+and pointing the verifier command at a different family. If it does neither, the rung fails closed.
 
 ### The load-bearing decisions
 
@@ -148,10 +160,25 @@ declared*.** Add an optional `AUDIT_VERIFIER_FAMILY` env var (the auditor's fami
 self-identifying). The resolution is: if the command matches `*claude*`/`*codex*`, use that; else if
 `AUDIT_VERIFIER_FAMILY` is set to an exact `claude|codex|<named-third-family>`, use it; else BLOCK with "the
 verifier command does not identify its family — set `AUDIT_VERIFIER_FAMILY`." Then the same-family check
-runs on the resolved family as before: a declared `claude`/`codex` that equals the runner BLOCKs; a declared
-distinct third family passes. This preserves genuine third-family / wrapper support **without** letting an
-opaque command silently claim cross-family status. The runner family (`AAR_SUBSTRATE`) must still be exactly
-`claude|codex` — the same-family comparison is only meaningful against a known runner.
+runs on the resolved family as before: a declared family that equals the subject BLOCKs; a declared distinct
+family passes. This preserves genuine third-family / wrapper support **without** letting an opaque command
+silently claim cross-family status. The subject family (`AAR_SUBSTRATE`) must still be exactly
+`claude|codex` — the same-family comparison is only meaningful against a known subject.
+
+`AUDIT_VERIFIER_FAMILY` is **allowlisted, not free-form** (FINDING 4): accepted values are exactly
+`claude|codex` for now, so a typo (`claud`) BLOCKs rather than becoming a passing "distinct family." A real
+third-family registry/config is a deliberate future extension, out of scope here — until it exists, a
+declared family that is neither `claude` nor `codex` BLOCKs.
+
+**Scope: the `AUDIT_VERIFIER_FAMILY` declaration applies to the rungs whose family `verify-claims`
+resolves** — the four read-only/close rungs plus the `--scaffold`/`--code` resolution *inside*
+`audit_experiment.sh`. It does **not** loosen `wf.sh`'s separate **preflight** for `--scaffold`/`--code`,
+which fast-fails a Codex author whose `AUDIT_VERIFIER_CMD` is not a Claude-*string* (#134). That preflight is
+intentionally a string check (it runs before the audit, to give a clear early error), and on this fleet the
+ship-change verifier is always a real `claude -p …` command — so the wrapper-declaration path is not needed
+there. If a future install genuinely needs a wrapper verifier for ship-change rungs, updating the `wf.sh`
+preflight to consult the shared resolver is a scoped follow-up (it rides the decision-4 drift check that
+already keeps the two matchers aligned) — not required for the four-rung guarantee this doc backs.
 
 ## Alternatives considered
 
@@ -212,9 +239,13 @@ could also be one PR; filed separately so each is a small reviewable diff, with 
    `(runner_family, verifier_cmd, rung_label)` → resolved families or rung-named BLOCK, implementing rules
    (1) explicit-family exact-match and (2) different-family, the `*claude*`/`*codex*` inference, **and the
    `AUDIT_VERIFIER_FAMILY` declaration path for an unidentifiable verifier** (decision 5). Refactor the
-   existing `--scaffold`/`--code` guard in `audit_experiment.sh` onto it (one definition, no drift). No
-   caller-visible behavior change for the two rungs that already enforce. **Also expose the matcher in a
-   form `wf.sh` can assert against, and add the `wf.sh`-mirror drift check** (decision 4 / FINDING 3).
+   existing `--scaffold`/`--code` guard in `audit_experiment.sh` onto it (one definition, no drift).
+   **Behavior-changing for `--scaffold`/`--code` too:** decision 5 means a previously-passing `custom`
+   (unidentifiable) verifier on those rungs now BLOCKs unless `AUDIT_VERIFIER_FAMILY` is declared — so this
+   PR is treated as behavior-changing for all three already-enforced modes, with its own smoke coverage,
+   doc note, and plugin version bump shipped atomically (not "no caller-visible change"). **Also expose the
+   matcher in a form `wf.sh` can assert against, and add the `wf.sh`-mirror drift check** (decision 4 /
+   FINDING 3).
 2. **`ready` (blocked-by #1) — `audit_experiment.sh`: enforce on close/`--design`/`--data`, with docs.**
    Replace `RUNNER_FAMILY=${AAR_SUBSTRATE:-claude}` with the helper call so all modes require an explicit
    family and fail closed on same-family / unidentifiable-verifier. Add smoke cases for the three
