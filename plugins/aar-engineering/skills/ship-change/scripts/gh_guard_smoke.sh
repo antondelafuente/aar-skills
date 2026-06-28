@@ -64,8 +64,11 @@ if ! guard --repo o/r issue create -t x >/dev/null 2>&1; then pass "'gh --repo o
 # 2c. but a -R READ still passes
 : > "$FAKE_GH_LOG"
 if guard -R o/r pr view 1 >/dev/null 2>&1 && grep -q 'pr view 1' "$FAKE_GH_LOG"; then pass "'gh -R o/r pr view' passes (read)"; else fail "'gh -R o/r pr view' should pass"; fi
-# 2d. the blocked message must NOT echo the raw argv (review F3: bodies/tokens must not leak)
-if ! guard pr comment 1 -b 'SECRET_BODY_TEXT' 2>&1 | grep -q 'SECRET_BODY_TEXT'; then pass "blocked message does not leak the raw argv"; else fail "blocked message leaked the raw argv (F3)"; fi
+# 2d. the blocked message must NOT echo the raw argv (review F3: bodies/tokens must not leak). Capture the
+# guard's output first (the guard exits non-zero; neutralize it with `|| true`), THEN grep the captured text
+# separately — a `guard … | grep` pipeline would be masked by pipefail/`!` and always pass (review F2).
+LEAK_OUT=$(guard pr comment 1 -b 'SECRET_BODY_TEXT' 2>&1 || true)
+if ! printf '%s' "$LEAK_OUT" | grep -q 'SECRET_BODY_TEXT'; then pass "blocked message does not leak the raw argv"; else fail "blocked message leaked the raw argv (F3)"; fi
 : > "$FAKE_GH_LOG"
 if ! guard pr merge 1 --squash >/dev/null 2>&1; then pass "bare 'pr merge' blocked"; else fail "bare 'pr merge' should be blocked"; fi
 : > "$FAKE_GH_LOG"
@@ -91,8 +94,13 @@ if ! guard api -X POST repos/o/r/issues >/dev/null 2>&1; then pass "'gh api -X P
 if ! guard api --method PATCH repos/o/r/pulls/1 -f body=x >/dev/null 2>&1; then pass "'gh api --method PATCH' blocked"; else fail "'gh api --method PATCH' should be blocked"; fi
 if ! guard api repos/o/r/issues -f title=x >/dev/null 2>&1; then pass "'gh api' GET-with-body (-f) blocked (implicit POST)"; else fail "'gh api -f' should be blocked"; fi
 if ! guard api graphql -f query='mutation{addComment}' >/dev/null 2>&1; then pass "'gh api graphql mutation' blocked"; else fail "graphql mutation should be blocked"; fi
+# default-DENY: a graphql call carrying ANY body is blocked (a mutation can hide in --input/file-backed
+# fields where the literal text isn't in argv) — review F1.
+if ! guard api graphql -f query='query{viewer{login}}' >/dev/null 2>&1; then pass "'gh api graphql' inline-query body blocked (default-deny)"; else fail "graphql body should be blocked (default-deny)"; fi
+if ! guard api graphql --input mut.json >/dev/null 2>&1; then pass "'gh api graphql --input' blocked (mutation can hide in the file)"; else fail "graphql --input should be blocked"; fi
+# a graphql call with NO body is a harmless read (rare; passes)
 : > "$FAKE_GH_LOG"
-if guard api graphql -f query='query{viewer{login}}' >/dev/null 2>&1; then pass "'gh api graphql query' passes"; else fail "graphql query should pass"; fi
+if guard api graphql >/dev/null 2>&1; then pass "'gh api graphql' (no body) passes"; else fail "graphql with no body should pass"; fi
 
 # 5. the WF_GH_INTERNAL marker passes a WRITE straight through
 : > "$FAKE_GH_LOG"

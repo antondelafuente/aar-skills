@@ -148,18 +148,18 @@ case "$sub" in
         graphql) is_graphql=1 ;;
       esac
     done
-    # GraphQL is a write iff it carries a `mutation` (in a -f query=… or --input). Be conservative: if it's
-    # graphql AND carries a body, inspect the args for the literal `mutation` keyword.
-    mut=0
-    if [ "$is_graphql" = 1 ] && [ "$has_body" = 1 ]; then
-      for a in "$@"; do case "$a" in *mutation*) mut=1;; esac; done
-    fi
     mu=$(printf '%s' "$method" | tr '[:lower:]' '[:upper:]')
     case "$mu" in
       GET|HEAD)
-        # a body on a GET/HEAD api call still implies gh upgrades it to POST -> treat as write.
-        if [ "$has_body" = 1 ] && [ "$is_graphql" = 0 ]; then guard_die "api (write: body on GET)"; fi
-        if [ "$mut" = 1 ]; then guard_die "api graphql (mutation)"; fi
+        # any body on a GET/HEAD api call implies gh upgrades it to POST -> treat as write. For GraphQL this
+        # is the DEFAULT-DENY for mutations: we do NOT try to prove a graphql body is "only a query" (a
+        # mutation can hide in `--input file` / `-f query=@file` where the literal text isn't in argv), so a
+        # graphql call carrying ANY body is blocked. A pure inline `-f query='query{…}'` is still blocked
+        # here; an internal read uses WF_GH_INTERNAL. This is conservative on purpose (fail toward the redirect).
+        if [ "$has_body" = 1 ]; then
+          [ "$is_graphql" = 1 ] && guard_die "api graphql (body — possible mutation)"
+          guard_die "api (write: body on GET)"
+        fi
         exec_real_gh "$@"
         ;;
       *) guard_die "api -X $mu" ;;   # POST/PATCH/PUT/DELETE/… = write

@@ -54,9 +54,11 @@ any unmarked `gh` / `GH_TOKEN=… gh` call in `wf.sh`, so a future call site can
 bypass.
 
 **`gh api` is classified default-deny.** It counts as a write (blocked) whenever it carries any non-GET
-method (`-X`/`--method` other than GET/HEAD), any field flag that implies a POST body (`-f`/`-F`/`--field`/
-`--raw-field`/`--input`), or a GraphQL `mutation`; it passes as a read only when it is clearly a GET with no
-body. This closes the `gh api --method PATCH` form already used in `wf.sh`.
+method (`-X`/`--method` other than GET/HEAD) or any field flag that implies a POST body (`-f`/`-F`/`--field`/
+`--raw-field`/`--input`); it passes as a read only when it is clearly a GET with no body. This closes the
+`gh api --method PATCH` form already used in `wf.sh`. A `gh api graphql` call carrying **any** body is blocked
+by default — a mutation can hide in `--input file` / `-f query=@file` where the literal `mutation` text never
+appears in argv, so the guard does not try to prove a graphql body is "only a query".
 
 The **install command**: `wf.sh install-gh-guard` symlinks the wrapper into a chosen bin dir (default
 `~/.local/bin`) as `gh`, ahead of the real `gh` on PATH, and prints how to undo it; `wf.sh
