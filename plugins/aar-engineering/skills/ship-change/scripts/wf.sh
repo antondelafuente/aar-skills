@@ -704,15 +704,20 @@ fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
 # attach bogus fingerprint/sha to, the counter without a merge review). So on a non-finish save, if the local
 # round exceeds canonical, clamp the local round + fingerprint + sha DOWN to canonical's before posting. (Combined
 # with fd_merge_canonical_round's adopt-when-canonical-is-higher, a non-finish save can only ever publish exactly
-# the canonical round — it can change findings, never the counter.) Args: <cache> <canonical-body>. rc nonzero
-# only if the clamp write was required but failed (fd_save then aborts). No-op (rc 0) when local <= canonical.
+# the canonical round — it can change findings, never the counter.) Args: <cache> <canonical-body>. rc 2 if a
+# present canonical body is unparseable/malformed (fail closed); rc 1 if a required clamp write failed; rc 0 on a
+# successful clamp or a no-op (local <= canonical, incl. a legitimately-empty no-canonical-yet body).
 fd_clamp_to_canonical(){  # fd_clamp_to_canonical <cache> <canonical-body>
   local cache=$1 cbody=$2 cjson cround lround fp sha
   cround=0
   if [ -n "$cbody" ]; then
+    # A canonical comment EXISTS — it MUST parse. An unparseable/malformed canonical body is corruption: rc 2 so
+    # fd_save aborts rather than clamp to a phantom 0 and publish a reset counter. (Empty body = genuinely no
+    # canonical comment yet -> cround stays 0, a legitimate first-save clamp.)
     cjson=$(printf '%s' "$cbody" | sed -n '/```json/,/```/p' | sed '1d;$d' \
-      | jq -c '{r:(.round // 0), fp:(.last_review_fingerprint // ""), sha:(.last_reviewed_sha // "")}' 2>/dev/null || true)
-    if [ -n "$cjson" ]; then cround=$(printf '%s' "$cjson" | jq -r '.r' 2>/dev/null); case "$cround" in ''|*[!0-9]*) cround=0 ;; esac; fi
+      | jq -c '{r:(.round // 0), fp:(.last_review_fingerprint // ""), sha:(.last_reviewed_sha // "")}' 2>/dev/null) || return 2
+    [ -n "$cjson" ] || return 2
+    cround=$(printf '%s' "$cjson" | jq -r '.r' 2>/dev/null); case "$cround" in ''|*[!0-9]*) return 2 ;; esac
   fi
   lround=$(jq -r '(.round // 0)' "$cache" 2>/dev/null); case "$lround" in ''|*[!0-9]*) lround=0 ;; esac
   if [ "$lround" -gt "$cround" ] 2>/dev/null; then

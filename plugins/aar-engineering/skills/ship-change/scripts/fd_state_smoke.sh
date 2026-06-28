@@ -178,9 +178,14 @@ fd_clamp_to_canonical "$cl" "$(canon_body '{"round":3,"last_reviewed_sha":"SHA3"
 # local <= canonical -> no-op (merge half handles raising; clamp leaves it).
 cl2="$TMP/cl2.json"; echo '{"round":2,"findings":[]}' > "$cl2"
 fd_clamp_to_canonical "$cl2" "$(canon_body '{"round":5}')"; [ "$(fd_round "$cl2")" = 2 ] && ok clamp-noop-when-not-above || no "clamp-noop-when-not-above ($(fd_round "$cl2"))"
-# no canonical comment at all -> an author can't publish ANY round (clamp to 0).
+# no canonical comment at all (empty body) -> legit first save: an author can't publish ANY round (clamp to 0).
 cl3="$TMP/cl3.json"; echo '{"round":4,"findings":[]}' > "$cl3"
-fd_clamp_to_canonical "$cl3" ""; [ "$(fd_round "$cl3")" = 0 ] && ok clamp-to-zero-no-canonical || no "clamp-to-zero-no-canonical ($(fd_round "$cl3"))"
+fd_clamp_to_canonical "$cl3" "" && ok clamp-empty-rc0 || no "clamp-empty-rc0"
+[ "$(fd_round "$cl3")" = 0 ] && ok clamp-to-zero-no-canonical || no "clamp-to-zero-no-canonical ($(fd_round "$cl3"))"
+# canonical comment PRESENT but unparseable -> corruption, fail closed (rc nonzero), local untouched (no reset).
+cl4="$TMP/cl4.json"; echo '{"round":4,"findings":[]}' > "$cl4"
+fd_clamp_to_canonical "$cl4" "garbage with no json fence" 2>/dev/null && no "clamp-unparseable-canonical-rc" || ok clamp-unparseable-canonical-rc
+[ "$(fd_round "$cl4")" = 4 ] && ok clamp-unparseable-keeps-local || no "clamp-unparseable-keeps-local ($(fd_round "$cl4"))"
 
 if [ "$fails" -eq 0 ]; then echo "fd_state_smoke: ALL PASS"; else echo "fd_state_smoke: FAILURES"; fi
 exit "$fails"
