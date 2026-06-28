@@ -1,0 +1,379 @@
+#!/usr/bin/env bash
+# Smoke for pod_reaper.sh — the #54 child-2 box-level reaper. Runs OFFLINE: the provider seams
+# (list/delete/verify/keepalive/resolve-key) are stubbed via env so no RunPod call is made. Covers the
+# four design-review fixtures + the locked-reap race:
+#   - reap an expired registered lease; keep a fresh one
+#   - report-only an UNKNOWN pod (never deleted) — gpu-job's "never blanket-delete" rule
+#   - report-only a lease whose key_ref does NOT resolve (Finding 2)
+#   - pending-intent nonce match is report-only (not deleted)
+#   - legacy contract-1: keepalive future -> keep; inconclusive -> retry (NOT delete, Finding 3); past -> reap
+#   - the locked reap: a refresh that extends expiry between classify and delete SAVES the pod (Finding 1)
+#   - --dry-run deletes nothing
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+LEASE="$HERE/pod_lease.sh"
+REAPER="$HERE/pod_reaper.sh"
+[ -f "$LEASE" ] && [ -f "$REAPER" ] || { echo "FAIL: missing scripts"; exit 1; }
+
+TMP=$(mktemp -d) || { echo "FAIL: mktemp"; exit 1; }
+trap 'rm -rf "$TMP"' EXIT
+export GPU_JOB_LEASE_DIR="$TMP/leases"
+DEL_LOG="$TMP/deletes.log"; : > "$DEL_LOG"
+GONE="$TMP/gone"; mkdir -p "$GONE"        # a pod-id file here means "verify says gone"
+mkdir -p "$GPU_JOB_LEASE_DIR"
+
+fails=0
+ok(){ echo "ok   $1"; }
+no(){ echo "FAIL $1"; fails=1; }
+lease(){ bash "$LEASE" "$@"; }
+deleted(){ grep -qx "$1" "$DEL_LOG"; }    # was pod $1 deleted?
+
+# --- provider stubs (exported so pod_reaper.sh's seams pick them up) ---
+cat > "$TMP/list.sh"   <<EOF
+#!/bin/bash
+# emit "<pod-id> <name>" for the "live" pods of key \$1. A key listed in $TMP/listfail simulates a
+# provider list FAILURE (auth/HTTP/timeout) -> exit 1. A per-key file pods_<secret>.txt partitions pods
+# by account (realistic — a pod belongs to ONE key); else the shared pods.txt (any key).
+grep -qx "\$1" "$TMP/listfail" 2>/dev/null && exit 1
+if [ -f "$TMP/pods_\$1.txt" ]; then cat "$TMP/pods_\$1.txt"; else cat "$TMP/pods.txt" 2>/dev/null || true; fi
+EOF
+: > "$TMP/listfail"
+cat > "$TMP/del.sh"    <<EOF
+#!/bin/bash
+echo "\$2" >> "$DEL_LOG"      # record that a delete was ATTEMPTED for this pod id
+# a pod in $TMP/delfail simulates a NON-ACCEPTED delete (wrong key / non-2xx) -> exit 1, NOT gone
+if grep -qx "\$2" "$TMP/delfail" 2>/dev/null; then exit 1; fi
+# mark it gone so verify passes — UNLESS the pod id is in $TMP/nogone (accepted delete, unverified)
+grep -qx "\$2" "$TMP/nogone" 2>/dev/null || touch "$GONE/\$2"
+EOF
+: > "$TMP/nogone"; : > "$TMP/delfail"
+cat > "$TMP/verify.sh" <<EOF
+#!/bin/bash
+[ -f "$GONE/\$2" ]            # exit 0 iff gone
+EOF
+cat > "$TMP/resolve.sh" <<'EOF'
+#!/bin/bash
+# Mirror the real resolve_key contract: UNRESOLVABLE and any non-identifier key_ref -> empty (the real
+# resolve_key validates the ref is a shell identifier before indirect expansion; a malformed ref is
+# unresolvable, never fatal/injected). A valid identifier resolves to a fake secret.
+[ "$1" = UNRESOLVABLE ] && exit 0
+# valid shell identifier only (explicit negative test — a case glob's trailing * over-matches)
+if [ -n "$1" ] && [ -z "${1//[A-Za-z0-9_]/}" ] && [[ "$1" != [0-9]* ]]; then
+  echo "secret-for-$1"
+fi
+exit 0
+EOF
+cat > "$TMP/keepalive.sh" <<EOF
+#!/bin/bash
+# echo the keepalive verdict declared per-pod in $TMP/keepalive_<podid>
+cat "$TMP/keepalive_\$2" 2>/dev/null || echo ""
+EOF
+chmod +x "$TMP"/*.sh
+export GPU_JOB_LIST_PODS_CMD="bash $TMP/list.sh"
+export GPU_JOB_DELETE_POD_CMD="bash $TMP/del.sh"
+export GPU_JOB_VERIFY_GONE_CMD="bash $TMP/verify.sh"
+export GPU_JOB_RESOLVE_KEY_CMD="bash $TMP/resolve.sh"
+export GPU_JOB_KEEPALIVE_CMD="bash $TMP/keepalive.sh"
+
+mk_lease(){ # mk_lease <pod-id> <expiry-min> <key-ref> [contract] [ssh]  -> prints nonce
+  local pod=$1 exp=$2 kr=$3 contract=${4:-2} ssh=${5:-}
+  local n; n=$(lease intent "$kr" --expiry-min "$exp")
+  lease provisional "$n" "$pod" >/dev/null
+  if [ "$contract" = 1 ]; then
+    # contract-1 legacy lease: enrich with ssh + downgrade refresh_contract to 1 via direct edit
+    [ -n "$ssh" ] && lease enrich "$n" --ssh "$ssh" --expiry-min "$exp" >/dev/null
+    python3 - "$GPU_JOB_LEASE_DIR/$n.json" <<PY
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["refresh_contract"]=1
+json.dump(d, open(p,"w"), indent=2, sort_keys=True)
+PY
+  fi
+  printf '%s\n' "$n"
+}
+
+# === fixture 1: expired registered lease is REAPED; fresh one is KEPT ===
+EXP=$(mk_lease pod-exp -1 RUNPOD_API_KEY)
+FRESH=$(mk_lease pod-fresh 120 RUNPOD_API_KEY)
+# === fixture 2: an UNKNOWN live pod (no lease) ===
+# === fixture 3: an unresolved-key lease ===
+UNRES=$(mk_lease pod-unres -1 UNRESOLVABLE)
+# === fixture 4: a pending intent (no pod bound, NOT expired) whose nonce names a live pod -> report ===
+PEND=$(lease intent RUNPOD_API_KEY --expiry-min 15)
+# === fixture 4b: an EXPIRED pending intent whose nonce names a live pod -> the created-but-id-never-
+#     returned case (Finding 4): REAP the half-born pod ===
+PEXP=$(lease intent RUNPOD_API_KEY --expiry-min -1)
+# === fixture 6: an expired lease whose DELETE can't be verified -> lease REOPENED for retry (Finding 2) ===
+NOV=$(mk_lease pod-nov -1 RUNPOD_API_KEY); echo pod-nov >> "$TMP/nogone"
+# === fixture 7: a MALFORMED key_ref must NOT abort the reaper (Finding 3) — report-only, not fatal ===
+BADK=$(mk_lease pod-badk -1 'bad key$(touch /tmp/PWNED)')
+# === fixture 8: an unknown pod whose name == a REGISTERED (provisional) lease nonce must NOT be reaped
+#     by name-matching (Finding 4); find-nonce only matches pending intents ===
+REGN=$(mk_lease pod-regn 120 RUNPOD_API_KEY)   # provisional, fresh; its nonce is REGN
+# a DIFFERENT live pod carrying REGN as its name (a collision/spoof) must be report-only, never reaped
+# === fixture 9: a legacy contract-1 lease with NO ssh endpoint -> report-retry, NEVER deleted (Finding 1) ===
+LNOSSH=$(lease intent RUNPOD_API_KEY --expiry-min -1); lease provisional "$LNOSSH" pod-lnossh >/dev/null
+python3 - "$GPU_JOB_LEASE_DIR/$LNOSSH.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d["refresh_contract"]=1   # legacy, and ssh stays null
+json.dump(d, open(p,"w"), indent=2, sort_keys=True)
+PY
+# === fixture 10: an EXPIRED pending intent recorded under a DIFFERENT key_ref, whose nonce names a
+#     live pod listed under THIS key -> report-only, never rebound/reaped by the wrong key (Finding 4) ===
+XKEY=$(lease intent OTHER_KEY --expiry-min -1)   # pending intent under key_ref OTHER_KEY
+# === fixture 11: an expired lease whose DELETE is NOT ACCEPTED (non-2xx) -> NOT closed, reopened (round-4 Finding 2) ===
+DFAIL=$(mk_lease pod-dfail -1 RUNPOD_API_KEY); echo pod-dfail >> "$TMP/delfail"
+# === fixture 12: a lease under a key whose pod-LIST fails -> report-unlistable, NOT treated as zero
+#     pods (round-5 Finding 3). The key's resolved secret is registered as list-failing. ===
+FK=$(mk_lease pod-fk 120 FAILKEY)   # fresh provisional lease under key_ref FAILKEY
+echo "secret-for-FAILKEY" >> "$TMP/listfail"
+# === fixture 5: legacy contract-1 leases, keepalive future / inconclusive / past ===
+LF=$(mk_lease pod-lf -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo future       > "$TMP/keepalive_pod-lf"
+LI=$(mk_lease pod-li -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo ""           > "$TMP/keepalive_pod-li"
+LP=$(mk_lease pod-lp -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo past         > "$TMP/keepalive_pod-lp"
+
+# the "live" pod list the stub returns (pod-id name)
+# Two live pods sharing the SAME name (an ambiguous name) -> both report-only, never reaped (Finding 4).
+DUPNAME="gpujob-dupedupedupedupedupedupedupe"
+# Partition the live pods by account: all fixtures' pods are under the RUNPOD_API_KEY account (key A).
+# The XKEY intent is recorded under OTHER_KEY (key B) but its pod (pod-xkey) is listed under key A —
+# so the reaper, iterating key A, must NOT reap it (the intent's key_ref != key A). OTHER_KEY's account
+# has NO live pods, so the intent is never matched under its own key either.
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-exp $EXP
+pod-fresh $FRESH
+pod-unres $UNRES
+pod-unknown some-user-name
+$PEND $PEND
+pod-pexp $PEXP
+pod-nov $NOV
+pod-badk $BADK
+pod-regn-spoof $REGN
+pod-dup1 $DUPNAME
+pod-dup2 $DUPNAME
+pod-lnossh $LNOSSH
+pod-xkey $XKEY
+pod-dfail $DFAIL
+pod-lf $LF
+pod-li $LI
+pod-lp $LP
+EOF
+
+OUT=$(bash "$REAPER" 2>&1)
+
+deleted pod-exp           && ok reap-expired || no reap-expired
+deleted pod-fresh         && no keep-fresh-deleted || ok keep-fresh-kept
+deleted pod-unknown       && no unknown-deleted || ok unknown-report-only
+deleted pod-unres         && no unresolved-deleted || ok unresolved-report-only
+deleted pod-lf            && no legacy-future-deleted || ok legacy-future-kept
+deleted pod-li            && no legacy-inconclusive-deleted || ok legacy-inconclusive-retry
+deleted pod-lp            && ok legacy-past-reaped || no legacy-past-reaped
+echo "$OUT" | grep -q "not yet expired" && ok pending-intent-not-expired-reported || no pending-intent-not-expired-reported
+echo "$OUT" | grep -q "UNKNOWN pod" && ok unknown-logged || no unknown-logged
+# a reaped lease is CLOSED after verified delete
+[ "$(lease show "$EXP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = closed ] \
+  && ok reaped-lease-closed || no reaped-lease-closed
+# Finding 4: an EXPIRED pending-intent's half-born pod is REAPED (not just reported)
+deleted pod-pexp && ok pending-intent-expired-reaped || no pending-intent-expired-reaped
+# Finding 2: an unverified delete REOPENS the lease for retry (not stuck in `reaping`, not closed)
+deleted pod-nov && ok nov-delete-attempted || no nov-delete-attempted
+nov_state=$(lease show "$NOV" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')
+case "$nov_state" in
+  provisional|enriched|intent) ok nov-reopened-for-retry ;;
+  *) no "nov-reopened-for-retry (state=$nov_state)" ;;
+esac
+if lease is-reapable "$NOV"; then ok nov-reapable-again || true; else no nov-reapable-again; fi
+# Finding 3: a malformed key_ref is report-only, NOT fatal, and never executes shell injection
+deleted pod-badk && no badk-deleted || ok badk-report-only
+[ -e /tmp/PWNED ] && { no badk-no-injection; rm -f /tmp/PWNED; } || ok badk-no-injection
+echo "$OUT" | grep -q "unresolved key_ref" && ok badk-unresolved-logged || no badk-unresolved-logged
+# Finding 4: an unknown pod spoofing a REGISTERED (provisional) nonce as its name is NOT reaped
+deleted pod-regn-spoof && no regn-spoof-deleted || ok regn-spoof-report-only
+# Finding 4: two live pods sharing a name are AMBIGUOUS -> both report-only
+deleted pod-dup1 && no dup1-deleted || ok dup1-report-only
+deleted pod-dup2 && no dup2-deleted || ok dup2-report-only
+echo "$OUT" | grep -q "AMBIGUOUS" && ok ambiguous-name-logged || no ambiguous-name-logged
+# Finding 1: a legacy contract-1 lease with NO ssh endpoint is report-retry, NEVER deleted
+deleted pod-lnossh && no legacy-nossh-deleted || ok legacy-nossh-report-retry
+echo "$OUT" | grep -q "no SSH endpoint to check keepalive" && ok legacy-nossh-logged || no legacy-nossh-logged
+# Finding 4: an expired pending intent under a DIFFERENT key_ref is report-only, never reaped by this key
+deleted pod-xkey && no xkey-cross-key-deleted || ok xkey-cross-key-report-only
+echo "$OUT" | grep -q "different key_ref" && ok xkey-logged || no xkey-logged
+# the cross-key intent was NOT rebound (still a pending intent, no pod_id)
+[ "$(lease show "$XKEY" | python3 -c 'import json,sys;print(json.load(sys.stdin)["pod_id"])')" = None ] \
+  && ok xkey-not-rebound || no xkey-not-rebound
+# round-4 Finding 2: a non-accepted DELETE -> lease NOT closed, reopened to a reapable active state
+deleted pod-dfail && ok dfail-delete-attempted || no dfail-delete-attempted
+dfail_state=$(lease show "$DFAIL" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')
+case "$dfail_state" in provisional|enriched|intent) ok dfail-not-closed-reopened ;; *) no "dfail-not-closed-reopened ($dfail_state)" ;; esac
+if lease is-reapable "$DFAIL"; then ok dfail-reapable-again; else no dfail-reapable-again; fi
+# round-5 Finding 3: a key whose pod-list fails is REPORTED unlistable, not silently zero pods
+echo "$OUT" | grep -q "report-unlistable" && ok list-failure-reported || no list-failure-reported
+
+# === locked-reap race (Finding 1): a refresh that lands before the reaper's in-lock recheck SAVES
+#     the pod. Simulate by refreshing the expired lease to a future expiry, THEN sweeping. ===
+RACE=$(mk_lease pod-race -1 RUNPOD_API_KEY)
+echo "pod-race $RACE" >> "$TMP/pods_secret-for-RUNPOD_API_KEY.txt"
+lease refresh "$RACE" --expiry-min 120 >/dev/null     # the long run refreshed just in time
+bash "$REAPER" >/dev/null 2>&1
+deleted pod-race && no race-refresh-lost || ok race-refresh-saves-pod
+
+# === --dry-run deletes NOTHING and MUTATES NOTHING even for an expired lease / pending intent ===
+: > "$DEL_LOG"
+# reset the pods list so prior fixtures (now closed/reaping) don't muddy the dry-run sweep
+DRYEXP=$(mk_lease pod-dry -1 RUNPOD_API_KEY)
+DRYPEND=$(lease intent RUNPOD_API_KEY --expiry-min -1)   # expired PENDING intent; its nonce names a live pod
+rm -f "$TMP"/pods_*.txt
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-dry $DRYEXP
+$DRYPEND $DRYPEND
+EOF
+DOUT=$(bash "$REAPER" --dry-run 2>&1)
+deleted pod-dry && no dryrun-deleted || ok dryrun-deletes-nothing
+echo "$DOUT" | grep -q "DRY-RUN would reap" && ok dryrun-logs-would-reap || no dryrun-logs-would-reap
+# the dry-run lease is NOT closed/reaping
+[ "$(lease show "$DRYEXP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = provisional ] \
+  && ok dryrun-no-mutation || no dryrun-no-mutation
+# Finding 2: dry-run must NOT bind a pending intent provisional — it stays intent, no pod_id
+echo "$DOUT" | grep -q "DRY-RUN would bind+reap" && ok dryrun-logs-would-bind || no dryrun-logs-would-bind
+[ "$(lease show "$DRYPEND" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = intent ] \
+  && ok dryrun-pending-not-bound || no dryrun-pending-not-bound
+
+# round-8 Finding 2: dry-run reports a STALE reaping lease as would-reap (not silently skipped), and
+# does NOT mutate it
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+DSTALE=$(mk_lease pod-dstale -1 RUNPOD_API_KEY); lease claim-reaping "$DSTALE" >/dev/null
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-dstale $DSTALE
+EOF
+DS_OUT=$(GPU_JOB_STALE_REAPING_SEC=0 bash "$REAPER" --dry-run 2>&1)
+echo "$DS_OUT" | grep -q "DRY-RUN would reap: nonce=$DSTALE" && ok dryrun-stale-reaping-would-reap || no dryrun-stale-reaping-would-reap
+deleted pod-dstale && no dryrun-stale-deleted || ok dryrun-stale-not-deleted
+[ "$(lease show "$DSTALE" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = reaping ] \
+  && ok dryrun-stale-unmutated || no dryrun-stale-unmutated
+
+# === round-7 Finding 2: a still-LIVE pod whose only lease is CLOSED is reported as unknown, not skipped ===
+: > "$DEL_LOG"; : > "$TMP/delfail"; : > "$TMP/nogone"; rm -f "$TMP"/pods_*.txt
+CLO=$(mk_lease pod-clo 120 RUNPOD_API_KEY); lease close "$CLO" >/dev/null   # lease closed but pod still live
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-clo $CLO
+EOF
+COUT=$(bash "$REAPER" 2>&1)
+deleted pod-clo && no closed-lease-pod-deleted || ok closed-lease-pod-not-deleted
+echo "$COUT" | grep -q "UNKNOWN pod" && ok closed-lease-pod-reported || no closed-lease-pod-reported
+
+# === round-7 Finding 3: accepted delete + INCONCLUSIVE verify reopens; a retry whose fresh DELETE 404s
+#     still CLOSES via the persisted accepted-delete marker (pod really is gone) ===
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+# verify is inconclusive on round 1 (GPU_JOB_VERIFY_GONE_CMD exit 2), accepted delete recorded
+cat > "$TMP/verify2.sh" <<EOF
+#!/bin/bash
+# inconclusive (exit 2) while $TMP/inconclusive lists the pod; else gone iff $GONE/<pod> exists
+grep -qx "\$2" "$TMP/inconclusive" 2>/dev/null && exit 2
+[ -f "$GONE/\$2" ]
+EOF
+chmod +x "$TMP/verify2.sh"
+RETRY=$(mk_lease pod-retry -1 RUNPOD_API_KEY)
+echo pod-retry > "$TMP/inconclusive"          # round 1: verify inconclusive
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-retry $RETRY
+EOF
+GPU_JOB_VERIFY_GONE_CMD="bash $TMP/verify2.sh" bash "$REAPER" >/dev/null 2>&1
+# round 1: delete accepted+marked, verify inconclusive -> lease reopened (not closed), marker persisted
+[ "$(lease show "$RETRY" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("delete_accepted"))')" = True ] \
+  && ok retry-marker-persisted || no retry-marker-persisted
+r1_state=$(lease show "$RETRY" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')
+case "$r1_state" in provisional|enriched|intent) ok retry-reopened-round1 ;; *) no "retry-reopened-round1 ($r1_state)" ;; esac
+# round 2: fresh DELETE now 404s (pod gone), verify says gone -> CLOSE via the persisted marker
+echo pod-retry >> "$TMP/delfail"               # fresh DELETE non-2xx (already gone)
+: > "$TMP/inconclusive"; touch "$GONE/pod-retry"   # verify now says gone
+GPU_JOB_VERIFY_GONE_CMD="bash $TMP/verify2.sh" bash "$REAPER" >/dev/null 2>&1
+[ "$(lease show "$RETRY" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = closed ] \
+  && ok retry-closes-on-prior-accept || no retry-closes-on-prior-accept
+
+# === round-6 Finding 2: an unknown/typo arg must FAIL, never silently run a live destructive sweep ===
+if bash "$REAPER" --dryrun >/dev/null 2>&1; then no unknown-arg-rejected; else ok unknown-arg-rejected; fi
+if bash "$REAPER" extra >/dev/null 2>&1; then no surplus-arg-rejected; else ok surplus-arg-rejected; fi
+
+# === round-6 Finding 1: a STALE `reaping` lease (crashed reaper) is RECLAIMED + reaped ===
+: > "$DEL_LOG"; : > "$TMP/delfail"; rm -f "$TMP"/pods_*.txt
+STALE=$(mk_lease pod-stale -1 RUNPOD_API_KEY)
+lease claim-reaping "$STALE" >/dev/null         # claim it, then leave it stuck `reaping` (simulated crash)
+[ "$(lease show "$STALE" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = reaping ] \
+  && ok stale-fixture-reaping || no stale-fixture-reaping
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-stale $STALE
+EOF
+# a 0s staleness window makes the claim immediately stale -> the sweep reclaims + reaps it
+GPU_JOB_STALE_REAPING_SEC=0 bash "$REAPER" >/dev/null 2>&1
+deleted pod-stale && ok stale-reaping-reaped || no stale-reaping-reaped
+# a FRESH reaping claim (default 900s window) is NOT reclaimed by a sweep
+: > "$DEL_LOG"
+FRESH2=$(mk_lease pod-fresh2 -1 RUNPOD_API_KEY); lease claim-reaping "$FRESH2" >/dev/null
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-fresh2 $FRESH2
+EOF
+bash "$REAPER" >/dev/null 2>&1
+deleted pod-fresh2 && no fresh-reaping-reaped || ok fresh-reaping-protected
+
+# === round-10 Finding 2: TWO active leases on the same pod id -> report-only, never reap (a fresh
+#     sibling lease still protects the pod) ===
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+D1=$(mk_lease pod-dupid -1 RUNPOD_API_KEY)   # expired lease on pod-dupid
+D2=$(lease intent RUNPOD_API_KEY --expiry-min 120); lease provisional "$D2" pod-dupid >/dev/null  # fresh sibling on SAME pod
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-dupid $D1
+EOF
+DUPOUT=$(bash "$REAPER" 2>&1)
+deleted pod-dupid && no dupid-deleted || ok dupid-not-reaped
+echo "$DUPOUT" | grep -q "DUPLICATE active leases" && ok dupid-reported || no dupid-reported
+
+# === round-10 Finding 3: a PENDING INTENT (no pod) under an UNRESOLVED key_ref is reported, not hidden ===
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+lease intent UNRESOLVABLE --expiry-min -1 >/dev/null   # pending intent, key won't resolve
+: > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt"
+UROUT=$(bash "$REAPER" 2>&1)
+echo "$UROUT" | grep -q "unresolved key_ref 'UNRESOLVABLE'" && ok pending-unresolved-key-reported || no pending-unresolved-key-reported
+
+# === round-10 Finding 1: the verify verdict is GONE only on 404 / explicit terminal status; a 200 with
+#     MISSING desiredStatus (envelope/changed shape) is INCONCLUSIVE, never gone (unit check of the logic) ===
+VV='import json,sys
+raw=sys.stdin.read(); lines=raw.splitlines(); http=lines[-1].strip() if lines else ""; payload="\n".join(lines[:-1])
+if http=="404": print("gone"); sys.exit(0)
+if http in ("200","201"):
+    try: d=json.loads(payload)
+    except Exception: print("inconclusive"); sys.exit(0)
+    if not isinstance(d,dict): print("inconclusive"); sys.exit(0)
+    ds=d.get("desiredStatus")
+    print("present" if ds=="RUNNING" else ("gone" if ds in ("TERMINATED","EXITED","REMOVED","DELETED") else "inconclusive"))
+else: print("inconclusive")'
+[ "$(printf '{"data":{"x":1}}\n200' | python3 -c "$VV")" = inconclusive ] && ok verify-missing-status-inconclusive || no verify-missing-status-inconclusive
+[ "$(printf '{"desiredStatus":"TERMINATED"}\n200' | python3 -c "$VV")" = gone ] && ok verify-terminal-gone || no verify-terminal-gone
+[ "$(printf '{"desiredStatus":"RUNNING"}\n200' | python3 -c "$VV")" = present ] && ok verify-running-present || no verify-running-present
+[ "$(printf '\n404' | python3 -c "$VV")" = gone ] && ok verify-404-gone || no verify-404-gone
+
+# === round-9 Finding 3: a MALFORMED lease record is REPORTED by the sweep, not silently skipped ===
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+printf 'not json{' > "$GPU_JOB_LEASE_DIR/gpujob-corrupt.json"
+: > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt"
+MOUT=$(bash "$REAPER" 2>&1)
+echo "$MOUT" | grep -q "MALFORMED lease record" && ok malformed-lease-reported || no malformed-lease-reported
+rm -f "$GPU_JOB_LEASE_DIR/gpujob-corrupt.json"
+
+# === round-11 Finding 1: teardown REFUSES a mismatched <pod-id> <nonce> pair BEFORE any DELETE ===
+TD="$HERE/teardown.sh"
+if [ -f "$TD" ]; then
+  TDN=$(lease intent RUNPOD_API_KEY --expiry-min 60); lease provisional "$TDN" pod-owner >/dev/null
+  # teardown pod-OTHER <nonce-owned-by-pod-owner> must BLOCK (exit nonzero) before reaching curl
+  if bash "$TD" pod-OTHER "$TDN" >/dev/null 2>&1; then no teardown-mismatch-blocked; else ok teardown-mismatch-blocked; fi
+  # the lease was NOT mutated by the blocked teardown (still provisional)
+  [ "$(lease show "$TDN" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = provisional ] \
+    && ok teardown-mismatch-no-mutation || no teardown-mismatch-no-mutation
+  # an explicit nonce that does NOT exist (typo) also BLOCKS before DELETE (post-rebase Finding 2)
+  if bash "$TD" pod-owner gpujob-doesnotexist0000000000000000 >/dev/null 2>&1; then no teardown-bad-nonce-blocked; else ok teardown-bad-nonce-blocked; fi
+  # an explicit nonce for a not-yet-provisioned INTENT (no pod_id) also BLOCKS
+  TDI=$(lease intent RUNPOD_API_KEY --expiry-min 60)
+  if bash "$TD" pod-owner "$TDI" >/dev/null 2>&1; then no teardown-intent-nonce-blocked; else ok teardown-intent-nonce-blocked; fi
+fi
+
+[ "$fails" = 0 ] && { echo "pod_reaper smoke PASS"; exit 0; } || { echo "pod_reaper smoke FAIL"; exit 1; }
