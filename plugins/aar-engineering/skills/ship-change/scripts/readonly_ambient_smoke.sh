@@ -10,8 +10,10 @@
 #   - the strict --readonly form EXITS NON-ZERO on FAIL, and 0 on PASS (the machine-consumable gate).
 set -uo pipefail
 # strip any inherited BASH_ENV/ENV so the wf.sh child shells don't source the instance env (same convention as
-# identity_smoke.sh) — keeps the smoke hermetic on any agent box.
-unset BASH_ENV ENV
+# identity_smoke.sh), AND any inherited WF_READONLY_* seam so a real instance minter never runs against the
+# smoke's fake fixtures (#166 code-review F3) — keeps the smoke hermetic on any agent box. run_strict re-sets
+# only WF_READONLY_TOKEN_INFO_CMD per fixture and explicitly clears WF_READONLY_TOKEN_CMD.
+unset BASH_ENV ENV WF_READONLY_TOKEN_CMD WF_READONLY_TOKEN_INFO_CMD
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WF="$HERE/wf.sh"
@@ -130,7 +132,7 @@ run_strict(){  # run_strict <GH_TOKEN> <GITHUB_TOKEN> <stored> <api-fixture> <gi
   RO_OUT=$(PATH="$BIN:$PATH" \
     GH_TOKEN="${1:-}" GITHUB_TOKEN="${2:-}" READONLY_SMOKE_STORED_TOKEN="${3:-}" \
     READONLY_SMOKE_API="${4:-denied}" READONLY_SMOKE_GIT="${5:-rejected}" \
-    WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" \
+    WF_READONLY_TOKEN_CMD="" WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" \
     bash "$WF" doctor claude "$REPO" --readonly 2>&1)
   return $?
 }
@@ -220,7 +222,7 @@ fi
 # --- plain doctor prints the read-only section as a labeled reporter (does not require engineer identity to PASS
 #     for the read-only verdict to print). We only assert the section + verdict line appear.
 PLAIN_OUT=$(PATH="$BIN:$PATH" GH_TOKEN="RO_aaa" READONLY_SMOKE_API=denied READONLY_SMOKE_GIT=rejected \
-  WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" WF_ALLOW_AMBIENT_IDENTITY=1 \
+  WF_READONLY_TOKEN_CMD="" WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" WF_ALLOW_AMBIENT_IDENTITY=1 \
   bash "$WF" doctor claude "$REPO" 2>&1 || true)
 echo "$PLAIN_OUT" | grep -q 'read-only ambient credential (#166)' && pass "plain doctor prints the read-only section" || fail "plain doctor missing the read-only section"
 echo "$PLAIN_OUT" | grep -q 'read-only ambient verdict:' && pass "plain doctor prints the read-only verdict line" || fail "plain doctor missing the verdict line"

@@ -1071,10 +1071,11 @@ doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 i
 readonly_token_cmd(){ echo "${WF_READONLY_TOKEN_CMD:-}"; }            # the instance read-only minter seam
 readonly_token_info_cmd(){ echo "${WF_READONLY_TOKEN_INFO_CMD:-}"; }  # its paired machine-verifiable perms
 
-# perms_has_write <json> — true (returns 0) if a GitHub-permissions JSON object contains ANY value that is a
-# write/admin category. GitHub permission values are read|write|admin (a few are read|write only); a token is
-# read-only iff EVERY value is exactly "read" (or "none"). We scan the VALUES, not keys, so an unknown future
-# permission key still trips if its value is write/admin. Fails toward write (returns 0) on unparseable input.
+# perms_has_write <json> — true (returns 0) if a GitHub-permissions JSON object is NOT provably read-only.
+# READ-ONLY ALLOWLIST (fail-closed, #166 code-review F1): a token is read-only IFF EVERY permission value is
+# EXACTLY "read" or "none". ANY other value — "write", "admin", "maintain", "triage", a future write-ish
+# level, OR a non-string value — counts as write (we never enumerate write levels; we allowlist the two safe
+# ones and fail toward write on everything else). Unparseable / missing python3 also fails toward write.
 perms_has_write(){
   local json=$1
   command -v python3 >/dev/null 2>&1 || { return 0; }   # can't parse -> can't certify read-only -> treat as write
@@ -1086,12 +1087,13 @@ try:
 except Exception:
     sys.exit(0)  # unparseable -> cannot certify read-only -> "has write" (fail toward write)
 perms = obj.get("permissions", obj) if isinstance(obj, dict) else obj
-if not isinstance(perms, dict):
-    sys.exit(0)
+if not isinstance(perms, dict) or not perms:
+    sys.exit(0)  # no readable permission map -> cannot certify read-only -> fail toward write
 for v in perms.values():
-    if isinstance(v,str) and v.lower() in ("write","admin"):
-        sys.exit(0)   # found a write/admin category
-sys.exit(1)           # every value read/none -> read-only
+    # ALLOWLIST: only an exact-string "read"/"none" is safe; anything else (incl. non-string) is write.
+    if not (isinstance(v, str) and v.lower() in ("read", "none")):
+        sys.exit(0)   # a non-allowlisted permission value -> treat as write
+sys.exit(1)           # every value is read/none -> read-only
 PY
 }
 
@@ -1136,12 +1138,14 @@ readonly_provenance_verdict(){
 # NEVER the certifier — provenance is the gate; this only sharpens the message (a "writable" can turn a PASS
 # into a FAIL, a "denied" never UPGRADES an unattested token to PASS).
 readonly_advisory_probe(){
-  local tok=$1 repo=$2 code
+  local tok=$1 repo=$2 code out
   # An empty JSON object body is the load-bearing detail (a NO-body PATCH returns 400 = inconclusive; a body
   # with a -f field could MUTATE). We pipe '{}' via --input - so no settable field is ever supplied. real_gh
-  # marker so the guard (if installed) passes this internal call through. Capture only the HTTP status line.
-  code=$(printf '{}' | GH_TOKEN="$tok" real_gh api -X PATCH "repos/$repo" --input - -i 2>/dev/null \
-           | awk 'NR==1{print $2; exit}') || code=""
+  # marker so the guard (if installed) passes this internal call through. CAPTURE the -i output FIRST with its
+  # own `|| true` so a non-2xx gh exit (403/404 -> nonzero) does NOT blank the status under `set -o pipefail`
+  # (#166 code-review F4) — then parse the HTTP status line from the captured text.
+  out=$(printf '{}' | GH_TOKEN="$tok" real_gh api -X PATCH "repos/$repo" --input - -i 2>/dev/null || true)
+  code=$(printf '%s\n' "$out" | awk 'toupper($1) ~ /^HTTP/ {print $2; exit}')
   case "$code" in
     2*)      echo writable ;;     # GitHub ACCEPTED the (empty, non-mutating) write attempt -> write-capable
     403|404) echo denied ;;       # forbidden / not-visible -> no reachable write on this floor
@@ -1184,7 +1188,10 @@ readonly_probe_git_push(){
   # an empty repo with one commit so there is a ref to (dry-run) push; push to a disposable ref name.
   (
     git -C "$tmp" init -q 2>/dev/null
-    git -C "$tmp" commit -q --allow-empty -m probe 2>/dev/null
+    # set LOCAL commit identity so the probe commit never depends on a global git user.name/email (#166
+    # code-review F2): a fresh environment without global config would otherwise fail the commit -> the whole
+    # --readonly check would falsely go inconclusive before it ever tested the remote.
+    git -C "$tmp" -c user.name="wf-doctor" -c user.email="wf-doctor@local" commit -q --allow-empty -m probe 2>/dev/null
   ) || { rm -rf "$tmp"; echo "    ambient git push: inconclusive (could not stage a probe commit)"; return 3; }
   # Disable EVERY interactive/ambient-helper path EXCEPT the ambient credential we're testing: no terminal
   # prompt, no askpass, SSH BatchMode. We clear GH_TOKEN/GITHUB_TOKEN-as-engineer? No — the AMBIENT token IS
