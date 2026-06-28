@@ -1071,6 +1071,10 @@ doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 i
 # performs a real mutation (the contents probe carries no sha+content; the git probe is --dry-run only).
 # ============================================================================================================
 
+# redact_userinfo <string> — strip a `user:secret@` userinfo segment from any URL-shaped value so a
+# credential-bearing remote (https://user:TOKEN@host/…) never leaks its token into doctor/CI logs (#166 F1 r13).
+redact_userinfo(){ printf '%s' "$1" | sed -E 's#(://)[^/@[:space:]]+@#\1<redacted>@#g'; }
+
 readonly_token_cmd(){ echo "${WF_READONLY_TOKEN_CMD:-}"; }            # the instance read-only minter seam
 readonly_token_info_cmd(){ echo "${WF_READONLY_TOKEN_INFO_CMD:-}"; }  # its paired machine-verifiable perms
 
@@ -1303,14 +1307,21 @@ readonly_probe_git_push(){
         git@github.com:*|git@ssh.github.com:*|\
         ssh://git@github.com/*|ssh://github.com/*|ssh://git@github.com:*|ssh://git@ssh.github.com*|ssh://ssh.github.com*)
           urls+=("$origin_url") ;;
-        *) echo "    ambient git push: note — origin '$origin_url' is not a GitHub remote; probing synthesized GitHub URLs only (a non-GitHub remote helper is not executed)" ;;
+        *) # NEVER print the raw origin url — it can carry userinfo (https://user:TOKEN@host/…) that would leak
+           # into doctor/CI logs (#166 code-review F1 r13). Print only that a non-GitHub origin was skipped.
+           echo "    ambient git push: note — the worktree origin is not a GitHub remote; skipped (its URL is not echoed; a non-GitHub remote helper is not executed). Probing synthesized GitHub URLs only." ;;
       esac
     fi
   fi
   # always include BOTH synthesized canonical surfaces for a real owner/repo — HTTPS AND SSH — so an ambient
   # SSH key that can push is probed even when no worktree origin was supplied (#166 code-review F1 r4: an
   # owner/repo-only target must never PASS the git surface on HTTPS alone while an ambient SSH key can push).
+  # ONLY synthesize from a CLEAN owner/repo (one slash, no scheme/userinfo/host/colon) — a `repo` that is
+  # actually a full URL (e.g. when a worktree has a non-GitHub origin) must NOT be embedded in a synthesized URL
+  # (it could carry a userinfo token, #166 code-review F1 r13).
   case "$repo" in
+    *@*|*:*|*//*|*' '*) : ;;                       # not a bare owner/repo (has userinfo/scheme/port) -> skip
+    */*/*) : ;;                                     # more than one slash -> not owner/repo
     */*) urls+=("https://github.com/$repo.git") ; urls+=("git@github.com:$repo.git") ;;
   esac
   if [ "${#urls[@]}" = 0 ]; then echo "    ambient git push: skipped (no probeable remote url)"; return 3; fi
@@ -1717,7 +1728,7 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report life
   # non-zero on any FAIL/FAIL-CLOSED — the form rollout + CI invoke (#166 design-review F1).
   if [ "$RO_ONLY" = 1 ]; then
     echo "wf.sh doctor --readonly"
-    echo "  repo: $DREPO"
+    echo "  repo: $(redact_userinfo "$DREPO")"
     if doctor_readonly_section "$DREPO" "$DWT" 1; then
       echo "READONLY-PASS: the ambient credential is authoritatively read-only on every probed source + surface"
     else
@@ -1730,7 +1741,7 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report life
   echo "wf.sh doctor"
   echo "  author: $AUTHOR"
   echo "  reviewer: $REVIEWER"
-  echo "  repo: $DREPO"
+  echo "  repo: $(redact_userinfo "$DREPO")"
   if ambient_identity_allowed; then
     echo "  ambient workflow fallback: ENABLED (WF_ALLOW_AMBIENT_IDENTITY=1)"
   else

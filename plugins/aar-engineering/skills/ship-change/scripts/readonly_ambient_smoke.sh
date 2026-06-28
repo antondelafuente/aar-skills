@@ -359,10 +359,17 @@ fi
 # remote helper executed); the probe notes it and falls back to the synthesized GitHub URLs.
 WT12="$TMP/wt-nongithub"; mkdir -p "$WT12"
 "$REAL_GIT" -C "$WT12" init -q
-"$REAL_GIT" -C "$WT12" remote add origin "https://gitlab.example.com/o/r.git"
+# a CREDENTIAL-BEARING non-GitHub origin: the token must NOT leak into the doctor output (#166 F1 r13).
+"$REAL_GIT" -C "$WT12" remote add origin "https://user:SUPERSECRETTOKEN@gitlab.example.com/o/r.git"
 : > "$MUTLOG"
 RO_TARGET="$WT12" run_strict "RO_aaa" "" "" denied rejected || true
-if echo "$RO_OUT" | grep -q 'is not a GitHub remote'; then
+# F1 r13: the non-GitHub-origin note must NOT echo the raw URL / its userinfo token.
+if echo "$RO_OUT" | grep -q 'SUPERSECRETTOKEN'; then
+  fail "F1 r13: the non-GitHub origin note LEAKED the userinfo token into the output"
+else
+  pass "F1 r13: non-GitHub origin note does not leak the remote URL / token"
+fi
+if echo "$RO_OUT" | grep -q 'not a GitHub remote'; then
   # assert NO push targeted the non-GitHub origin URL (the push-target is the arg right after `push` + flags);
   # a push whose remote URL is a `https://gitlab…`/non-github scheme would mean the non-GitHub origin was probed
   # (arbitrary remote-helper risk). The synthesized fallback URLs all start with github.com, so a clean run has
