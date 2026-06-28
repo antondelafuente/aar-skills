@@ -55,6 +55,9 @@ Two inputs per rung, with identical semantics across both scripts:
   `AUDIT_VERIFIER_CMD` (`*claude*` → claude, `*codex*` → codex, else `custom`). `verify_claim.sh` uses a
   *different* variable today (`VERIFIER_CMD`); this doc makes it apply the **same inference** to whatever
   verifier variable it reads (see decision 3 for the naming reconciliation).
+- **`AUDIT_VERIFIER_FAMILY`** (optional) — an explicit auditor-family declaration for a verifier command
+  that does not identify its own family (a wrapper / shim). Required only in that unidentifiable case;
+  ignored when the command already matches `*claude*`/`*codex*`. See decision 5.
 
 The two rules, applied uniformly to every model-judged rung:
 
@@ -113,19 +116,42 @@ The inference (`*claude*`/`*codex*`/`custom`), the explicit-family exact-match g
 BLOCK now need to be **identical** in two scripts (three, counting the existing `--scaffold`/`--code` path).
 **Decision: extract a single small helper** (a sourced shell function, the natural seam for two sibling
 scripts in one plugin) that takes `(runner_family, verifier_cmd, rung_label)` and either reports the
-resolved families or exits non-zero with a rung-named BLOCK message. Both scripts call it; the
-`--scaffold`/`--code` path is refactored onto it too, so there is **one** definition of the contract (DRY —
-no second copy to drift, the failure mode the #134 comment already warns about with "future family-matcher
-changes update both"). This keeps the canonical family-matcher in `verify-claims`, where the #130 doc says
-it belongs.
+resolved families (including the `AUDIT_VERIFIER_FAMILY` declaration path from decision 5) or exits
+non-zero with a rung-named BLOCK message. Both scripts call it; the `--scaffold`/`--code` path is
+refactored onto it too, so there is **one** definition of the contract *within `verify-claims`* (DRY — no
+second copy to drift across the three modes, the failure mode the #134 comment already warns about with
+"future family-matcher changes update both"). This makes `verify-claims` the canonical family-matcher home,
+where the #130 doc says it belongs.
 
-#### 5. `custom` auditor family is allowed; only an *equal-to-runner* family BLOCKs
+**The `wf.sh` mirror is the one acknowledged exception.** `wf.sh` lives in the **`aar-engineering` build
+plugin**, not the `verify-claims` runtime plugin, and its `is_claude_verifier_cmd` preflight runs *before*
+it ever invokes the audit (to fail a Codex author fast with a clear message). A runtime build-plugin →
+verify-claims source dependency would be the wrong direction (the #130 doc is explicit that the build plugin
+must not become a runtime dependency). So this helper is **scoped to `verify-claims`**; the `wf.sh` matcher
+stays a deliberate narrow mirror. To keep the two honest, decision 4's helper must expose the matcher in a
+form `wf.sh` can assert against, and the caller-sweep child (below) adds a **drift check** (a smoke or
+`.aar-ci` assertion that the `wf.sh` mirror and the `verify-claims` matcher agree on the same inputs) so the
+mirror can never silently diverge — replacing today's bare "keep this synced" comment with a mechanical
+guard.
 
-The existing inference yields `custom` for a verifier that is neither claude nor codex. A `custom` verifier
-can never equal `claude` or `codex`, so it passes the same-family check — preserving today's behavior for
-instances that wire a third-family or wrapper verifier. **Decision: keep `custom` permitted** (the contract
-is "not the *same* family," not "must be one of two families"). The runner family, by contrast, must be
-exactly `claude|codex` — because the same-family comparison is only meaningful against a known runner.
+#### 5. An *unidentifiable* verifier must declare its family or BLOCK (no silent `custom` cross-family pass)
+
+The existing inference yields `custom` for a verifier command that contains neither `claude` nor `codex`,
+and `custom` can never equal `claude` or `codex`, so it **passes** the same-family check today. That is a
+real hole: a *wrapper* verifier — a script named `verify.sh`, `review`, a venv shim — that actually shells
+out to the **same** family as the runner would be inferred `custom` and slip past, so the contract would no
+longer prove "genuinely different family." A `custom` pass is only safe when the command really is a
+distinct third family; the inference cannot tell a genuine third-family CLI from a same-family wrapper.
+
+**Decision: an unidentifiable verifier (inferred `custom`) BLOCKs unless its family is *explicitly
+declared*.** Add an optional `AUDIT_VERIFIER_FAMILY` env var (the auditor's family, when the command is not
+self-identifying). The resolution is: if the command matches `*claude*`/`*codex*`, use that; else if
+`AUDIT_VERIFIER_FAMILY` is set to an exact `claude|codex|<named-third-family>`, use it; else BLOCK with "the
+verifier command does not identify its family — set `AUDIT_VERIFIER_FAMILY`." Then the same-family check
+runs on the resolved family as before: a declared `claude`/`codex` that equals the runner BLOCKs; a declared
+distinct third family passes. This preserves genuine third-family / wrapper support **without** letting an
+opaque command silently claim cross-family status. The runner family (`AAR_SUBSTRATE`) must still be exactly
+`claude|codex` — the same-family comparison is only meaningful against a known runner.
 
 ## Alternatives considered
 
@@ -164,40 +190,53 @@ exactly `claude|codex` — because the same-family comparison is only meaningful
   four-rung promise. After it lands, #150 (helper), #156 (`design-experiment` PR-open), and #157
   (`run-experiment` close) can rely on "set `AAR_SUBSTRATE` + opposite-family verifier, and the audit runner
   fails closed otherwise" rather than re-implementing the check.
+- **`wf.sh` mirror (cross-plugin):** `aar-engineering/scripts/wf.sh` keeps its narrow `is_claude_verifier_cmd`
+  preflight (it must not take a runtime dependency on `verify-claims`), now guarded by a **drift check**
+  against the `verify-claims` matcher (decision 4 / FINDING 3) instead of a bare comment.
 - **Smoke coverage** is part of the implementation: a fake-verifier smoke (mirroring `identity_smoke.sh`'s
-  pattern) asserting (a) unset `AAR_SUBSTRATE` BLOCKs on each rung, (b) same-family BLOCKs, (c)
-  cross-family passes, for both scripts.
+  pattern) asserting, for both scripts, (a) unset `AAR_SUBSTRATE` BLOCKs on each rung, (b) same-family
+  BLOCKs, (c) cross-family passes, (d) an unidentifiable verifier with no `AUDIT_VERIFIER_FAMILY` BLOCKs and
+  one with a declared distinct family passes; plus the `wf.sh`↔`verify-claims` matcher drift check.
 
 ## Decomposition (spawned `ready` issues)
 
-This design carries no remaining open sub-decision — the contract, the variable names, the helper seam, and
-the `custom` semantics are all fixed above. It decomposes into implementable units with **no** further
-`needs-design`. Dependency order: the shared helper lands first, then the two scripts adopt it, then the
-caller sweep. (They could also be one PR; filed separately so each is a small reviewable diff, with the
-order noted as `blocked-by`.)
+This design carries no remaining open sub-decision — the contract, the variable names, the helper seam, the
+`AUDIT_VERIFIER_FAMILY` declaration, and the wrapper/`custom` semantics are all fixed above. It decomposes
+into implementable units with **no** further `needs-design`. Dependency order: the shared helper lands
+first, then each script adopts it **together with the doc/caller updates that teach its new contract**
+(FINDING 2 — enforcement and the docs that teach it ship atomically, never enforcement-then-docs). (They
+could also be one PR; filed separately so each is a small reviewable diff, with the order noted as
+`blocked-by`.)
 
 1. **`ready` — Extract the cross-family enforcement helper** (`cross_family.sh`): one sourced shell function
    `(runner_family, verifier_cmd, rung_label)` → resolved families or rung-named BLOCK, implementing rules
-   (1) explicit-family exact-match and (2) different-family, plus the `*claude*`/`*codex*`/`custom`
-   inference. Refactor the existing `--scaffold`/`--code` guard in `audit_experiment.sh` onto it (one
-   definition, no drift). No caller-visible behavior change for the two rungs that already enforce.
-2. **`ready` (blocked-by #1) — `audit_experiment.sh`: enforce on close/`--design`/`--data`.** Replace
-   `RUNNER_FAMILY=${AAR_SUBSTRATE:-claude}` with the helper call so all modes require an explicit family and
-   fail closed on same-family. Add smoke cases for the three previously-defaulting modes.
-3. **`ready` (blocked-by #1) — `verify_claim.sh`: adopt the contract** (it has none today). Read
-   `AAR_SUBSTRATE`, infer the auditor family from its verifier command via the helper, fail closed on
-   unset/typo/same-family. Add smoke cases (unset BLOCKs, same-family BLOCKs, cross-family passes).
-4. **`ready` (blocked-by #2, #3) — caller sweep + SKILL.md.** Audit every in-tree invoker of the four
-   newly-enforcing rungs (the `design-experiment`/`run-experiment` skills, smoke scripts, any
-   docs/examples) to export `AAR_SUBSTRATE`; confirm `wf.sh` (#134) is unaffected. Update the
-   `verify-claims` SKILL.md to document the uniform contract across all six rungs.
+   (1) explicit-family exact-match and (2) different-family, the `*claude*`/`*codex*` inference, **and the
+   `AUDIT_VERIFIER_FAMILY` declaration path for an unidentifiable verifier** (decision 5). Refactor the
+   existing `--scaffold`/`--code` guard in `audit_experiment.sh` onto it (one definition, no drift). No
+   caller-visible behavior change for the two rungs that already enforce. **Also expose the matcher in a
+   form `wf.sh` can assert against, and add the `wf.sh`-mirror drift check** (decision 4 / FINDING 3).
+2. **`ready` (blocked-by #1) — `audit_experiment.sh`: enforce on close/`--design`/`--data`, with docs.**
+   Replace `RUNNER_FAMILY=${AAR_SUBSTRATE:-claude}` with the helper call so all modes require an explicit
+   family and fail closed on same-family / unidentifiable-verifier. Add smoke cases for the three
+   previously-defaulting modes. **In the same change**, update the `verify-claims` SKILL.md and any
+   `design-experiment`/`run-experiment` doc/checklist examples that teach these three rungs to export
+   `AAR_SUBSTRATE` (so no doc teaches a now-blocking invocation — FINDING 2).
+3. **`ready` (blocked-by #1) — `verify_claim.sh`: adopt the contract, with docs.** Read `AAR_SUBSTRATE`,
+   infer the auditor family from its verifier command via the helper, fail closed on
+   unset/typo/same-family/unidentifiable. Add smoke cases. **In the same change**, update the SKILL.md and
+   any caller examples that teach `verify_claim` to set `AAR_SUBSTRATE` (FINDING 2).
+4. **`ready` (blocked-by #2, #3) — residual caller sweep + final SKILL.md pass.** Sweep for any remaining
+   in-tree invoker not already updated in #2/#3 (skill checklists, examples), confirm `wf.sh` (#134) is
+   unaffected, and finalize the `verify-claims` SKILL.md statement of the uniform contract across all six
+   rungs. This is the *catch-all* after the per-script doc updates, not the first place docs change.
 
 ## Rollout + rollback
 
 Doc-only design PR; lands the contract on `main` via the `--scaffold` gate, then the four `ready` children
 above are filed (each a normal `ship-change` run, in the dependency order noted). Staged so the helper lands
-before the scripts adopt it and the caller sweep lands last, so no rung starts blocking before its callers
-set the family.
+first, then **each enforcing script change ships the docs/examples that teach its new contract in the same
+PR** (FINDING 2 — never enforcement-then-docs), with the residual sweep last. No rung starts blocking
+before the docs at its point of need stop teaching a now-blocking invocation.
 
 Rollback is a normal revert of the spawned script edits — the rungs fall back to the prior behavior
 (`audit_experiment` defaults the runner family to `claude`; `verify_claim` is family-blind). The audits
