@@ -49,8 +49,8 @@
 #   lock, so a crash mid-write never leaves a half-written record.
 #
 # USAGE:
-#   run_supervision_record.sh create|start <run-id> [--handoff PATH] [--session-handle H]
-#   run_supervision_record.sh update|checkpoint <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H]
+#   run_supervision_record.sh start|create <run-id> [--handoff PATH] [--session-handle H]
+#   run_supervision_record.sh checkpoint|update <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H]
 #   run_supervision_record.sh stop   <run-id>
 #   run_supervision_record.sh close  <run-id>
 #   run_supervision_record.sh request-relaunch <run-id> [--handoff PATH] [--reason TEXT]
@@ -485,7 +485,7 @@ main(){
   case "$sub" in
     create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|status|show)
       validate_id "$id"; shift;;
-    "") die "usage: run_supervision_record.sh <create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|status|show> <run-id> [...]";;
+    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|status|show> <run-id> [...]";;
     *) die "unknown subcommand '$sub'";;
   esac
   # commands that take NO further args must reject surplus tokens — a malformed wrapper call must fail

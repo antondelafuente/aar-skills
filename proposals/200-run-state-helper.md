@@ -4,33 +4,31 @@
 
 ## Problem
 
-The crash-resilience work added the right underlying safety mechanisms for long experiment runs, but it
-exposed too many separate state surfaces to every executor: `TEMP.md`, the run-supervision JSON record, pod
-lease records, wake/look-again markers, checklist evidence, and close-ordering details. Each surface has a real
-job, but the agent-facing protocol now asks executors to remember too much bookkeeping while they are supposed
-to be running the experiment.
+The crash-resilience work added the right underlying safety mechanisms for long experiment runs, but the
+run-supervision interface still reads like an internal record API (`create` / `update` / raw JSON `show`) while
+the executor is trying to follow a lifecycle (`start` / `checkpoint` / prove the current state). That makes the
+brief/checklist wording longer than it needs to be and encourages agents to reason about the JSON record instead
+of using one helper as the source of evidence.
 
-The failure mode is not that pod leases or run-supervision are bad. The failure mode is manual coordination:
-an executor can cargo-cult a checklist line, forget one record, or update the handoff without linking the pod.
-That recreates the same fragility the crash-resilience work was meant to remove.
+The failure mode is not that pod leases or run-supervision are bad. The failure mode is exposing internal
+bookkeeping names at the point where the executor needs a simple run-state action and a compact checklist
+evidence line.
 
 ## Approach
 
 Extend the existing `run_supervision_record.sh` helper in place. Do not add a second facade script. The same
 canonical helper gets a small agent-facing vocabulary plus a compact evidence command:
 
-- `start <run-id> --handoff TEMP.md [--session-handle H]` is an alias for `create` at run start.
-- `checkpoint <run-id> [--handoff TEMP.md] [--session-handle H] [--lease-pod ID]...` is an alias for `update`
-  at each run checkpoint.
-- `link-pod <run-id> <pod-id>` links a pod id to the run-supervision record. It does **not** refresh or mutate the
-  pod lease; deletion/TTL policy remains in `gpu-job`.
+- `start <run-id> --handoff TEMP.md [--session-handle H]` is the executor-facing alias for `create` at run start.
+- `checkpoint <run-id> [--handoff TEMP.md] [--session-handle H] [--lease-pod ID]...` is the executor-facing alias
+  for `update` at each run checkpoint.
 - `status <run-id>` prints a compact run-state summary for checklist evidence.
 - Existing `request-relaunch`, `clear-relaunch`, `close`, and `stop` remain the same.
 
 This does not replace the underlying record or change its state machine. It gives executors lifecycle words while
 preserving the supervisor/instance API. The helper must preserve the existing fail-closed exit semantics: if
-`create`/`update` would reject a terminal/corrupt/missing record, `start`/`checkpoint`/`link-pod` reject it too.
-`status` is read-only and must fail closed on missing/corrupt records.
+`create`/`update` would reject a terminal/corrupt/missing record, `start`/`checkpoint` reject it too. `status` is
+read-only and must fail closed on missing/corrupt records.
 
 The practical simplification is that generated briefs can say:
 
@@ -44,8 +42,8 @@ run_supervision_record.sh close "$RUN_ID"
 instead of teaching the executor the internal create/update/show vocabulary and separately explaining how to
 turn that into checklist evidence.
 
-The lower-level `create`/`update` names stay supported because the supervisor reference and existing instance
-callers already use them, but the docs/templates should teach the run-lifecycle aliases to executors. The
+The lower-level `create`/`update` names stay supported as compatibility aliases because the supervisor reference
+and existing instance callers already use them, but the docs/templates should teach the run-lifecycle names to executors. The
 `RELAUNCH_SUPERVISOR.md` reference should mention the aliases in the record API table so the two surfaces do
 not drift.
 
@@ -64,8 +62,8 @@ details.
 - **Only edit prose.** Rejected. More instructions would worsen the problem. The fix needs an executable
   interface.
 - **Have `run_state.sh` call `gpu-job`'s `pod_lease.sh`.** Rejected after scaffold review. Cross-plugin helper
-  discovery is not defined, and deletion policy belongs to `gpu-job`. The run-supervision helper may link pod ids into
-  run-supervision, but pod lease creation/refresh remains the `gpu-job` interface.
+  discovery is not defined, and deletion policy belongs to `gpu-job`. Run-supervision may link pod ids into the
+  record via `checkpoint --lease-pod`, but pod lease creation/refresh remains the `gpu-job` interface.
 - **Add a separate `run_state.sh` facade.** Rejected after scaffold review. It would create a second live
   interface over the same record and increase the vocabulary a debugger has to map. The right canonical home is
   the existing `run_supervision_record.sh` helper.
@@ -83,9 +81,9 @@ integrations, debugging, and migration.
 ## Rollout + rollback
 
 Roll out by extending `run_supervision_record_smoke.sh` with temporary run-supervision roots, verifying that
-`start`, `checkpoint`, `link-pod`, and `status` behave as the documented aliases, preserve fail-closed behavior,
-and leave the existing `create`/`update`/`show`/`close`/`stop` behavior unchanged. The existing gpu-job smokes
-remain the pod-lease coverage.
+`start`, `checkpoint`, and `status` behave as documented, preserve fail-closed behavior, and leave the existing
+`create`/`update`/`show`/`close`/`stop` behavior unchanged. Bump the `experiment-lifecycle` plugin version so
+consumers pick up the executor-facing behavior change. The existing gpu-job smokes remain the pod-lease coverage.
 
 Rollback is a normal revert of this PR. Because the original helper commands remain unchanged, reverting only
 removes the aliases/status surface and restores the previous explicit protocol.
