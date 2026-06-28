@@ -121,9 +121,14 @@ for a in "\$@"; do
 done
 if [ "\$is_push" = 1 ]; then
   echo "GIT_PUSH_ATTEMPT: \$*" >> "$MUTLOG"
+  # classify SSH vs HTTPS — the push url may be userinfo-stripped (#166 r18c): ssh://… , git@host:… , or a
+  # bare scp-style host:path (has ':' but no '://' and not https://). Everything else (https://…) is HTTPS.
   case "\$purl" in
-    git@*|ssh://*) outcome=\${READONLY_SMOKE_GIT_SSH:-rejected} ;;
-    *)             outcome=\${READONLY_SMOKE_GIT_HTTPS:-rejected} ;;
+    https://*)              outcome=\${READONLY_SMOKE_GIT_HTTPS:-rejected} ;;
+    ssh://*|git@*)          outcome=\${READONLY_SMOKE_GIT_SSH:-rejected} ;;
+    *://*)                  outcome=\${READONLY_SMOKE_GIT_HTTPS:-rejected} ;;
+    *:*)                    outcome=\${READONLY_SMOKE_GIT_SSH:-rejected} ;;   # bare scp-style host:path
+    *)                      outcome=\${READONLY_SMOKE_GIT_HTTPS:-rejected} ;;
   esac
   case "\$outcome" in
     accepted)    echo "To \$purl (dry run)"; exit 0 ;;
@@ -513,6 +518,28 @@ if grep 'GIT_PUSH_ATTEMPT' "$MUTLOG" | grep -q 'PUSHARGVTOKEN'; then
   fail "F1 r18b: a credential-bearing origin exposed its token in the git push argv"
 else
   pass "F1 r18b: git push argv is userinfo-stripped (token not in child argv)"
+fi
+
+# F1/F2 r18c: an SSH/scp credential-bearing GitHub origin must ALSO be userinfo-stripped in the push argv.
+for spec in "ssh://git:SSHURLSECRET@github.com/o/r.git:SSHURLSECRET" "git@github.com:o/r.git:n/a"; do
+  ourl=${spec%:*}; tok=${spec##*:}
+  WTx="$TMP/wt-ssh-$RANDOM"; mkdir -p "$WTx"
+  "$REAL_GIT" -C "$WTx" init -q
+  "$REAL_GIT" -C "$WTx" remote add origin "$ourl"
+  : > "$MUTLOG"
+  RO_TARGET="$WTx" run_strict "RO_aaa" "" "" denied rejected || true
+  if [ "$tok" != "n/a" ] && grep 'GIT_PUSH_ATTEMPT' "$MUTLOG" | grep -q "$tok"; then
+    fail "F1/F2 r18c: SSH credential-bearing origin leaked '$tok' into the push argv"
+  else
+    pass "F1/F2 r18c: $ourl -> push argv userinfo-stripped"
+  fi
+done
+
+# F3 r18c (structural): doctor_token's 'cannot access' failure message redacts userinfo in the repo value.
+if grep -q 'cannot access \$(redact_userinfo "\$repo")' "$WF"; then
+  pass "F3 r18c: doctor_token redacts userinfo in its repo-access failure message"
+else
+  fail "F3 r18c: doctor_token still prints a raw (possibly tokenized) repo value"
 fi
 
 # F1 r18 (behavioral): an ENV-INJECTED credential helper (GIT_CONFIG_COUNT/KEY/VALUE) must be neutralized by

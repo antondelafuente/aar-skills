@@ -1046,7 +1046,7 @@ doctor_token(){  # doctor_token <family> <repo> <label>; returns 0 ok, 1 missing
   if full=$(GH_TOKEN="$tok" real_gh api "repos/$repo" --jq .full_name 2>/dev/null); then
     echo "  $label token: ok (repo access=$full)"; return 0
   fi
-  echo "  $label token: minted but cannot access $repo"; return 2
+  echo "  $label token: minted but cannot access $(redact_userinfo "$repo")"; return 2
 }
 
 doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 invalid
@@ -1290,12 +1290,25 @@ readonly_probe_one_push_url(){
       ;;
     *) parsed_path="" ;;
   esac
-  # Build a USERINFO-STRIPPED push URL so a credential-bearing origin
-  # (https://user:TOKEN@github.com/o/r) never exposes its token in the `git push` child argv (visible via ps)
-  # — the credential is supplied via the read-only shim, not the URL (#166 code-review F1 r18b). For HTTPS we
-  # reconstruct https://host[/path]; scp-style / ssh:// carry no secret userinfo (just `git@`), so pass as-is.
+  # Build a USERINFO-STRIPPED push URL for EVERY accepted GitHub form, so a credential-bearing origin never
+  # exposes a secret in the `git push` child argv (#166 code-review F1/F2 r18c). The credential under test is
+  # the AMBIENT one (resolved by `git credential fill` + replayed via the shim); a credential EMBEDDED in the
+  # remote URL is an explicit, non-ambient credential and is deliberately NOT replayed — the ambient surface is
+  # still fully covered because we ALSO probe the synthesized clean github.com URLs. So dropping URL userinfo
+  # neither leaks a secret nor weakens the ambient-credential alarm.
   case "$url" in
-    https://*) if [ -n "$parsed_path" ]; then push_url="https://${parsed_host}/${parsed_path}"; else push_url="https://${parsed_host}/"; fi ;;
+    https://*)
+      if [ -n "$parsed_path" ]; then push_url="https://${parsed_host}/${parsed_path}"; else push_url="https://${parsed_host}/"; fi ;;
+    ssh://*)
+      # ssh://[user[:secret]@]host[:port]/path -> ssh://host/path (drop ALL userinfo incl. any secret).
+      local sshrest=${url#ssh://} sshauth sshport=""
+      sshauth=${sshrest%%/*}; local sshpath=${sshrest#*/}; [ "$sshpath" = "$sshrest" ] && sshpath=""
+      sshauth=${sshauth##*@}                              # drop userinfo
+      case "$sshauth" in *:*) sshport=":${sshauth#*:}"; sshauth=${sshauth%%:*} ;; esac
+      if [ -n "$sshpath" ]; then push_url="ssh://${sshauth}${sshport}/${sshpath}"; else push_url="ssh://${sshauth}${sshport}/"; fi ;;
+    *@*:*)
+      # scp-style user@host:path -> strip a leading `user@` (could be user:secret@); keep host:path.
+      push_url="${parsed_host}:${url#*:}" ;;
     *) push_url=$url ;;
   esac
   # `git credential fill` resolves the ambient credential using git's OWN rules (handles helpers with args,
