@@ -73,12 +73,7 @@ calibration discipline as the claim checker; the close mode validated 2026-06-12
 Verifier output is atomic: `audit_experiment.sh` writes the model response to a temp file and moves it to the
 final findings path only after the verifier exits successfully. While the verifier is still running, an
 absent or empty final findings file is not evidence of a hang; inspect the process/log state instead of killing
-or retrying solely because the findings file has not appeared. **But bound the wait** — that patience is only
-the *don't-kill-too-early* half. This is a background wait, so it still needs a **deadline** and a **liveness
-check** (is the verifier process alive? is its log growing?): an absent findings file *past the deadline with
-no live process* IS the stuck signal — act on it (fail the wait, inspect, re-run), never re-wait forever.
-Silence is not progress. (Canonical rule: AGENTS.md "Bounded background waits". The `ship-change` merge gate
-caps this exact wait with a `timeout` deadline — `WF_REVIEW_TIMEOUT`.)
+or retrying solely because the findings file has not appeared.
 
 ## SWE-pipeline review: `--scaffold` (design) + `--code` (implementation)
 
