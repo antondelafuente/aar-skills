@@ -408,9 +408,11 @@ generic "not cleared."
 ### What this does NOT own (seams to siblings)
 
 - **Who may approve / the authorized-approver policy** — `approval.approver_role` is a field so a future
-  delegated-approver policy is a value change, not a schema change; *which* actors count as authorized is the
-  instance-profile's call (#153). This schema requires the executor to check `actor` against that policy, but
-  it does not define the policy.
+  delegated-approver policy is a value change, not a schema change; *which* actors count as authorized is
+  **instance config**, whose home is the instance profile (#153 — which already carries `[github.identity]` /
+  `[github.protection]` and explicitly anticipates this design-clearance record). This schema requires the
+  executor to check `actor` against that policy and names the profile as its home, but it does not define the
+  policy; #153 (or its consumer) adds the authorized-approver field there.
 - **Fetching/verifying the GitHub clearance event** — the read is performed via the shared GitHub-lifecycle
   helper (#150). This schema names what to fetch (`event_id`/`event_kind`) and the proceed condition (including
   the "must not be APPROVE", repo/PR-identity, and `CLEARANCE.json`-digest checks); the helper owns the GitHub
