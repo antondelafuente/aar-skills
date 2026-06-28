@@ -1200,10 +1200,18 @@ readonly_probe_one_push_url(){
   rm -rf "$tmp"
   if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then RO_PUSH_OUT="timed out after ${to}s: $RO_PUSH_OUT"; RO_PUSH_RC=3; return; fi
   if [ "$rc" = 0 ]; then RO_PUSH_RC=0; return; fi
+  # PRE-AUTH TRANSPORT FAILURES are NOT a read-only proof (#166 code-review F1 r3): an unknown/!verified host
+  # key, a name-resolution / connection failure, etc. fail BEFORE the credential is ever tested, so they must
+  # read INCONCLUSIVE (strict-fail), never read-only. Check these FIRST so they win over a generic match.
   case "$RO_PUSH_OUT" in
-    *[Aa]uthentication*|*[Pp]ermission\ denied*|*403*|*[Cc]ould\ not\ read\ Username*|*terminal\ prompts\ disabled*|*[Ff]atal:\ could\ not\ read*|*Host\ key\ verification*|*publickey*)
+    *Host\ key\ verification*|*Could\ not\ resolve\ host*|*Connection\ timed\ out*|*Connection\ refused*|*Network\ is\ unreachable*|*Name\ or\ service\ not\ known*|*Temporary\ failure\ in\ name\ resolution*|*kex_exchange*|*Connection\ reset*)
+      RO_PUSH_RC=3; return ;;
+  esac
+  case "$RO_PUSH_OUT" in
+    # genuine AUTH rejections (the credential was tested and refused) -> read-only on this surface.
+    *[Aa]uthentication\ failed*|*[Pp]ermission\ denied*|*403*|*[Cc]ould\ not\ read\ Username*|*terminal\ prompts\ disabled*|*[Ff]atal:\ could\ not\ read\ Username*)
       RO_PUSH_RC=2 ;;
-    *) RO_PUSH_RC=3 ;;
+    *) RO_PUSH_RC=3 ;;   # anything else -> inconclusive (strict-fail), never an unproven PASS
   esac
 }
 

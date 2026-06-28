@@ -115,6 +115,7 @@ if [ "\$is_push" = 1 ]; then
   esac
   case "\$outcome" in
     accepted) echo "To \$purl (dry run)"; exit 0 ;;
+    hostkey)  echo "Host key verification failed." >&2; echo "fatal: Could not read from remote repository." >&2; exit 128 ;;
     *) echo "fatal: Authentication failed for '\$purl'" >&2; exit 128 ;;
   esac
 fi
@@ -225,6 +226,16 @@ fi
 : > "$MUTLOG"
 RO_TARGET="$WT" RO_GIT_SSH=rejected run_strict "RO_aaa" "" "" denied rejected || true
 echo "$RO_OUT" | grep -q 'ambient git push: read-only' && pass "F1: SSH+HTTPS both rejected -> read-only" || fail "F1: both-rejected should be read-only"
+
+# fixture 9 (F1 r3): a PRE-AUTH transport failure (host key verification failed) must read INCONCLUSIVE ->
+# strict-FAIL, NOT read-only — SSH failed before the credential was ever tested.
+: > "$MUTLOG"
+RO_TARGET="$WT" RO_GIT_SSH=hostkey run_strict "RO_aaa" "" "" denied rejected
+if [ $? -eq 0 ]; then
+  fail "host-key-verification (pre-auth) must NOT certify read-only (strict-fail)"
+else
+  echo "$RO_OUT" | grep -q 'ambient git push: inconclusive' && pass "F1 r3: pre-auth host-key failure -> inconclusive (strict-fail, not read-only)" || fail "F1 r3: pre-auth failure should be inconclusive"
+fi
 
 # --- MUTATION-FREEDOM: across ALL fixtures, the only write-shaped calls were the advisory PATCH probe and the
 #     --dry-run push; assert the fake never performed a real mutation (it can't, by construction) AND that the
