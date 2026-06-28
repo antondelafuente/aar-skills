@@ -73,18 +73,28 @@ base-sourced merge-authority step distinct from the cosmetic body assembly. A br
 closing-ref selection could make the PR close a different (e.g. already-`ready`) issue and slip the disposition
 gate — exactly the hole this split prevents.
 
-**Review posting — split inside `run_review`.** The *verdict computation* (locate the reviewer, run it, parse
-`SUMMARY:`, decide APPROVE/REQUEST_CHANGES, the zero-HIGH gate) is merge-authority. The act of **posting a
-native review** (`gh api .../pulls/$pr/reviews` with `event=APPROVE`, bound to the head SHA) is *also*
-merge-authority — a branch that rewrote the posting call could forge the merge-satisfying APPROVE or
-mis-bind the SHA. Only `review_summary_text` and the markdown formatting of the comment body are pure rendering
-(runtime). So in `run_review`, everything except the human-readable text assembly is base-sourced.
+**Review posting — split inside `run_review`.** The *verdict mechanism* (locate the reviewer, run it, parse
+`SUMMARY:`) is merge-authority. The act of **posting a native review** (`gh api .../pulls/$pr/reviews` with
+`event=APPROVE`, bound to the head SHA) is *also* merge-authority — a branch that rewrote the posting call could
+forge the merge-satisfying APPROVE or mis-bind the SHA. The **decision of which event to post** (whether the
+verdict clears the gate) is the consumer's merge-policy (raw zero-HIGH vs zero-unresolved-HIGH, FINDING 2), fed
+*into* the base-sourced poster — not baked into the shared primitive. Only `review_summary_text` and the
+markdown formatting of the comment body are pure rendering (runtime). So in `run_review`, everything except the
+human-readable text assembly is base-sourced, and the gate-clears-or-not call is supplied by the consumer.
 
-**Merge gate (MERGE-AUTHORITY).** Locate the cross-family reviewer from a trusted base ref (`locate_audit`),
-run it under a bounded wait (`run_verifier_bounded`), parse the authoritative `SUMMARY:` verdict fail-closed
-(`require_valid_review`, `count_high/med/low`, `count_all`, `sum_line`), and the final-SHA re-review +
-zero-HIGH merge decision. Base-sourced. (`audit_from_base_ref` is the *loader* for these, with the bootstrap
-subtlety resolved in decision 2 — it is not itself loaded as a branch-suppliable merge-authority function.)
+**Merge MECHANISM (MERGE-AUTHORITY) — but NOT the merge-decision policy (round-2/round-3 FINDING 2).** The
+shared library exports the *mechanism*: locate the cross-family reviewer from a trusted base ref
+(`locate_audit`), run it under a bounded wait (`run_verifier_bounded`), parse the authoritative `SUMMARY:`
+verdict fail-closed (`require_valid_review`, `count_high/med/low`, `count_all`, `sum_line`), SHA-bound native
+posting, and the final-SHA re-review **execution**. These are base-sourced. But the **merge-DECISION policy
+stays in each consumer**, because the two flows differ: ship-change merges on **raw zero-HIGH**, while #130
+decision 2 requires the experiment close gate to merge on **zero-*unresolved*-HIGH** — a triage-aware decision
+that "cannot simply parse `high=0`" (a legitimately-justified HIGH must pass). So the shared primitive returns
+the parsed verdict + runs the re-review; **ship-change's raw `high=0` check stays in `wf.sh`**, and
+`run-experiment` applies its own triage-artifact policy (#151) before requesting the native approval/merge. The
+library never bakes in one flow's merge policy. (`audit_from_base_ref` is the *loader* for these, with the
+bootstrap subtlety resolved in decision 2 — it is not itself loaded as a branch-suppliable merge-authority
+function.)
 
 **Repo/branch + diff/base selection (MERGE-AUTHORITY).** `gh_repo`, `wt_branch`, `base_ref`, `wt_pr`,
 `require_clean`, `main_checkout` — these *select the repo, the branch, the integration base, and the reviewed
@@ -94,7 +104,9 @@ selection effect) are runtime.
 
 What stays in `wf.sh` (NOT extracted): the disposition close-gate (`disposition_gate`, the `ready` /
 `needs-design` issue contract), the finding-disposition state machine (`fd_*`, #137/#139), the classifier
-invocation, and the `--design` doc-only diff guard. These are ship-change policy, not shared mechanism. The
+invocation, the `--design` doc-only diff guard, **and the raw zero-HIGH merge-decision policy** (FINDING 2 —
+the shared library runs the re-review and parses the verdict; whether `high=0` clears the gate is ship-change's
+own call). These are ship-change policy, not shared mechanism. The
 experiment flow has its own analogues (the triage-artifact schema #151, the design-clearance schema #145) and
 must not inherit ship-change's. **This is the load-bearing line of the whole extraction: the library is the
 GitHub *mechanism*; each flow keeps its own *policy*.**
@@ -146,32 +158,39 @@ keep itself honest. The resolution is a **minimal trusted loader that stays outs
 
 A loader that base-sources the *library* still leaves a hole: the **driver itself** (`wf.sh`,
 `run-experiment`) is branch-controlled when a PR edits *that file* — and ship-change PRs do edit `wf.sh`. A
-poisoned driver could simply not call the loader, or call the library directly from the branch, bypassing the
-whole split. So the trust boundary must terminate in **base-materialized code**, not a branch stub. The rule:
+branch-resident bootstrap, however "inert," is still removable or conditionable by a poisoned PR *before* it
+reaches the trusted boundary (round-3 FINDING 1). **So the boundary must not be reached *through* branch code at
+all.** The rule:
 
-- **Merge-authority steps run only through a base-materialized driver.** Before executing any merge-authority
-  step (the merge gate, native-APPROVE posting, closing-ref selection, identity resolution for a privileged
-  write), the driver **re-execs itself from the trusted base ref**: a fixed bootstrap at the top of the driver
-  materializes the base copy of the driver (same `git archive`-to-cache mechanism) and re-execs the command
-  through it, setting a guard env var so the re-exec'd (trusted) copy runs the real work and does not loop.
-  After re-exec, *all* subsequently-sourced merge-authority code (the loader and the library) is reached from
-  the trusted driver, so a branch edit to `wf.sh`/`run-experiment` cannot reach a merge-authority step at all.
-- **The bootstrap is the only branch-resident code on the path, and it is inert.** It carries no gate logic —
-  it only names the base ref + the driver path + re-execs — and the **poisoned-driver smoke proves it**: the
-  smoke poisons the *driver file on the branch* (not just the library) and asserts the merge gate still runs the
-  trusted base behavior (the poison did not take effect). This is strictly stronger than the poisoned-*helper*
-  smoke and is what makes the boundary real rather than nominal.
-- **Scope/cost note.** Re-exec-from-base is needed only for the merge-authority *entrypoints* (the commands that
-  can merge/approve/select-closing-ref), not for read-only subcommands (`doctor`, interim `design-review`
-  comments). The extraction child decides the exact set of re-exec'd entrypoints, but the rule — *no
-  merge-authority step executes from branch-resident driver code* — is settled here.
+- **Merge-authority commands enter through an installed/base-materialized launcher OUTSIDE the reviewed
+  worktree.** The agent already invokes `wf.sh` from the **skill install**, not from the worktree under review
+  (SKILL.md: "`wf.sh` is `scripts/wf.sh` in this skill"; #69's source-first discovery drives reviews "from the
+  main checkout's `wf.sh`"). That property is made **load-bearing and explicit**: the merge-authority entrypoint
+  is the installed/base launcher, and it *materializes the driver + library from the trusted base ref* itself —
+  it never sources or executes the worktree's copy of the driver. The reviewed worktree's `wf.sh` /
+  `run-experiment` is treated as **data under review, not the security boundary**: when a branch-local driver is
+  invoked for a merge-authority command, it is a **refusing stub** that hands off to (or errors directing the
+  caller to) the base launcher — it never runs the gate itself.
+- **The launcher carries the only trusted bootstrap, and it lives in base/install — not on the branch.** Because
+  the launcher is not part of the reviewed diff, a PR that poisons the worktree's driver cannot remove or
+  condition it. The **poisoned-driver smoke proves it**: the smoke poisons the *driver file on the branch* (not
+  just the library), invokes a merge-authority command, and asserts the gate ran the trusted base behavior (the
+  poison did not take effect, and the branch driver did not become the boundary). Strictly stronger than the
+  poisoned-*helper* smoke.
+- **Scope/cost note.** The base-launcher entry is needed only for the merge-authority *commands* (those that can
+  merge/approve/select-closing-ref/mint a privileged write), not for read-only subcommands (`doctor`, interim
+  `design-review` comments), which may run from the worktree copy. The extraction child decides the exact set of
+  base-entry commands, but the rule — *no merge-authority command's security boundary is branch-resident; it
+  enters through the installed/base launcher* — is settled here.
 
-The chain that terminates: branch bootstrap (inert, re-execs) → base-materialized driver → base-sourced loader
-→ base-sourced merge-authority library. The split is drawn at the function level rather than file level so the
+The chain that terminates **entirely outside the reviewed worktree**: installed/base launcher → base-materialized
+driver → base-sourced loader → base-sourced merge-authority library; the worktree driver is data, a refusing
+stub for merge-authority commands. The split is drawn at the function level rather than file level so the
 boundary survives future edits: a new function lands on one side of the line explicitly. The extraction child
-implements the loader + the re-exec-from-base entrypoint guard + the base-ref materialization for the
-merge-authority set + **both** smokes (poisoned helper *and* poisoned driver); the boundary itself is no longer
-open design (this doc settles which functions are merge-authority and that the entrypoint must be base-trusted).
+implements the base launcher + the loader + the base-ref materialization for the merge-authority set + **both**
+smokes (poisoned helper *and* poisoned driver); the boundary itself is no longer open design (this doc settles
+which functions are merge-authority and that the merge-authority entrypoint lives in base/install, never on the
+branch).
 
 ### 3. Host — a neutral GitHub-lifecycle runtime helper, not the build plugin, not the audit plugin
 
@@ -292,8 +311,9 @@ only carries the identity/posting mechanics and the merge-authority trust split.
   mirror gain the new plugin; `.aar-ci/fake_home_smoke.sh` gains a cross-plugin install assertion (each consumer
   + its declared helper dependency resolves in a virgin HOME).
 - **`aar-engineering` / `wf.sh`** is refactored to source the shared library instead of carrying its own copies
-  of the extracted primitives, *and* to add the re-exec-from-base entrypoint guard (decision 2) on its
-  merge-authority subcommands. This is the one cross-cutting edit #130 flagged. `wf.sh`'s public subcommand
+  of the extracted primitives, *and* to route its merge-authority subcommands through the installed/base
+  launcher (decision 2 — the worktree driver becomes a refusing stub for those). This is the one cross-cutting
+  edit #130 flagged. `wf.sh`'s public subcommand
   surface (`start`/`open`/`design-review`/`code-review`/`classify`/`finish`/`issue`/`comment`/`doctor`/`fdispo`)
   is **unchanged** — the refactor is internal. The disposition gate, `fd_*` state, classifier, and `--design`
   guard stay in `wf.sh` (decision 1); the closing-ref selection is split out of `render_pr_body` as
@@ -317,7 +337,8 @@ extraction child(ren). Staging of the *implementation*:
 
 1. **Land the new plugin + the `wf.sh` refactor in one PR, behavior-identical.** The extracted library is
    sourced by `wf.sh`; the merge-authority subset is materialized from the trusted base ref and reached only via
-   the re-exec-from-base entrypoint guard (decision 2); the marketplace/README/Codex-mirror install surface and
+   the installed/base launcher (decision 2 — the worktree driver is a refusing stub for merge-authority
+   commands); the marketplace/README/Codex-mirror install surface and
    the cross-plugin smoke (decision 4) land in the same PR; the **poisoned-helper smoke, the new poisoned-driver
    smoke, and the existing `locate_audit_smoke`** all pass; `wf.sh`'s subcommand surface and output are
    unchanged. This PR ships through ship-change's *own* `--code` gate — i.e. the machinery refactors itself under
