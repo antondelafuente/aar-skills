@@ -533,6 +533,13 @@ for spec in "ssh://git:SSHURLSECRET@github.com/o/r.git:SSHURLSECRET" "git@github
   else
     pass "F1/F2 r18c: $ourl -> push argv userinfo-stripped"
   fi
+  # F1 r18d: the SSH username `git` (required, not a secret) MUST be retained — a username-less github SSH push
+  # would auth as the local Unix user and false-negative a writable key.
+  if grep 'GIT_PUSH_ATTEMPT' "$MUTLOG" | grep -Eq -- '(git@github.com:|ssh://git@github.com)'; then
+    pass "F1 r18d: $ourl -> push argv keeps the required git@ SSH username"
+  else
+    fail "F1 r18d: SSH push argv dropped the required git@ username (would auth as local user)"
+  fi
 done
 
 # F3 r18c (structural): doctor_token's 'cannot access' failure message redacts userinfo in the repo value.

@@ -1296,19 +1296,29 @@ readonly_probe_one_push_url(){
   # remote URL is an explicit, non-ambient credential and is deliberately NOT replayed — the ambient surface is
   # still fully covered because we ALSO probe the synthesized clean github.com URLs. So dropping URL userinfo
   # neither leaks a secret nor weakens the ambient-credential alarm.
+  # SSH auth is KEY-based and GitHub REQUIRES the username `git` (it is the literal SSH user, NOT a secret) — so
+  # for SSH/scp forms we KEEP the username (defaulting to `git`) and strip only a `:password` if any; dropping
+  # the username entirely would make ssh try the local Unix user and false-negative a writable github key (#166
+  # code-review F1 r18d). For HTTPS the userinfo IS the credential, so it's fully dropped (cred via the shim).
+  local ssh_user
   case "$url" in
     https://*)
       if [ -n "$parsed_path" ]; then push_url="https://${parsed_host}/${parsed_path}"; else push_url="https://${parsed_host}/"; fi ;;
     ssh://*)
-      # ssh://[user[:secret]@]host[:port]/path -> ssh://host/path (drop ALL userinfo incl. any secret).
+      # ssh://[user[:secret]@]host[:port]/path -> ssh://<user>@host[:port]/path (keep user, drop :secret).
       local sshrest=${url#ssh://} sshauth sshport=""
       sshauth=${sshrest%%/*}; local sshpath=${sshrest#*/}; [ "$sshpath" = "$sshrest" ] && sshpath=""
-      sshauth=${sshauth##*@}                              # drop userinfo
+      case "$sshauth" in *@*) ssh_user=${sshauth%@*}; ssh_user=${ssh_user%%:*}; sshauth=${sshauth##*@} ;; *) ssh_user=git ;; esac
+      [ -n "$ssh_user" ] || ssh_user=git
       case "$sshauth" in *:*) sshport=":${sshauth#*:}"; sshauth=${sshauth%%:*} ;; esac
-      if [ -n "$sshpath" ]; then push_url="ssh://${sshauth}${sshport}/${sshpath}"; else push_url="ssh://${sshauth}${sshport}/"; fi ;;
+      if [ -n "$sshpath" ]; then push_url="ssh://${ssh_user}@${sshauth}${sshport}/${sshpath}"; else push_url="ssh://${ssh_user}@${sshauth}${sshport}/"; fi ;;
     *@*:*)
-      # scp-style user@host:path -> strip a leading `user@` (could be user:secret@); keep host:path.
-      push_url="${parsed_host}:${url#*:}" ;;
+      # scp-style [user[:secret]@]host:path -> <user>@host:path (keep user, drop any :secret).
+      ssh_user=${url%@*}; ssh_user=${ssh_user%%:*}; [ -n "$ssh_user" ] || ssh_user=git
+      push_url="${ssh_user}@${parsed_host}:${url#*:}" ;;
+    *:*)
+      # bare scp-style host:path with NO user -> add the required `git@`.
+      push_url="git@${url}" ;;
     *) push_url=$url ;;
   esac
   # `git credential fill` resolves the ambient credential using git's OWN rules (handles helpers with args,
