@@ -66,6 +66,8 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh doctor <author> [repo-or-worktree] report ambient + engineer identity readiness without printing tokens
   wf.sh locate-audit [repo]               print the verify-claims reviewer that would run (introspection/test)
   wf.sh dispositions                       print close-gate disposition labels (one per line)
+  wf.sh install-gh-guard [bindir]         install the gh write-guard wrapper ahead of gh on PATH (default ~/.local/bin)
+  wf.sh uninstall-gh-guard [bindir]       remove the gh write-guard wrapper
   wf.sh help                              this message
 
 <author> = claude | codex (the OPPOSITE family reviews). If an engineer identity is configured for that author,
@@ -85,7 +87,7 @@ SELF_REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")" && git rev-parse --show-toplevel
 ORIGIN_REPO=${ORIGIN_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || echo "$SELF_REPO")}
 
 need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; }
-need_ambient_gh(){ [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
+need_ambient_gh(){ [ -n "${GH_TOKEN:-}" ] || real_gh auth status >/dev/null 2>&1 \
   || die "no GitHub auth — run 'gh auth login' or export GH_TOKEN before invoking; wf.sh sources no env file"; }
 ambient_identity_allowed(){ [ "${WF_ALLOW_AMBIENT_IDENTITY:-0}" = 1 ]; }
 ambient_identity_hint="Source the engineer-token env before running, or set WF_ALLOW_AMBIENT_IDENTITY=1 for a deliberate ambient-auth workflow run."
@@ -99,7 +101,7 @@ post_ambient_pr_trail(){  # post_ambient_pr_trail <worktree> <pr> <action>
   local wt=$1 pr=$2 action=$3 repo body
   repo=$(gh_repo "$wt")
   body=$(ambient_override_notice "$action")
-  echo "$body" | gh -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
+  echo "$body" | real_gh -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
     || note "WARN: could not post ambient-identity override note to PR #$pr (non-fatal; terminal warning already emitted)"
 }
 
@@ -372,14 +374,56 @@ author_token_optional(){
   echo "$tok"
 }
 
+# real_gh — the ONE marked internal gh helper (#165). EVERY internal gh call in wf.sh must go through this
+# (directly or via gh_author): it sets WF_GH_INTERNAL=1 so the gh write-guard wrapper (scripts/gh-guard.sh),
+# if installed ahead of gh on PATH, passes the call straight through to the real gh instead of redirecting it.
+# A GH_TOKEN swap is invisible to a PATH wrapper, so this explicit marker — not "no engineer token present" —
+# is the bypass signal. The .aar-ci static check (gh_guard_static_check.sh) fails the build on any unmarked
+# `gh`/`GH_TOKEN=… gh` call in this file so a future call site cannot silently regress the bypass.
+real_gh(){ WF_GH_INTERNAL=1 gh "$@"; }
+
 gh_author(){  # gh_author <author-token-or-empty> <gh args...>
   local tok=$1; shift
-  if [ -n "$tok" ]; then GH_TOKEN="$tok" gh "$@"; else gh "$@"; fi
+  if [ -n "$tok" ]; then GH_TOKEN="$tok" real_gh "$@"; else real_gh "$@"; fi
 }
 
+# git_push_author — push as the engineer identity, FORCING a one-shot engineer credential (#165). Askpass
+# alone is bypassable: a stored owner HTTPS credential helper (~/.git-credentials / keychain) or an SSH
+# remote authenticates OUTSIDE GH_TOKEN. So when an engineer token is present we rewrite the push to an
+# explicit tokenized HTTPS URL computed from the remote AND disable credential helpers for that one push
+# (`-c credential.helper=`), so neither a stored helper nor an SSH key can win. WF_GH_INTERNAL=1 marks the
+# push so a `gh auth git-credential` helper invocation by git passes the guard. With no token we fall back
+# to a plain push (ambient identity) for unenforced/permissive installs.
 git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args...>
   local tok=$1 wt=$2; shift 2
-  if [ -n "$tok" ]; then GH_TOKEN="$tok" git -C "$wt" push "$@"; else git -C "$wt" push "$@"; fi
+  if [ -z "$tok" ]; then WF_GH_INTERNAL=1 git -C "$wt" push "$@"; return; fi
+  # Derive the effective PUSH url for origin (honors an explicit `remote set-url --push`, else the fetch url).
+  local remote_url owner_repo push_url
+  remote_url=$(git -C "$wt" remote get-url --push origin 2>/dev/null) || die "git_push_author: no origin remote in $wt"
+  case "$remote_url" in
+    https://*github.com/*|git@github.com:*)
+      # A real GitHub remote: FORCE the engineer credential. Askpass alone is bypassable by a stored owner
+      # HTTPS helper or an SSH remote, so rewrite to an explicit tokenized HTTPS URL AND clear credential
+      # helpers for THIS push (-c credential.helper=) so no ambient owner credential (stored helper or SSH
+      # key) can win. Callers pass the remote name `origin`; swap the first literal `origin` for the URL.
+      owner_repo=$(printf '%s' "$remote_url" | sed -E 's#(git@github\.com:|https://[^/]*github\.com/)##; s#\.git$##')
+      case "$owner_repo" in
+        */*) push_url="https://x-access-token:${tok}@github.com/${owner_repo}.git" ;;
+        *)   die "git_push_author: could not derive owner/repo from origin url '$remote_url'" ;;
+      esac
+      local a args=() swapped=0
+      for a in "$@"; do
+        if [ "$swapped" = 0 ] && [ "$a" = origin ]; then args+=("$push_url"); swapped=1; else args+=("$a"); fi
+      done
+      [ "$swapped" = 1 ] || die "git_push_author: expected an 'origin' remote arg to replace with the tokenized URL"
+      WF_GH_INTERNAL=1 GH_TOKEN="$tok" git -C "$wt" -c credential.helper= push "${args[@]}"
+      ;;
+    *)
+      # Non-GitHub push remote (e.g. a local file:// remote in tests, or a mirror). No tokenized-URL rewrite
+      # applies; push as given with the token in the env (and the marker so any gh credential-helper passes).
+      WF_GH_INTERNAL=1 GH_TOKEN="$tok" git -C "$wt" push "$@"
+      ;;
+  esac
 }
 
 wt_branch(){ git -C "$1" rev-parse --abbrev-ref HEAD; }                       # branch of a worktree
@@ -448,8 +492,8 @@ fd_review_high_github(){  # fd_review_high_github <repo> <pr> <pk> <read-token> 
   local reviews comments body
   # per_page=100 (no --paginate): a PR with >100 reviewer reviews/comments is implausible, and --paginate over
   # array endpoints needs --slurp gymnastics. Both surfaces run_review posts to: native reviews + issue comments.
-  reviews=$(GH_TOKEN="$tok" gh api "repos/$repo/pulls/$pr/reviews?per_page=100" 2>/dev/null) || return 2
-  comments=$(GH_TOKEN="$tok" gh api "repos/$repo/issues/$pr/comments?per_page=100" 2>/dev/null) || return 2
+  reviews=$(GH_TOKEN="$tok" real_gh api "repos/$repo/pulls/$pr/reviews?per_page=100" 2>/dev/null) || return 2
+  comments=$(GH_TOKEN="$tok" real_gh api "repos/$repo/issues/$pr/comments?per_page=100" 2>/dev/null) || return 2
   # Trust only reviewer-LOGIN-authored bodies whose marker is at the START of the body — startswith, NOT
   # contains, so a marker QUOTED inside a fenced review body (a review OF this very change, or a sweep's
   # candidate text) can never masquerade as a real marked review. startswith alone also excludes the fresh-eyes
@@ -761,15 +805,15 @@ main_checkout(){ git -C "$1" worktree list --porcelain | awk '/^worktree /{print
 wt_pr(){
   local tok=${2:-}
   if [ -n "$tok" ]; then
-    GH_TOKEN="$tok" gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null
+    GH_TOKEN="$tok" real_gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null
   else
-    gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null
+    real_gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null
   fi
 }  # PR# for a worktree's branch
 
 doctor_ambient_gh(){  # prints status; returns 0 ok, 1 missing/bad
   local login
-  if login=$(gh api user --jq .login 2>/dev/null); then
+  if login=$(real_gh api user --jq .login 2>/dev/null); then
     echo "  ambient gh: ok (login=$login)"; return 0
   fi
   echo "  ambient gh: unavailable (gh auth login or GH_TOKEN needed for ambient fallback)"; return 1
@@ -786,7 +830,7 @@ doctor_token(){  # doctor_token <family> <repo> <label>; returns 0 ok, 1 missing
   if [ -z "$tok" ]; then
     echo "  $label token: missing ($(engineer_token_seam "$fam"))"; return 1
   fi
-  if full=$(GH_TOKEN="$tok" gh api "repos/$repo" --jq .full_name 2>/dev/null); then
+  if full=$(GH_TOKEN="$tok" real_gh api "repos/$repo" --jq .full_name 2>/dev/null); then
     echo "  $label token: ok (repo access=$full)"; return 0
   fi
   echo "  $label token: minted but cannot access $repo"; return 2
@@ -936,19 +980,19 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
     # Bind the review to the EXACT reviewed SHA via commit_id (F1): if the head advanced since we checked it,
     # the approval is for the OLD sha -> won't satisfy branch protection on the new head -> merge blocked (safe).
     # GitHub also rejects self-approval; reviewer identity == author errors here -> we fail closed (loud).
-    GH_TOKEN="$rtok" gh api -X POST "repos/$repo/pulls/$pr/reviews" \
+    GH_TOKEN="$rtok" real_gh api -X POST "repos/$repo/pulls/$pr/reviews" \
         -f commit_id="$sha" -f event="$event" -f body="$body" >/dev/null \
       || die "could not post the native $event review (commit $sha) to PR #$pr as the reviewer identity — failing closed (verdict: $REVIEW_ALL findings, $REVIEW_HIGH HIGH; see $rev)"
     note "posted NATIVE review ($event @ ${sha:0:8}) to PR #$pr as the reviewer identity"
   elif [ -n "$rtok" ]; then
     # --scaffold (or any non-code): a COMMENT attributed to the reviewer identity (so the design review reads
     # as the bot, not the author's token).
-    echo "$body" | GH_TOKEN="$rtok" gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
+    echo "$body" | GH_TOKEN="$rtok" real_gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
       || die "could not post the $mode review comment to PR #$pr as the reviewer identity — failing closed (see $rev)"
     note "posted $mode review COMMENT to PR #$pr as the reviewer identity"
   else
     # no reviewer identity configured (unenforced fallback / unsupported direction): comment under the default token
-    echo "$body" | gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
+    echo "$body" | real_gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
       || die "could not post the $mode review comment to PR #$pr — failing closed (see $rev)"
     note "posted $mode review COMMENT to PR #$pr (default token)"
   fi
@@ -1028,6 +1072,41 @@ help|-h|--help|"")  usage; exit 0 ;;
 
 dispositions)  # wf.sh dispositions — print close-gate disposition labels (introspection/test)
   sed -E 's/^\^\((.*)\)\$/\1/' <<<"$DISPO_RE" | tr '|' '\n'
+  ;;
+
+install-gh-guard)  # wf.sh install-gh-guard [bindir] — put the gh write-guard wrapper ahead of gh on PATH (#165)
+  BIND=${1:-$HOME/.local/bin}
+  GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gh-guard.sh"
+  [ -f "$GUARD" ] || die "guard wrapper not found at $GUARD"
+  command -v gh >/dev/null || die "no real gh on PATH to guard — install gh first"
+  REALGH=$(command -v gh)
+  case "$REALGH" in "$BIND"/gh) die "real gh resolves to $REALGH (inside the install dir) — point install-gh-guard at a DIFFERENT bindir that sits EARLIER on PATH than the real gh";; esac
+  mkdir -p "$BIND" || die "could not create bindir $BIND"
+  ln -sf "$GUARD" "$BIND/gh" || die "could not symlink the guard into $BIND/gh"
+  note "installed gh write-guard: $BIND/gh -> $GUARD"
+  case ":$PATH:" in
+    *":$BIND:"*)
+      if [ "$(command -v gh)" = "$BIND/gh" ]; then
+        note "active: \`gh\` now resolves to the guard. Reads pass through; bare writes are redirected to wf.sh."
+      else
+        note "WARN: $BIND is on PATH but $REALGH still resolves FIRST — move $BIND earlier on PATH for the guard to take effect."
+      fi
+      ;;
+    *) note "NEXT: add $BIND to the FRONT of PATH (e.g. export PATH=\"$BIND:\$PATH\") so the guard resolves before the real gh." ;;
+  esac
+  note "undo: wf.sh uninstall-gh-guard $BIND   (the guard is an ergonomic redirect — the read-only ambient credential is the real boundary)"
+  ;;
+
+uninstall-gh-guard)  # wf.sh uninstall-gh-guard [bindir] — remove the gh write-guard wrapper (#165)
+  BIND=${1:-$HOME/.local/bin}
+  GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gh-guard.sh"
+  if [ -L "$BIND/gh" ] && [ "$(readlink -f "$BIND/gh" 2>/dev/null)" = "$(readlink -f "$GUARD" 2>/dev/null)" ]; then
+    rm -f "$BIND/gh" && note "removed gh write-guard symlink $BIND/gh"
+  elif [ -e "$BIND/gh" ]; then
+    die "$BIND/gh exists but is not this guard's symlink — refusing to remove it (remove it by hand if intended)"
+  else
+    note "no gh write-guard symlink at $BIND/gh — nothing to remove"
+  fi
   ;;
 
 locate-audit)  # wf.sh locate-audit [context-repo] — print the verify-claims reviewer wf.sh would run (introspection/test)
@@ -1404,11 +1483,11 @@ classify)       # wf.sh classify <worktree> <author>   — advisory record (neve
     BODY=$( { ambient_override_notice "wf.sh classify on PR #$PR"; printf '\n\n%s' "$BODY"; } )
   fi
   if [ -n "$RTOK" ]; then
-    echo "$BODY" | GH_TOKEN="$RTOK" gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
+    echo "$BODY" | GH_TOKEN="$RTOK" real_gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
       || die "could not post the classification to PR #$PR as the reviewer identity — failing closed (classification was: $CLASS)"
     note "posted classification to PR #$PR as the reviewer identity"
   else
-    echo "$BODY" | gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
+    echo "$BODY" | real_gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
       || die "could not post the classification to PR #$PR — failing closed (classification was: $CLASS)"
     note "posted classification to PR #$PR (default token)"
   fi

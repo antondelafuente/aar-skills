@@ -233,6 +233,13 @@ GitHub is the durable coordination record, but it should read like a handoff to 
   (Claude plugin cache / Claude/Codex skill installs) for a repo-less invocation or a repo with no
   verify-claims in-tree. The base-ref copy is cached under the repo's git-common-dir keyed by the base commit.
 - **gh** — Issues, draft PR, PR comments, merge (authenticate `gh`: `gh auth login`, or export `GH_TOKEN`).
+  An optional **`gh` write-guard** (`scripts/gh-guard.sh`, installed via `wf.sh install-gh-guard` / removed
+  via `wf.sh uninstall-gh-guard`) sits ahead of `gh` on PATH and redirects a *bare* `gh` write to the
+  engineer path with a directed message — an **ergonomic redirect, not the security boundary** (the
+  read-only ambient credential is). It passes reads through, passes `wf.sh`'s own marked engineer calls
+  (`WF_GH_INTERNAL=1`, set by the `real_gh` helper) untouched, and honors a logged owner-maintenance
+  override `WF_GH_ALLOW_OWNER_WRITE=1` (which only suppresses the redirect — it does not grant write
+  capability). See `proposals/165-gh-write-guard-wrapper.md`.
 - **`RUNBOOK.md`** (this dir) — the as-built branch-protection config + the rollback/escape-hatch + token rotation.
 
 ## Bootstrap note

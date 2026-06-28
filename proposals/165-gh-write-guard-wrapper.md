@@ -44,11 +44,19 @@ elevated owner token).
 The **`wf.sh`↔guard bypass contract**: every internal `gh` call in `wf.sh` is routed through one marked
 real-`gh` helper (`real_gh`) that sets `WF_GH_INTERNAL=1` and resolves the real `gh` (so the guard, if on
 PATH, passes it through). `gh_author` and the review/comment/classify/finish/doctor paths all call
-`real_gh`. `git_push_author` **forces a one-shot engineer credential** — a scoped `GIT_ASKPASS` that prints
-the engineer token — so the push authenticates as the engineer even with no ambient owner Git credential,
-and runs with `WF_GH_INTERNAL=1` so that if `git push` invokes `gh` as a credential helper the guard lets it
-through. A `.aar-ci` **static check** (`gh_guard_static_check.sh`) fails the build on any unmarked `gh` /
-`GH_TOKEN=… gh` call in `wf.sh`, so a future call site cannot silently regress the bypass.
+`real_gh`. `git_push_author` **forces a one-shot engineer credential by rewriting the push to a tokenized
+HTTPS URL** (`https://x-access-token:<token>@github.com/<owner>/<repo>.git`) computed from the remote, and
+disabling Git's credential helpers for that one push (`-c credential.helper=`) so a **stored owner HTTPS
+helper or an SSH remote cannot win** — askpass alone was insufficient because stored helpers / SSH keys
+bypass it (design finding). The push also runs with `WF_GH_INTERNAL=1` so a credential-helper `gh`
+invocation passes the guard. A `.aar-ci` **static check** (`gh_guard_static_check.sh`) fails the build on
+any unmarked `gh` / `GH_TOKEN=… gh` call in `wf.sh`, so a future call site cannot silently regress the
+bypass.
+
+**`gh api` is classified default-deny.** It counts as a write (blocked) whenever it carries any non-GET
+method (`-X`/`--method` other than GET/HEAD), any field flag that implies a POST body (`-f`/`-F`/`--field`/
+`--raw-field`/`--input`), or a GraphQL `mutation`; it passes as a read only when it is clearly a GET with no
+body. This closes the `gh api --method PATCH` form already used in `wf.sh`.
 
 The **install command**: `wf.sh install-gh-guard` symlinks the wrapper into a chosen bin dir (default
 `~/.local/bin`) as `gh`, ahead of the real `gh` on PATH, and prints how to undo it; `wf.sh
@@ -57,9 +65,14 @@ the installer and owns its own PATH.
 
 A behavior smoke (`gh_guard_smoke.sh`) exercises **all directions** with a fake `gh` on PATH: a bare `gh`
 write is blocked; a credential-mutating `gh auth login` is blocked; a whitelisted `gh auth git-credential`
-passes; a read passes; a `WF_GH_INTERNAL=1` (marker) write passes; and `WF_GH_ALLOW_OWNER_WRITE=1` lets an
-owner write through. It also asserts the static check passes on the real `wf.sh` and fails on a planted
-unmarked call.
+passes; a read passes; a mutating `gh api --method PATCH` is blocked; a `WF_GH_INTERNAL=1` (marker) write
+passes; and `WF_GH_ALLOW_OWNER_WRITE=1` lets an owner write through. It then drives the **actual `wf.sh`
+internal paths** through the guard via the `real_gh` helper and `git_push_author` (review-POST shape,
+classify-POST shape, comment shape) to prove they survive the wrapper, and exercises `git_push_author`
+against a **fake hostile credential helper + a local bare-repo remote** to prove the forced tokenized URL
+wins over a stored ambient helper (the engineer push succeeds; a non-forced push using only the ambient
+helper would be authored by the helper). It also asserts the static check passes on the real `wf.sh` and
+fails on a planted unmarked call.
 
 ## Alternatives considered
 

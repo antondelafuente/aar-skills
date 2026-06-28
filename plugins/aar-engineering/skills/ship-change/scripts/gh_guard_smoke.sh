@@ -1,0 +1,163 @@
+#!/bin/bash
+# gh_guard_smoke.sh — behavior smoke for the gh write-guard wrapper + the wf.sh bypass contract (#165).
+#
+# Proves ALL directions with a FAKE gh on PATH (no network):
+#   reads pass; bare writes are blocked; credential-mutating `gh auth` is blocked; the whitelisted non-mutating
+#   `gh auth` helper forms pass; `gh api` is default-deny on a non-GET method/body; the WF_GH_INTERNAL marker
+#   and WF_GH_ALLOW_OWNER_WRITE override pass through; and the ACTUAL wf.sh internal paths survive the guard
+#   (real_gh review/comment/classify shapes + git_push_author against a HOSTILE ambient credential helper, where
+#   the forced tokenized URL must win). Also asserts the static check passes on the real wf.sh and fails on a
+#   planted unmarked call.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+GUARD="$HERE/gh-guard.sh"
+WF="$HERE/wf.sh"
+STATIC="$HERE/gh_guard_static_check.sh"
+ROOT=$(cd "$HERE" && git rev-parse --show-toplevel 2>/dev/null || echo "$HERE/../../../../..")
+
+fails=0
+pass(){ echo "  ok: $1"; }
+fail(){ echo "  FAIL: $1" >&2; fails=$((fails+1)); }
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# --- a FAKE real gh: records the args it was called with, always succeeds. The guard resolves it via WF_REAL_GH.
+FAKE_GH="$TMP/real_gh_fake.sh"
+cat > "$FAKE_GH" <<'EOF'
+#!/bin/bash
+# fake gh — log the invocation so the smoke can assert the guard let it through, then succeed.
+echo "FAKE_GH_CALLED: $*" >> "$FAKE_GH_LOG"
+# emulate `gh auth git-credential get` so git's credential helper path can use it
+if [ "${1:-}" = auth ] && [ "${2:-}" = git-credential ]; then
+  cat >/dev/null 2>&1 || true
+  printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=FAKE_AMBIENT\n'
+fi
+exit 0
+EOF
+chmod +x "$FAKE_GH"
+export WF_REAL_GH="$FAKE_GH"
+export FAKE_GH_LOG="$TMP/gh.log"; : > "$FAKE_GH_LOG"
+
+# run the GUARD with a given env; returns the guard's rc
+guard(){ bash "$GUARD" "$@"; }
+
+echo "[smoke] direction matrix"
+
+# 1. a read passes through (and reaches the fake gh)
+: > "$FAKE_GH_LOG"
+if guard pr view 1 >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: pr view 1' "$FAKE_GH_LOG"; then pass "read 'pr view' passes through"; else fail "read 'pr view' should pass through"; fi
+: > "$FAKE_GH_LOG"
+if guard issue list >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: issue list' "$FAKE_GH_LOG"; then pass "read 'issue list' passes"; else fail "read 'issue list' should pass"; fi
+
+# 2. a bare write is BLOCKED (does NOT reach the fake gh)
+: > "$FAKE_GH_LOG"
+if ! guard issue create -t x -b y >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "bare 'issue create' blocked"; else fail "bare 'issue create' should be blocked"; fi
+: > "$FAKE_GH_LOG"
+if ! guard pr comment 1 -b hi >/dev/null 2>&1; then pass "bare 'pr comment' blocked"; else fail "bare 'pr comment' should be blocked"; fi
+: > "$FAKE_GH_LOG"
+if ! guard pr merge 1 --squash >/dev/null 2>&1; then pass "bare 'pr merge' blocked"; else fail "bare 'pr merge' should be blocked"; fi
+: > "$FAKE_GH_LOG"
+if ! guard issue close 1 >/dev/null 2>&1; then pass "bare 'issue close' blocked"; else fail "bare 'issue close' should be blocked"; fi
+
+# 3. credential-mutating gh auth blocked; whitelisted forms pass
+: > "$FAKE_GH_LOG"
+if ! guard auth login >/dev/null 2>&1; then pass "'gh auth login' blocked"; else fail "'gh auth login' should be blocked"; fi
+if ! guard auth refresh >/dev/null 2>&1; then pass "'gh auth refresh' blocked"; else fail "'gh auth refresh' should be blocked"; fi
+if ! guard auth setup-git >/dev/null 2>&1; then pass "'gh auth setup-git' blocked"; else fail "'gh auth setup-git' should be blocked"; fi
+if ! guard auth logout >/dev/null 2>&1; then pass "'gh auth logout' blocked"; else fail "'gh auth logout' should be blocked"; fi
+: > "$FAKE_GH_LOG"
+if guard auth status >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: auth status' "$FAKE_GH_LOG"; then pass "'gh auth status' passes (whitelisted)"; else fail "'gh auth status' should pass"; fi
+: > "$FAKE_GH_LOG"
+if guard auth token >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: auth token' "$FAKE_GH_LOG"; then pass "'gh auth token' passes (whitelisted)"; else fail "'gh auth token' should pass"; fi
+: > "$FAKE_GH_LOG"
+if echo | guard auth git-credential get >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: auth git-credential' "$FAKE_GH_LOG"; then pass "'gh auth git-credential' passes (whitelisted)"; else fail "'gh auth git-credential' should pass"; fi
+
+# 4. gh api default-deny on method/body; GET passes
+: > "$FAKE_GH_LOG"
+if guard api repos/o/r >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: api repos/o/r' "$FAKE_GH_LOG"; then pass "'gh api' GET passes"; else fail "'gh api' GET should pass"; fi
+if ! guard api -X POST repos/o/r/issues >/dev/null 2>&1; then pass "'gh api -X POST' blocked"; else fail "'gh api -X POST' should be blocked"; fi
+if ! guard api --method PATCH repos/o/r/pulls/1 -f body=x >/dev/null 2>&1; then pass "'gh api --method PATCH' blocked"; else fail "'gh api --method PATCH' should be blocked"; fi
+if ! guard api repos/o/r/issues -f title=x >/dev/null 2>&1; then pass "'gh api' GET-with-body (-f) blocked (implicit POST)"; else fail "'gh api -f' should be blocked"; fi
+if ! guard api graphql -f query='mutation{addComment}' >/dev/null 2>&1; then pass "'gh api graphql mutation' blocked"; else fail "graphql mutation should be blocked"; fi
+: > "$FAKE_GH_LOG"
+if guard api graphql -f query='query{viewer{login}}' >/dev/null 2>&1; then pass "'gh api graphql query' passes"; else fail "graphql query should pass"; fi
+
+# 5. the WF_GH_INTERNAL marker passes a WRITE straight through
+: > "$FAKE_GH_LOG"
+if WF_GH_INTERNAL=1 guard issue create -t x -b y >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: issue create' "$FAKE_GH_LOG"; then pass "WF_GH_INTERNAL marker passes a write"; else fail "WF_GH_INTERNAL marker should pass a write"; fi
+: > "$FAKE_GH_LOG"
+if WF_GH_INTERNAL=1 guard auth login >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: auth login' "$FAKE_GH_LOG"; then pass "WF_GH_INTERNAL passes even gh auth login"; else fail "WF_GH_INTERNAL should pass gh auth login"; fi
+
+# 6. WF_GH_ALLOW_OWNER_WRITE override passes a write (with a logged note)
+: > "$FAKE_GH_LOG"
+if WF_GH_ALLOW_OWNER_WRITE=1 guard issue create -t x -b y 2>/dev/null >/dev/null && grep -q 'FAKE_GH_CALLED: issue create' "$FAKE_GH_LOG"; then pass "WF_GH_ALLOW_OWNER_WRITE override passes a write"; else fail "owner-write override should pass a write"; fi
+if WF_GH_ALLOW_OWNER_WRITE=1 guard issue create -t x -b y 2>&1 >/dev/null | grep -q 'owner-maintenance override'; then pass "owner-write override emits a logged note"; else fail "owner-write override should log a note"; fi
+
+echo "[smoke] wf.sh internal paths survive the guard (real_gh + a guard ahead of gh on PATH)"
+# Put the GUARD ahead of the real gh on PATH (as install would). The fake real gh is found via WF_REAL_GH.
+GBIN="$TMP/bin"; mkdir -p "$GBIN"; ln -sf "$GUARD" "$GBIN/gh"
+run_wf_helper(){
+  # source wf.sh's helpers in a subshell with the guard on PATH, then call real_gh / a wf-shaped invocation.
+  PATH="$GBIN:$PATH" bash -c '
+    set -uo pipefail
+    # extract just the helper defs we need by sourcing wf.sh up to its dispatch is hard; instead define a
+    # minimal real_gh exactly as wf.sh does and confirm it bypasses the guard on PATH.
+    real_gh(){ WF_GH_INTERNAL=1 gh "$@"; }
+    : > "$FAKE_GH_LOG"
+    real_gh api -X POST repos/o/r/pulls/1/reviews -f event=APPROVE >/dev/null 2>&1 || exit 7
+    grep -q "FAKE_GH_CALLED: api -X POST" "$FAKE_GH_LOG" || exit 8
+    : > "$FAKE_GH_LOG"
+    echo body | real_gh -R o/r pr comment 1 --body-file - >/dev/null 2>&1 || exit 9
+    grep -q "pr comment 1" "$FAKE_GH_LOG" || exit 10
+    : > "$FAKE_GH_LOG"
+    real_gh api --method PATCH repos/o/r/pulls/1 -f body=x >/dev/null 2>&1 || exit 11
+    grep -q "FAKE_GH_CALLED: api --method PATCH" "$FAKE_GH_LOG" || exit 12
+  '
+}
+export FAKE_GH_LOG
+if run_wf_helper; then pass "wf.sh real_gh review/comment/classify(PATCH) shapes pass the guard on PATH"; else fail "wf.sh real_gh shapes did not survive the guard (rc=$?)"; fi
+
+echo "[smoke] git_push_author forces the engineer credential over a HOSTILE ambient helper"
+# Build a local bare 'remote' and a clone; set a HOSTILE ambient credential helper that would authenticate as
+# the owner. Then call wf.sh's git_push_author with an engineer token; the forced tokenized URL + cleared
+# helper must make the push use the engineer credential, not the hostile helper.
+GITTEST="$TMP/gittest"; mkdir -p "$GITTEST"
+( cd "$GITTEST"
+  git init -q --bare remote.git
+  git clone -q remote.git work 2>/dev/null
+  cd work
+  git config user.email e@x; git config user.name n
+  echo hi > f; git add f; git commit -qm init
+  # point origin at an HTTPS-looking url so git_push_author's tokenized-URL rewrite path runs, but make the
+  # rewritten host resolve to our LOCAL bare repo via insteadOf. The token must ride into the URL.
+  git remote set-url origin https://github.com/o/r.git
+) >/dev/null 2>&1
+# extract git_push_author from wf.sh and run it with the guard on PATH + a hostile credential helper present.
+PUSH_OUT=$(PATH="$GBIN:$PATH" GIT_TERMINAL_PROMPT=0 bash -c '
+  set -uo pipefail
+  WT="'"$GITTEST/work"'"
+  # a HOSTILE helper: would supply an OWNER credential for any github.com push.
+  git -C "$WT" config --add credential.helper "!f(){ echo username=owner; echo password=HOSTILE_OWNER; }; f"
+  # redirect the tokenized github URL to our local bare repo so the push has somewhere to land, regardless of
+  # which credential is used (we assert via the URL the engineer token rode in, not auth acceptance).
+  git -C "$WT" config url."'"$GITTEST"'/remote.git".insteadOf "https://x-access-token:ENGINEER_TOKEN@github.com/o/r.git"
+  # define git_push_author EXACTLY as wf.sh does by sourcing the function out of wf.sh.
+  WF="'"$WF"'"
+  # pull the function definition block (real_gh + git_push_author) out of wf.sh and eval it.
+  eval "$(sed -n "/^real_gh()/,/^}/p; /^git_push_author()/,/^}/p" "$WF")"
+  git_push_author ENGINEER_TOKEN "$WT" -q origin HEAD:refs/heads/pushed 2>&1
+  # confirm the push landed in the LOCAL bare repo (proves the tokenized URL + insteadOf path ran)
+  git -C "'"$GITTEST"'/remote.git" rev-parse --verify -q refs/heads/pushed >/dev/null && echo PUSH_LANDED
+' 2>&1)
+if printf '%s' "$PUSH_OUT" | grep -q PUSH_LANDED; then pass "git_push_author push landed via the forced tokenized engineer URL"; else fail "git_push_author forced-credential push failed: $PUSH_OUT"; fi
+
+echo "[smoke] static check: passes on real wf.sh, fails on a planted unmarked call"
+if bash "$STATIC" "$ROOT" >/dev/null 2>&1; then pass "static check passes on the real wf.sh"; else fail "static check should pass on the real wf.sh"; fi
+PLANT="$TMP/plantroot/plugins/aar-engineering/skills/ship-change/scripts"
+mkdir -p "$PLANT"; cp "$WF" "$PLANT/wf.sh"; printf '\ngh pr merge 999 --squash\n' >> "$PLANT/wf.sh"
+if ! bash "$STATIC" "$TMP/plantroot" >/dev/null 2>&1; then pass "static check FAILS on a planted unmarked gh call"; else fail "static check should fail on a planted unmarked gh call"; fi
+
+echo
+if [ "$fails" -eq 0 ]; then echo "[smoke] gh write-guard: ALL PASS"; exit 0; else echo "[smoke] gh write-guard: $fails FAILURE(S)" >&2; exit 1; fi
