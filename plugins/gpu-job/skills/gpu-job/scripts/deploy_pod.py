@@ -247,6 +247,11 @@ def deploy(nonce=None):
                             # emergency record: bind the discovered id + force expiry NOW so the reaper
                             # reaps it if the synchronous DELETE above didn't (the one place to look).
                             lease("emergency", nonce, str(pid), check=False)
+                            # If our synchronous DELETE was accepted, persist the marker (round-11 Finding
+                            # 3) so a later reaper sweep — whose fresh DELETE would 404 (already gone) —
+                            # can still CLOSE on verified-gone instead of looping on the emergency lease.
+                            if gone:
+                                lease("mark-deleted", nonce, check=False)
                         except Exception:
                             pass
                         raise SystemExit(f"[deploy] provisional lease write failed; pod {pid} "

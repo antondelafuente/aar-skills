@@ -360,4 +360,15 @@ MOUT=$(bash "$REAPER" 2>&1)
 echo "$MOUT" | grep -q "MALFORMED lease record" && ok malformed-lease-reported || no malformed-lease-reported
 rm -f "$GPU_JOB_LEASE_DIR/gpujob-corrupt.json"
 
+# === round-11 Finding 1: teardown REFUSES a mismatched <pod-id> <nonce> pair BEFORE any DELETE ===
+TD="$HERE/teardown.sh"
+if [ -f "$TD" ]; then
+  TDN=$(lease intent RUNPOD_API_KEY --expiry-min 60); lease provisional "$TDN" pod-owner >/dev/null
+  # teardown pod-OTHER <nonce-owned-by-pod-owner> must BLOCK (exit nonzero) before reaching curl
+  if bash "$TD" pod-OTHER "$TDN" >/dev/null 2>&1; then no teardown-mismatch-blocked; else ok teardown-mismatch-blocked; fi
+  # the lease was NOT mutated by the blocked teardown (still provisional)
+  [ "$(lease show "$TDN" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = provisional ] \
+    && ok teardown-mismatch-no-mutation || no teardown-mismatch-no-mutation
+fi
+
 [ "$fails" = 0 ] && { echo "pod_reaper smoke PASS"; exit 0; } || { echo "pod_reaper smoke FAIL"; exit 1; }

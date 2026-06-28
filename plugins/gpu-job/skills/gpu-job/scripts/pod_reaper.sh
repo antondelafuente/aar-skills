@@ -149,8 +149,11 @@ keepalive_state(){ # <ssh-endpoint> <pod-id>
   local ssh=$1 ip port keyfile u now
   ip=${ssh%%:*}; port=${ssh##*:}
   keyfile=$(cfg_get SSH_KEY_FILE); keyfile=${keyfile:-$HOME/.ssh/id_ed25519}
-  u=$(ssh -i "$keyfile" -p "$port" -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
-        "root@$ip" 'cat /workspace/.keepalive_until_utc 2>/dev/null' 2>/dev/null) || { echo ""; return; }
+  # Hard overall deadline (round-11 Finding 2): ConnectTimeout only bounds the CONNECT; an established
+  # but stalled session could hang the standing reaper. `timeout` caps the whole read, BatchMode avoids
+  # any password prompt; a timeout/failure -> empty == inconclusive (the caller report-retries, never deletes).
+  u=$(timeout 30 ssh -i "$keyfile" -p "$port" -o StrictHostKeyChecking=no -o BatchMode=yes \
+        -o ConnectTimeout=15 "root@$ip" 'cat /workspace/.keepalive_until_utc 2>/dev/null' 2>/dev/null) || { echo ""; return; }
   [ -n "$u" ] || { echo "past"; return; }   # no keepalive file -> not protected
   now=$(date -u +%s)
   [ "$(date -u -d "$u" +%s 2>/dev/null || echo 0)" -gt "$now" ] && echo future || echo past

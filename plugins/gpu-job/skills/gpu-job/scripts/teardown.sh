@@ -23,6 +23,18 @@ if [ -z "$NONCE" ] && [ -f "$HERE/pod_lease.sh" ]; then
 fi
 KEY_NAME=$(grep -E "^API_KEY_ENV=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2-); KEY_NAME="${API_KEY_ENV:-${KEY_NAME:-RUNPOD_API_KEY}}"
 KEY=$(grep -E "^$KEY_NAME=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2- || eval echo "\${$KEY_NAME:?}")
+# If a nonce was supplied EXPLICITLY (arg 2), verify it OWNS this pod BEFORE issuing the DELETE
+# (round-11 Finding 1): a mismatched `<pod-id> <nonce>` pair is a caller error — abort rather than delete
+# pod $PID under a lease that belongs to a different pod. (A nonce we located ourselves by pod_id above
+# is owner-correct by construction, so this gate applies only to an explicitly-passed arg-2 nonce.)
+if [ -n "${2:-}" ] && [ -f "$HERE/pod_lease.sh" ]; then
+  owned=$(bash "$HERE/pod_lease.sh" show "$2" 2>/dev/null \
+          | python3 -c 'import json,sys;print(json.load(sys.stdin).get("pod_id") or "")' 2>/dev/null || true)
+  if [ -n "$owned" ] && [ "$owned" != "$PID" ]; then
+    echo "BLOCKED: lease $2 is bound to pod '$owned', not '$PID' — refusing to delete (mismatched pod/nonce pair)" >&2
+    exit 1
+  fi
+fi
 # Capture the DELETE's HTTP status — a non-2xx (wrong key, auth/network error) must NOT be trusted as a
 # deletion even if a follow-up GET 404s (a wrong-key GET also 404s). round-5 Finding 1.
 del_http=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 60 \
