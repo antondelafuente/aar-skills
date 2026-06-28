@@ -513,6 +513,35 @@ else
   fail "F3/asymmetric: an authz-denied (not-accepted) push must NOT block the PASS"
 fi
 
+# --- F1 r16: a HOMOGRAPH/suffix host (ssh.github.com.evil) must NOT be treated as GitHub — it is skipped
+# (never dry-run-probed, so its remote helper is never executed). An ACCEPTING evil origin therefore does NOT
+# produce a FAIL from that origin (only the synthesized real-github URLs are probed, which reject).
+WT16="$TMP/wt-homograph"; mkdir -p "$WT16"
+"$REAL_GIT" -C "$WT16" init -q
+"$REAL_GIT" -C "$WT16" remote add origin "ssh://git@ssh.github.com.evil/o/r.git"
+: > "$MUTLOG"
+RO_TARGET="$WT16" RO_GIT_SSH=accepted run_strict "RO_aaa" "" "" denied rejected || true
+if grep 'GIT_PUSH_ATTEMPT' "$MUTLOG" | grep -q 'ssh.github.com.evil'; then
+  fail "F1 r16: a homograph host (ssh.github.com.evil) was dry-run-probed (treated as GitHub)"
+else
+  echo "$RO_OUT" | grep -q 'not a GitHub remote' && pass "F1 r16: homograph host (ssh.github.com.evil) rejected by strict allowlist (not probed)" || fail "F1 r16: homograph host not flagged as non-GitHub"
+fi
+
+# --- F2 r16: MULTIPLE origin push URLs are all probed. A worktree with two pushurls where the SECOND is a
+# GitHub remote that ACCEPTS must FAIL (the second url is not missed).
+WT16b="$TMP/wt-multipush"; mkdir -p "$WT16b"
+"$REAL_GIT" -C "$WT16b" init -q
+"$REAL_GIT" -C "$WT16b" remote add origin "https://github.com/o/r.git"
+"$REAL_GIT" -C "$WT16b" remote set-url --add --push origin "https://github.com/o/r.git"
+"$REAL_GIT" -C "$WT16b" remote set-url --add --push origin "git@github.com:o/r.git"   # second pushurl (SSH)
+: > "$MUTLOG"
+RO_TARGET="$WT16b" RO_GIT_SSH=accepted run_strict "RO_aaa" "" "" denied rejected
+if [ $? -eq 0 ]; then
+  fail "F2 r16: a second (SSH) push URL that accepts must FAIL — it was missed"
+else
+  echo "$RO_OUT" | grep -q 'ambient git push: FAIL' && pass "F2 r16: all origin push URLs probed (second accepting URL -> FAIL)" || fail "F2 r16: multiple push URLs not all probed"
+fi
+
 # --- plain doctor prints the read-only section as a labeled reporter (does not require engineer identity to PASS
 #     for the read-only verdict to print). We only assert the section + verdict line appear.
 PLAIN_OUT=$(PATH="$BIN:$PATH" GH_TOKEN="RO_aaa" READONLY_SMOKE_API=denied READONLY_SMOKE_GIT=rejected \

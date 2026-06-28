@@ -1297,18 +1297,24 @@ readonly_probe_git_push(){
   # which a GitHub-credential detector must not execute (#166 code-review F2 r12); such an origin is skipped
   # (we still probe the synthesized GitHub URLs below). Mirror git_push_author's GitHub-host allowlist.
   if [ -n "$wt" ] && [ -d "$wt" ]; then
-    origin_url=$(git -C "$wt" remote get-url --push origin 2>/dev/null || true)
-    if [ -n "$origin_url" ]; then
+    # ALL push URLs, not just the first — git supports multiple `pushurl`s and a later one could be GitHub
+    # (#166 code-review F2 r16). Validate each against a STRICT GitHub-host allowlist that requires a `/` or `:`
+    # DELIMITER right after the host, so a homograph/suffix host like `ssh.github.com.evil` or
+    # `github.com.evil` is NOT treated as GitHub (#166 code-review F1 r16). A non-GitHub url is skipped (never
+    # executed — it could invoke an arbitrary remote helper) and its raw text is never echoed (userinfo leak).
+    local nongithub_seen=0
+    while IFS= read -r origin_url; do
+      [ -n "$origin_url" ] || continue
       case "$origin_url" in
-        https://github.com/*|https://*@github.com/*|https://github.com:*|https://*@github.com:*|\
+        https://github.com/*|https://github.com:*|https://*@github.com/*|https://*@github.com:*|\
         git@github.com:*|git@ssh.github.com:*|\
-        ssh://git@github.com/*|ssh://github.com/*|ssh://git@github.com:*|ssh://git@ssh.github.com*|ssh://ssh.github.com*)
+        ssh://git@github.com/*|ssh://github.com/*|ssh://git@github.com:*|ssh://github.com:*|\
+        ssh://git@ssh.github.com/*|ssh://ssh.github.com/*|ssh://git@ssh.github.com:*|ssh://ssh.github.com:*)
           urls+=("$origin_url") ;;
-        *) # NEVER print the raw origin url — it can carry userinfo (https://user:TOKEN@host/…) that would leak
-           # into doctor/CI logs (#166 code-review F1 r13). Print only that a non-GitHub origin was skipped.
-           echo "    ambient git push: note — the worktree origin is not a GitHub remote; skipped (its URL is not echoed; a non-GitHub remote helper is not executed). Probing synthesized GitHub URLs only." ;;
+        *) nongithub_seen=1 ;;
       esac
-    fi
+    done < <(git -C "$wt" remote get-url --push --all origin 2>/dev/null || true)
+    [ "$nongithub_seen" = 1 ] && echo "    ambient git push: note — a worktree origin push URL is not a GitHub remote; skipped (its URL is not echoed; a non-GitHub remote helper is not executed). Probing synthesized GitHub URLs only."
   fi
   # always include BOTH synthesized canonical surfaces for a real owner/repo — HTTPS AND SSH — so an ambient
   # SSH key that can push is probed even when no worktree origin was supplied (#166 code-review F1 r4: an
