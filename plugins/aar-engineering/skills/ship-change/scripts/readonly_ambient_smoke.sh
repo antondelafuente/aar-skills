@@ -316,10 +316,10 @@ fi
 if grep -q 'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1' "$WF" \
    && grep -q '"credential.helper=$shim"' "$WF" \
    && grep -q 'no-op store/erase (never mutate)' "$WF" \
-   && grep -q 'credential.https://github.com.helper' "$WF"; then
-  pass "F1 r8/r9: probe isolates git config (clears URL-scoped helpers) + installs a read-only shim (structural)"
+   && grep -q 'git credential fill' "$WF"; then
+  pass "F1 r8/r9/r10: probe isolates git config + resolves cred via 'git credential fill' + static replay shim (structural)"
 else
-  fail "F1 r8/r9: probe does not isolate config + shim the credential helper"
+  fail "F1 r8/r9/r10: probe does not isolate config + use git-native credential resolution"
 fi
 # behavioral shim unit: build a shim like the function does (forward get to a logging helper, no-op store/erase)
 CREDLOG="$TMP/cred-ops.log"; : > "$CREDLOG"
@@ -385,6 +385,30 @@ else
   fail "F1 r9: URL-scoped helper still ran store/erase (ops: $(tr '\n' ' ' < "$URLLOG"))"
 fi
 rm -rf "$R9TMP"
+
+# F1 r10 (behavioral): a credential helper WITH ARGUMENTS must be resolved by git's OWN parser (`git credential
+# fill`), not a hand-rolled shim that mis-quotes the args — otherwise a write-capable ambient HTTPS credential
+# goes undetected (false-pass). Assert `git credential fill` invokes the arg'd helper correctly and returns the
+# credential (the exact primitive the probe now uses).
+R10LOG="$TMP/r10-ops.log"; : > "$R10LOG"
+R10BIN="$TMP/r10bin"; mkdir -p "$R10BIN"
+cat > "$R10BIN/git-credential-argd" <<EOF
+#!/bin/bash
+op="\${@: -1}"
+echo "ARGD_OP: \$op flags=[\${@:1:\$#-1}]" >> "$R10LOG"
+[ "\$op" = get ] && printf 'username=x-access-token\npassword=AMBIENT_SECRET\n'
+exit 0
+EOF
+chmod +x "$R10BIN/git-credential-argd"
+R10GLOBAL="$TMP/r10-gitconfig"; : > "$R10GLOBAL"
+GIT_CONFIG_GLOBAL="$R10GLOBAL" "$REAL_GIT" config --global credential.helper "argd --flag=value"
+R10OUT=$(printf 'protocol=https\nhost=github.com\n\n' | \
+  GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL="$R10GLOBAL" PATH="$R10BIN:$PATH" "$REAL_GIT" credential fill 2>/dev/null || true)
+if printf '%s' "$R10OUT" | grep -q '^password=AMBIENT_SECRET' && grep -q 'ARGD_OP: get flags=\[--flag=value\]' "$R10LOG"; then
+  pass "F1 r10: git credential fill resolves a helper WITH ARGS (no false-pass from arg mis-quoting)"
+else
+  fail "F1 r10: helper-with-args not resolved by git credential fill (out=[$(printf '%s' "$R10OUT" | tr '\n' '|')] ops=[$(cat "$R10LOG")])"
+fi
 
 # --- F3: GitHub SSH authz-denial messages classify as read-only (auth-rejected), not inconclusive.
 WT3="$TMP/wt-authz"; mkdir -p "$WT3"

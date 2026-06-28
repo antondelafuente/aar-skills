@@ -1202,37 +1202,36 @@ readonly_probe_one_push_url(){
         -c user.name="wf-doctor" -c user.email="wf-doctor@local" \
         commit -q --no-verify --allow-empty -m probe 2>/dev/null
   ) || { rm -rf "$tmp"; RO_PUSH_OUT="could not stage a probe commit"; RO_PUSH_RC=3; return; }
-  # MUTATION-SAFE credential layer (#166 code-review F1 r8/r9): a successful auth on a `--dry-run` push makes
-  # git call the credential helper's `store` (verified empirically), which MUTATES the user's credential store.
-  # So we install a read-only SHIM as the SOLE helper: it forwards ONLY `get` to the inherited helper chain (so
-  # we still detect an ambient credential) and NO-OPS `store`/`erase` (so the probe can never write the store).
-  # CRITICAL (r9): git also honors URL-SCOPED helpers (`credential.https://github.com.helper`, e.g. `gh auth
-  # git-credential`) that a bare `-c credential.helper=` does NOT clear — so we ISOLATE the probe's git config
-  # entirely (GIT_CONFIG_GLOBAL/SYSTEM -> /dev/null, NOSYSTEM=1) and re-inject ONLY our shim. We snapshot BOTH
-  # the unscoped helpers AND the github.com URL-scoped helpers FIRST (from the real config) so the shim can
-  # still forward `get` to them.
+  # MUTATION-SAFE credential layer (#166 code-review F1 r8/r9/r10). A successful auth on a `--dry-run` push
+  # makes git call the credential helper's `store` (verified empirically), which MUTATES the user's credential
+  # store; and git honors URL-SCOPED helpers + helpers WITH ARGUMENTS that hand-rolled shim parsing gets wrong.
+  # So instead of re-implementing git's helper resolution, we let GIT ITSELF resolve the ambient credential
+  # read-only via `git credential fill` (run in the REAL config — fill performs ONLY the `get` step, never
+  # store/erase), then run the dry-run push under an ISOLATED config (no inherited helper can run) with a
+  # trivial STATIC helper that just replays that pre-resolved credential for `get` and no-ops store/erase.
+  # This both preserves detection (a real ambient credential is found by git's own correct parsing) and makes
+  # store/erase impossible.
   shim="$tmp/cred-ro-shim.sh"
-  helpers=$( { git config --get-all credential.helper 2>/dev/null; \
-               git config --get-all "credential.https://github.com.helper" 2>/dev/null; \
-               git config --get-all "credential.https://github.com/.helper" 2>/dev/null; } || true)
+  local cred_in cred_out parsed_host parsed_proto
+  parsed_proto=${url%%://*}; case "$url" in *://*) : ;; *) parsed_proto=ssh ;; esac
+  case "$url" in
+    https://*) parsed_host=${url#https://}; parsed_host=${parsed_host%%/*} ;;
+    *) parsed_host=github.com ;;
+  esac
+  # `git credential fill` resolves the ambient credential using git's OWN rules (handles helpers with args,
+  # url-scoped helpers, !-commands) and performs only `get` — no mutation. Prompts disabled so it can't block.
+  cred_in=$(printf 'protocol=%s\nhost=%s\n\n' "$parsed_proto" "$parsed_host")
+  cred_out=$(printf '%s' "$cred_in" | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
+               timeout "$to" git credential fill 2>/dev/null || true)
+  # build the static get-only replay helper (no-ops store/erase). Only meaningful for the HTTPS surface; SSH
+  # auth uses the key, not this helper, and the isolated config + BatchMode handle the SSH side.
   {
     printf '#!/bin/bash\n'
     printf 'op=$1\n'
     printf 'if [ "$op" != get ]; then cat >/dev/null 2>&1 || true; exit 0; fi  # no-op store/erase (never mutate)\n'
-    printf 'in=$(cat)\n'
-    # forward `get` to each inherited helper until one returns a password; emit the first hit.
-    while IFS= read -r h; do
-      [ -n "$h" ] || continue
-      # resolve the helper command form git uses: a leading "!" is a shell command; "name" -> git-credential-name;
-      # an absolute/relative path is run directly. Reuse git's own resolution by invoking `git credential-<...>`
-      # is non-trivial here, so we handle the common forms.
-      case "$h" in
-        '!'*) printf 'out=$(printf "%%s\\n" "$in" | %s get 2>/dev/null); if printf "%%s" "$out" | grep -q "^password="; then printf "%%s\\n" "$out"; exit 0; fi\n' "${h#!}" ;;
-        /*|./*) printf 'out=$(printf "%%s\\n" "$in" | %q get 2>/dev/null); if printf "%%s" "$out" | grep -q "^password="; then printf "%%s\\n" "$out"; exit 0; fi\n' "$h" ;;
-        *) printf 'out=$(printf "%%s\\n" "$in" | git credential-%q get 2>/dev/null); if printf "%%s" "$out" | grep -q "^password="; then printf "%%s\\n" "$out"; exit 0; fi\n' "$h" ;;
-      esac
-    done <<<"$helpers"
-    printf 'exit 0\n'
+    printf 'cat >/dev/null 2>&1 || true\n'
+    # replay the pre-resolved credential verbatim (may be empty -> no ambient HTTPS credential -> auth-reject).
+    printf 'cat <<'\''WF_CRED_EOF'\''\n%s\nWF_CRED_EOF\n' "$cred_out"
   } > "$shim"
   chmod +x "$shim"
   # Disable every interactive/ambient-helper PROMPT but keep the AMBIENT credential surface reachable for `get`
