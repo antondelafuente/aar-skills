@@ -1176,42 +1176,68 @@ readonly_probe_source(){
   esac
 }
 
-# readonly_probe_git_push <repo> — probe the AMBIENT git-push surface, non-mutating. `git push --dry-run` to a
-# disposable ref with ALL credential prompts disabled and the engineer credential explicitly absent, so only
-# the AMBIENT git credential is exercised. --dry-run performs auth/negotiation but does NOT update the remote.
-# Accepted -> an ambient owner credential can push -> FAIL; auth-rejected -> read-only -> PASS. Returns 0 PASS,
-# 2 FAIL, 3 inconclusive.
-readonly_probe_git_push(){
-  local repo=$1 tmp out rc url
-  url="https://github.com/$repo.git"
-  tmp=$(mktemp -d) || { echo "    ambient git push: inconclusive (mktemp failed)"; return 3; }
-  # an empty repo with one commit so there is a ref to (dry-run) push; push to a disposable ref name.
+# readonly_probe_one_push_url <url> — `git push --dry-run` ONE url with ALL credential prompts disabled and
+# the engineer credential explicitly absent, so only the AMBIENT credential is exercised. --dry-run performs
+# auth/negotiation but does NOT update the remote. Sets RO_PUSH_RC: 0 accepted (FAIL signal), 2 auth-rejected
+# (read-only), 3 inconclusive (non-auth error). Sets RO_PUSH_OUT to the captured output.
+RO_PUSH_RC=3; RO_PUSH_OUT=""
+readonly_probe_one_push_url(){
+  local url=$1 tmp rc to=${WF_GIT_PROBE_TIMEOUT:-20}
+  RO_PUSH_RC=3; RO_PUSH_OUT=""
+  tmp=$(mktemp -d) || { RO_PUSH_OUT="mktemp failed"; RO_PUSH_RC=3; return; }
   (
     git -C "$tmp" init -q 2>/dev/null
-    # set LOCAL commit identity so the probe commit never depends on a global git user.name/email (#166
-    # code-review F2): a fresh environment without global config would otherwise fail the commit -> the whole
-    # --readonly check would falsely go inconclusive before it ever tested the remote.
+    # LOCAL commit identity so the probe commit never depends on a global git user.name/email (#166 F2).
     git -C "$tmp" -c user.name="wf-doctor" -c user.email="wf-doctor@local" commit -q --allow-empty -m probe 2>/dev/null
-  ) || { rm -rf "$tmp"; echo "    ambient git push: inconclusive (could not stage a probe commit)"; return 3; }
-  # Disable EVERY interactive/ambient-helper path EXCEPT the ambient credential we're testing: no terminal
-  # prompt, no askpass, SSH BatchMode. We clear GH_TOKEN/GITHUB_TOKEN-as-engineer? No — the AMBIENT token IS
-  # what we test on the git surface, so we leave the ambient env as-is and only ensure no ENGINEER cred leaks
-  # in (the engineer path is never on the ambient env). Credential helpers stay enabled (a stored owner helper
-  # is part of the ambient surface we must catch).
-  out=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
-        git -C "$tmp" -c core.askPass= -c core.sshCommand='ssh -o BatchMode=yes' \
+  ) || { rm -rf "$tmp"; RO_PUSH_OUT="could not stage a probe commit"; RO_PUSH_RC=3; return; }
+  # Disable every interactive/ambient-helper PROMPT but keep the AMBIENT credential surface (stored helper /
+  # SSH key) live — that is exactly what we must catch. Bound the probe with `timeout` so a DNS/network/helper
+  # stall can never hang doctor (#166 code-review F2 / AGENTS.md bounded background waits); a timeout reads as
+  # inconclusive (strict-fail at the section level), never an indefinite park.
+  RO_PUSH_OUT=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
+        timeout "$to" git -C "$tmp" -c core.askPass= -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
         push --dry-run "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" 2>&1) ; rc=$?
   rm -rf "$tmp"
-  if [ "$rc" = 0 ]; then
-    echo "    ambient git push: FAIL (--dry-run was ACCEPTED — an ambient credential can push; --dry-run did NOT update the remote)"; return 2
-  fi
-  # rejected: distinguish an auth rejection (PASS) from an unrelated error (inconclusive).
-  case "$out" in
-    *[Aa]uthentication*|*[Pp]ermission\ denied*|*403*|*[Cc]ould\ not\ read\ Username*|*terminal\ prompts\ disabled*|*[Ff]atal:\ could\ not\ read*)
-      echo "    ambient git push: read-only (--dry-run auth-rejected — no ambient push credential)"; return 0 ;;
-    *)
-      echo "    ambient git push: inconclusive (--dry-run failed for a non-auth reason; treat as unverified)"; return 3 ;;
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then RO_PUSH_OUT="timed out after ${to}s: $RO_PUSH_OUT"; RO_PUSH_RC=3; return; fi
+  if [ "$rc" = 0 ]; then RO_PUSH_RC=0; return; fi
+  case "$RO_PUSH_OUT" in
+    *[Aa]uthentication*|*[Pp]ermission\ denied*|*403*|*[Cc]ould\ not\ read\ Username*|*terminal\ prompts\ disabled*|*[Ff]atal:\ could\ not\ read*|*Host\ key\ verification*|*publickey*)
+      RO_PUSH_RC=2 ;;
+    *) RO_PUSH_RC=3 ;;
   esac
+}
+
+# readonly_probe_git_push <repo> [worktree-dir] — probe the AMBIENT git-push surface, non-mutating. Probes the
+# ACTUAL origin push URL of <worktree-dir> when given (so an SSH remote backed by a write-capable ambient SSH
+# key is caught, not just the HTTPS surface — #166 code-review F1), AND the synthesized HTTPS url as a baseline.
+# If ANY probed url is ACCEPTED -> FAIL (an ambient credential can push). Read-only only if EVERY url is
+# auth-rejected. Returns 0 PASS, 2 FAIL, 3 inconclusive.
+readonly_probe_git_push(){
+  local repo=$1 wt=${2:-} u urls=() accepted=0 rejected=0 inconclusive=0 origin_url
+  # the actual origin push URL (covers SSH + a non-default push url) when a worktree dir is supplied.
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    origin_url=$(git -C "$wt" remote get-url --push origin 2>/dev/null || true)
+    [ -n "$origin_url" ] && urls+=("$origin_url")
+  fi
+  # always include the synthesized HTTPS url (the baseline ambient HTTPS surface) if we have a real owner/repo.
+  case "$repo" in */*) urls+=("https://github.com/$repo.git") ;; esac
+  if [ "${#urls[@]}" = 0 ]; then echo "    ambient git push: skipped (no probeable remote url)"; return 3; fi
+  for u in "${urls[@]}"; do
+    readonly_probe_one_push_url "$u"
+    case "$RO_PUSH_RC" in
+      0) accepted=$((accepted+1)) ;;
+      2) rejected=$((rejected+1)) ;;
+      *) inconclusive=$((inconclusive+1)) ;;
+    esac
+  done
+  if [ "$accepted" -gt 0 ]; then
+    echo "    ambient git push: FAIL (--dry-run was ACCEPTED on a probed remote — an ambient credential can push; --dry-run did NOT update the remote)"; return 2
+  fi
+  if [ "$rejected" -gt 0 ] && [ "$inconclusive" = 0 ]; then
+    echo "    ambient git push: read-only (--dry-run auth-rejected on every probed remote — no ambient push credential)"; return 0
+  fi
+  # mixed/inconclusive: at least one url could not be conclusively auth-rejected -> NOT a PASS (strict).
+  echo "    ambient git push: inconclusive (a probed remote gave a non-auth result; treat as unverified — strict-fail)"; return 3
 }
 
 # doctor_readonly_section <repo> — print the read-only-ambient report for ALL sources + the git surface.
@@ -1219,7 +1245,7 @@ readonly_probe_git_push(){
 # inconclusive is treated as NOT-PASS under strict). Sets DOCTOR_RO_FAIL=1 on any FAIL/FAIL-CLOSED.
 DOCTOR_RO_FAIL=0
 doctor_readonly_section(){
-  local repo=$1 any_present=0 rc gitrc minted minted_verdict
+  local repo=$1 wt=${2:-} any_present=0 rc gitrc minted minted_verdict
   DOCTOR_RO_FAIL=0
   echo "  read-only ambient credential (#166):"
   # --- API surface, per SOURCE in isolation -------------------------------------------------------------
@@ -1266,8 +1292,8 @@ doctor_readonly_section(){
     echo "    WF_READONLY_TOKEN_CMD: not configured (instance has not wired the read-only minter seam)"
   fi
   # --- ambient git-push surface --------------------------------------------------------------------------
-  if [ -n "$repo" ]; then
-    gitrc=0; readonly_probe_git_push "$repo" || gitrc=$?
+  if [ -n "$repo" ] || [ -n "$wt" ]; then
+    gitrc=0; readonly_probe_git_push "$repo" "$wt" || gitrc=$?
     [ "$gitrc" = 2 ] && DOCTOR_RO_FAIL=1
     [ "$gitrc" = 3 ] && DOCTOR_RO_FAIL=1   # strict: inconclusive is NOT a PASS
   else
@@ -1576,8 +1602,10 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report life
   set -- "${DARGS[@]}"
   AUTHOR=${1:?usage: wf.sh doctor <claude|codex> [repo-or-worktree] [--readonly]}; TARGET=${2:-$ORIGIN_REPO}
   check_author "$AUTHOR"
+  DWT=""   # the worktree DIR (if TARGET is a dir) so the git-push probe can read the ACTUAL origin push url
   if [ -d "$TARGET" ]; then
     DREPO=$(gh_repo "$TARGET" 2>/dev/null) || die "doctor target is a directory but not a git repo/worktree with an origin remote: $TARGET (pass owner/repo instead)"
+    DWT=$TARGET
   else
     DREPO=$TARGET
   fi
@@ -1586,7 +1614,7 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report life
   if [ "$RO_ONLY" = 1 ]; then
     echo "wf.sh doctor --readonly"
     echo "  repo: $DREPO"
-    if doctor_readonly_section "$DREPO"; then
+    if doctor_readonly_section "$DREPO" "$DWT"; then
       echo "READONLY-PASS: the ambient credential is authoritatively read-only on every probed source + surface"
     else
       echo "READONLY-FAIL: the ambient credential is NOT authoritatively read-only (see FAIL/FAIL-CLOSED lines above) — demote the ambient credential / wire WF_READONLY_TOKEN_CMD+WF_READONLY_TOKEN_INFO_CMD"
@@ -1643,7 +1671,7 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report life
   # identity-readiness exit code (the strict gate is `wf.sh doctor <author> [repo] --readonly`); this keeps a
   # single exit-code semantics for plain doctor (identity readiness) and one explicit gate for the read-only
   # contract (#166 design-review F1).
-  doctor_readonly_section "$DREPO" || true
+  doctor_readonly_section "$DREPO" "$DWT" || true
   if [ "$DOCTOR_RO_FAIL" = 0 ]; then
     echo "  read-only ambient verdict: PASS (run \`wf.sh doctor $AUTHOR $DREPO --readonly\` for the strict gate)"
   else

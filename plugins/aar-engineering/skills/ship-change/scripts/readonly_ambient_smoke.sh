@@ -99,15 +99,25 @@ chmod +x "$BIN/gh"
 REAL_GIT=$(command -v git)
 cat > "$BIN/git" <<EOF
 #!/bin/bash
+# intercept push (the dry-run probe); pass every other git op (init/commit/remote) to the real git so the
+# detector's worktree origin-url read works. Per-URL outcome so the SSH-surface false-pass (F1) is testable:
+#   READONLY_SMOKE_GIT_HTTPS / READONLY_SMOKE_GIT_SSH = accepted|rejected (default rejected).
+is_push=0; purl=""
 for a in "\$@"; do
-  if [ "\$a" = push ]; then
-    echo "GIT_PUSH_ATTEMPT: \$*" >> "$MUTLOG"
-    case "\${READONLY_SMOKE_GIT:-rejected}" in
-      accepted) echo "To github (dry run)"; exit 0 ;;
-      *) echo "fatal: Authentication failed for remote" >&2; exit 128 ;;
-    esac
-  fi
+  if [ "\$is_push" = 1 ] && [ "\${a#-}" = "\$a" ] && [ -z "\$purl" ]; then purl="\$a"; fi
+  [ "\$a" = push ] && is_push=1
 done
+if [ "\$is_push" = 1 ]; then
+  echo "GIT_PUSH_ATTEMPT: \$*" >> "$MUTLOG"
+  case "\$purl" in
+    git@*|ssh://*) outcome=\${READONLY_SMOKE_GIT_SSH:-rejected} ;;
+    *)             outcome=\${READONLY_SMOKE_GIT_HTTPS:-rejected} ;;
+  esac
+  case "\$outcome" in
+    accepted) echo "To \$purl (dry run)"; exit 0 ;;
+    *) echo "fatal: Authentication failed for '\$purl'" >&2; exit 128 ;;
+  esac
+fi
 exec "$REAL_GIT" "\$@"
 EOF
 chmod +x "$BIN/git"
@@ -127,13 +137,16 @@ EOF
 chmod +x "$INFOCMD"
 
 REPO="o/r"
-# run the strict detector with a controlled env. Returns the exit code; stdout captured in $RO_OUT.
-run_strict(){  # run_strict <GH_TOKEN> <GITHUB_TOKEN> <stored> <api-fixture> <git-fixture>
+# run the strict detector with a controlled env. Returns the exit code; stdout captured in $RO_OUT. The 5th
+# arg drives the HTTPS push outcome (accepted|rejected); $RO_TARGET (default $REPO) and $RO_GIT_SSH let a
+# fixture point at a worktree dir with an SSH origin and a separate SSH push outcome.
+run_strict(){  # run_strict <GH_TOKEN> <GITHUB_TOKEN> <stored> <api-fixture> <git-https-outcome>
   RO_OUT=$(PATH="$BIN:$PATH" \
     GH_TOKEN="${1:-}" GITHUB_TOKEN="${2:-}" READONLY_SMOKE_STORED_TOKEN="${3:-}" \
-    READONLY_SMOKE_API="${4:-denied}" READONLY_SMOKE_GIT="${5:-rejected}" \
+    READONLY_SMOKE_API="${4:-denied}" READONLY_SMOKE_GIT_HTTPS="${5:-rejected}" \
+    READONLY_SMOKE_GIT_SSH="${RO_GIT_SSH:-rejected}" \
     WF_READONLY_TOKEN_CMD="" WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" \
-    bash "$WF" doctor claude "$REPO" --readonly 2>&1)
+    bash "$WF" doctor claude "${RO_TARGET:-$REPO}" --readonly 2>&1)
   return $?
 }
 
@@ -194,6 +207,24 @@ fi
 : > "$MUTLOG"
 run_strict "RO_aaa" "" "" denied rejected || true
 echo "$RO_OUT" | grep -q 'ambient git push: read-only' && pass "git-push rejected -> read-only" || fail "git-push read-only not reported"
+
+# fixture 8 (F1): a WORKTREE whose origin push url is SSH and ACCEPTS, while the synthesized HTTPS surface
+# REJECTS -> the detector must STILL FAIL (it probes the actual origin push url, catching the SSH-key surface
+# the old synthesized-HTTPS-only probe missed). Build a real local repo with an ssh:// origin.
+WT="$TMP/wt-ssh"; mkdir -p "$WT"
+"$REAL_GIT" -C "$WT" init -q
+"$REAL_GIT" -C "$WT" remote add origin "git@github.com:o/r.git"
+: > "$MUTLOG"
+RO_TARGET="$WT" RO_GIT_SSH=accepted run_strict "RO_aaa" "" "" denied rejected
+if [ $? -eq 0 ]; then
+  fail "SSH-accepted worktree origin should FAIL (F1: must probe the actual push url, not just HTTPS)"
+else
+  echo "$RO_OUT" | grep -q 'ambient git push: FAIL' && pass "F1: SSH origin push accepted -> FAIL (probes actual origin url)" || fail "F1: SSH-surface false-pass not caught"
+fi
+# and the same worktree with SSH REJECTED + HTTPS REJECTED -> read-only (both surfaces auth-rejected)
+: > "$MUTLOG"
+RO_TARGET="$WT" RO_GIT_SSH=rejected run_strict "RO_aaa" "" "" denied rejected || true
+echo "$RO_OUT" | grep -q 'ambient git push: read-only' && pass "F1: SSH+HTTPS both rejected -> read-only" || fail "F1: both-rejected should be read-only"
 
 # --- MUTATION-FREEDOM: across ALL fixtures, the only write-shaped calls were the advisory PATCH probe and the
 #     --dry-run push; assert the fake never performed a real mutation (it can't, by construction) AND that the
