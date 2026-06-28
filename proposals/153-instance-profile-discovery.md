@@ -56,12 +56,17 @@ never guesses:
 2. `${XDG_CONFIG_HOME:-~/.config}/experiment-lifecycle/aar-profile.{toml,json}` — the owning-module config
    home (this instance: `~/.config/experiment-lifecycle/aar-profile.toml`).
 
-The executor resolves the **first** that exists, records *which* path resolved (into the snapshot, decision
-4), and **fails closed** if none does — never falls back to a hardcoded repo/identity. "Fails closed" here
-means: print a single `BLOCKED: no instance profile found (looked: <paths>)` line and stop before any GitHub
-mutation or compute spend — the same fail-closed disposition `wf.sh start` already takes on a stale base. This
-replaces the earlier `~/aar-profile.*` home-root location, which would have minted a *new* global config
-convention in conflict with the module-config rule.
+**Who resolves the live profile: `design-experiment`, once — never the executor.** The role split is the
+load-bearing clarity (FINDING 2): `design-experiment` resolves the live profile by this lookup (the **first**
+that exists), records which path resolved + the content-hash into the START.md snapshot (decision 4), and the
+zero-context **executor (`run-experiment`) reads ONLY that frozen snapshot** — it never re-reads the mutable
+live profile, *except* the one narrow live step of minting the credential from the snapshotted seam name
+(decision 4). So "resolve the live config" and "never re-read live config" are not in tension: they are two
+different roles (designer resolves; executor reads the snapshot). Resolution **fails closed** if no profile
+exists — never falls back to a hardcoded repo/identity: print a single `BLOCKED: no instance profile found
+(looked: <paths>)` line and stop before any GitHub mutation or compute spend, the same fail-closed
+disposition `wf.sh start` already takes on a stale base. This replaces the earlier `~/aar-profile.*` home-root
+location, which would have minted a *new* global config convention in conflict with the module-config rule.
 
 **Init owner (the validate seam).** The profile is written and validated by the experiment-lifecycle
 module's **init/validate script** (`aar-profile-init` / `aar-profile-validate`, a `ready` child below), not
@@ -108,9 +113,15 @@ issue_repo      = "owner/research-lab"   # OPTIONAL. where backlog issues live; 
 private         = true                   # REQUIRED (bool). asserts the repo's visibility; see decision 3
 
 [github.identity]
-# Token/author SEAMS, by reference — NEVER inline secrets (decision 7). Values name how to MINT, not the key.
-token_cmd_env   = "AAR_RESEARCH_TOKEN_CMD"   # env var holding a command that prints a fresh token to stdout
-git_author_env  = "AAR_RESEARCH_GIT_AUTHOR"  # env var holding "Name <email>" for commit attribution
+# FAMILY-KEYED author/reviewer SEAMS, by reference — NEVER inline secrets (decision 7). Values name how to
+# MINT, not the key. Two families so the close review's opposite-family reviewer has a DISTINCT identity from
+# the author (the #130 cross-family close-review requirement; mirrors wf.sh's WF_ENGINEER_TOKEN_CMD_CLAUDE/CODEX).
+[github.identity.claude]
+token_cmd_env   = "AAR_RESEARCH_TOKEN_CMD_CLAUDE"   # env var holding a command that prints a fresh token
+git_author_env  = "AAR_RESEARCH_GIT_AUTHOR_CLAUDE"  # env var holding "Name <email>" for commit attribution
+[github.identity.codex]
+token_cmd_env   = "AAR_RESEARCH_TOKEN_CMD_CODEX"
+git_author_env  = "AAR_RESEARCH_GIT_AUTHOR_CODEX"
 
 [github.protection]
 # REMOTE branch-protection EXPECTATIONS only — declared so the close-gate (#157) reads them, never probes
@@ -122,15 +133,17 @@ enforce_admins           = true          # protection includes administrators (n
 # Recipe pointers: TYPED, fully-addressable objects (decision 6) — not a rewrite of the recipes, an anchor.
 # Each is { kind, ref, + (repo,path | uri) }, so the executor needs no hidden instance knowledge to fetch it.
 [recipes.provisioning]
-kind = "repo"                            # "repo" -> {repo,path}@ref ; "uri" -> {uri}@ref
-repo = "owner/research-lab"              # the OWNING repo (present iff kind=repo) — never assumed to be research_repo
-path = "recipes/provisioning.md"         # repo-relative path (present iff kind=repo)
-ref  = "<git-sha>"                       # REQUIRED for both kinds — pins the exact version
-[recipes.artifact_store]                 # e.g. a URI-kind recipe:
-kind = "uri"
-uri  = "r2://mats/recipes/artifact-store.md"
-ref  = "<content-hash>"
+kind     = "repo"                        # one of the SUPPORTED kinds: "repo" | "uri"
+repo     = "owner/research-lab"          # iff kind=repo — the OWNING repo (never assumed to be research_repo)
+path     = "recipes/provisioning.md"     # iff kind=repo — repo-relative path
+git_ref  = "<git-sha>"                   # iff kind=repo — pins the exact commit
+[recipes.artifact_store]                 # a URI-kind recipe:
+kind     = "uri"
+uri      = "r2://mats/recipes/artifact-store.md"  # scheme MUST be in the supported set (below)
+sha256   = "<hex digest>"                # iff kind=uri — explicit digest algorithm, pins the exact bytes
 # [recipes.ledger] / .teardown / .cost_policy follow the same typed shape.
+# SUPPORTED uri schemes (closed set; validate rejects others): r2:// , s3:// , https:// .
+# The pinning field is named by KIND: git_ref for repo, sha256 for uri — no ambiguous shared "ref".
 ```
 
 Field semantics, normative:
@@ -144,10 +157,17 @@ Field semantics, normative:
   sensitivity/visibility contract) owns *when* a repo must be private and what redaction applies; this field
   is the typed declaration #146's gate reads. If `private = true` but the live repo is public, the gate
   **fails closed** (decision 3) — this file states the expectation; #146 defines the enforcement.
-- **`[github.identity]`** — names the **env vars that themselves hold a token-minting command / an author
-  string**, never the secret. This mirrors `wf.sh`'s `WF_ENGINEER_TOKEN_CMD_*` / `WF_ENGINEER_GIT_AUTHOR_*`
-  seams (RUNBOOK "Engineer identities"); the research flow gets its *own* seam names so the experiment-record
-  identity is distinct from the scaffold-engineer identity and an instance can scope them differently.
+- **`[github.identity.<family>]`** — **family-keyed** sub-tables (`claude`, `codex`), each naming the **env
+  vars that themselves hold a token-minting command / an author string**, never the secret. Two families
+  because #130's close review is the **merge-satisfying native APPROVE and must be opposite-family** (#130
+  §2): the author commits/opens as its own family's identity, and the close reviewer posts as the *other*
+  family's — so the profile must declare *both*, distinct, or the close gate cannot post a cross-family
+  approval. This mirrors `wf.sh`'s `WF_ENGINEER_TOKEN_CMD_CLAUDE/CODEX` / `WF_ENGINEER_GIT_AUTHOR_*` seams
+  (RUNBOOK "Engineer identities"); the research flow gets its *own* family-keyed seam names so the
+  experiment-record identities are distinct from the scaffold-engineer identities and an instance scopes them
+  independently. **This file only *declares* the two seams; the shared helper (#150) is what *validates* a
+  distinct opposite-family reviewer identity resolves before any protected PR flow runs, and #154 owns the
+  cross-family enforcement** — the profile is the declaration, not the check.
 - **`[github.protection]`** — what the executor's close-gate (#157) should *expect* the remote to require,
   so it can pre-check readiness instead of discovering a failed merge after the run. It is a **declaration of
   expectation**, not a configuration of GitHub; the actual protection is set out-of-band (RUNBOOK). It may
@@ -222,21 +242,24 @@ branch_prefix   = "run/"
 issue_repo      = "owner/research-lab"
 private         = true
 
-[identity]                                  # SEAM NAMES, not secrets (decision 7)
-token_cmd_env   = "AAR_RESEARCH_TOKEN_CMD"
-git_author_env  = "AAR_RESEARCH_GIT_AUTHOR"
+[identity.claude]                           # FAMILY-KEYED SEAM NAMES, not secrets (decision 7)
+token_cmd_env   = "AAR_RESEARCH_TOKEN_CMD_CLAUDE"
+git_author_env  = "AAR_RESEARCH_GIT_AUTHOR_CLAUDE"
+[identity.codex]
+token_cmd_env   = "AAR_RESEARCH_TOKEN_CMD_CODEX"
+git_author_env  = "AAR_RESEARCH_GIT_AUTHOR_CODEX"
 
 [protection]                                # expectations the close-gate pre-checks (decision 2/3a)
 require_pr_review = true
 enforce_admins   = true
 
 [recipes.provisioning]                      # typed, fully-addressable pointer (FINDING 3)
-kind = "repo"                               #   "repo" -> resolve {repo,path}@ref ; "uri" -> resolve {uri}@ref
-repo = "owner/research-lab"                 #   present iff kind=repo (the OWNING repo, not assumed)
-path = "recipes/provisioning.md"            #   present iff kind=repo
-ref  = "<git-sha>"                          #   pins the exact version (required for both kinds)
+kind    = "repo"                            #   one of: "repo" | "uri"
+repo    = "owner/research-lab"              #   iff kind=repo (the OWNING repo, not assumed)
+path    = "recipes/provisioning.md"         #   iff kind=repo
+git_ref = "<git-sha>"                       #   iff kind=repo — pins the exact commit
 # [recipes.artifact_store] / .ledger / .teardown / .cost_policy follow the same typed shape;
-# a kind="uri" entry uses { kind="uri", uri="r2://...", ref="<hash>" } instead of repo/path.
+# a kind="uri" entry uses { kind="uri", uri="r2://…", sha256="<hex>" } — uri scheme in { r2://, s3://, https:// }.
 ```
 ````
 
@@ -281,23 +304,25 @@ refuse-unknown-MAJOR.)
 
 The non-GitHub instance facts (provisioning, artifact store, ledger, teardown, cost) are **out of scope for
 restructuring**. They remain the frozen recipes/prose they are today; the profile adds a `[recipes]` block of
-**typed, fully-addressable pointers** — each `{ kind, ref, + (repo,path | uri) }` — so the same discovery
-rule that finds the GitHub facts also reaches the recipes, and the executor needs no hidden instance
-knowledge to fetch a recipe (the owning repo or URI and the pinning ref are *in the pointer*, never assumed —
-per FINDING 3). This is the minimal change that satisfies #130 (it needs the *GitHub* facts machine-
-discoverable) without forcing a speculative rewrite of recipes that are working as prose. Validating that
-each recipe pointer resolves (the repo/uri exists at the ref) is part of `aar-profile-validate`'s checks
-(decision 1). A future issue may promote individual recipes into structured config; this design neither
+**typed, fully-addressable pointers** — `kind="repo"` carries `{ repo, path, git_ref }`; `kind="uri"` carries
+`{ uri, sha256 }` with `uri` restricted to a **closed scheme set** (`r2://`, `s3://`, `https://`) — so the
+same discovery rule that finds the GitHub facts also reaches the recipes, and the executor needs no hidden
+instance knowledge to fetch a recipe (the owning repo or URI and the kind-appropriate digest are *in the
+pointer*, never assumed; the pinning field is named by kind — `git_ref` vs `sha256` — so there is no ambiguous
+shared `ref` — per FINDING 3). This is the minimal change that satisfies #130 (it needs the *GitHub* facts
+machine-discoverable) without forcing a speculative rewrite of recipes that are working as prose. Validating
+that each recipe pointer resolves (the repo/uri exists at the pinned digest, the scheme is supported) is part
+of `aar-profile-validate`'s checks (decision 1). A future issue may promote individual recipes into structured config; this design neither
 requires nor blocks that.
 
 ### 7. Identity by reference, never inline — the secret-handling contract
 
-`[github.identity]` holds **the names of env vars**, and those env vars hold **commands that mint tokens** —
-the profile file never contains a token, a key, or a key path. This means the profile file itself is
-**non-secret** and can be committed to / browsed in the (private) research repo or kept in the home root
-without leaking credentials. It is the exact pattern `wf.sh` already uses (`WF_ENGINEER_TOKEN_CMD_*` is a
-*command*, minting a fresh ~1h token per use). A reviewer reading the profile sees *which seam* the run used,
-never the credential.
+`[github.identity.<family>]` holds, per family, **the names of env vars**, and those env vars hold
+**commands that mint tokens** — the profile file never contains a token, a key, or a key path. This means the
+profile file itself is **non-secret** and can be committed to / browsed in the (private) research repo or
+kept under the module config dir without leaking credentials. It is the exact pattern `wf.sh` already uses
+(`WF_ENGINEER_TOKEN_CMD_CLAUDE/CODEX` is a *command*, minting a fresh ~1h token per use). A reviewer reading
+the profile sees *which seam* each family's identity uses, never the credential.
 
 ## Interface contract (what the rest of #130 consumes)
 
@@ -305,9 +330,9 @@ This is the consumable surface; the cited children depend on exactly these:
 
 | Consumer | Reads from this interface |
 |---|---|
-| **#156** design-experiment PR-open | `research_repo`, `base_branch`, `branch_prefix`, `[github.identity]` (to open + commit), `issue_repo` (the issue the PR closes) |
-| **#157** run-experiment push/close/merge | `research_repo`, `base_branch`, `[github.identity]`, `[github.protection]` (merge-gate expectations) |
-| **#150** shared GitHub helper | `[github.identity]` seam names (mint token, attribute commit) — the helper consumes the seams, this file declares them |
+| **#156** design-experiment PR-open | `research_repo`, `base_branch`, `branch_prefix`, `[github.identity.<author-family>]` (to open + commit), `issue_repo` (the issue the PR closes) |
+| **#157** run-experiment push/close/merge | `research_repo`, `base_branch`, both `[github.identity.claude]` + `[github.identity.codex]` (author commits as its family; the merge-satisfying close review posts as the *opposite* family), `[github.protection]` (merge-gate expectations) |
+| **#150** shared GitHub helper | both family-keyed `[github.identity.<family>]` seam names (mint token, attribute commit, and validate a distinct opposite-family reviewer identity resolves) — the helper consumes + validates the seams, this file declares them |
 | **#146** sensitivity/visibility | `private` (the assertion its gate verifies) |
 | **#154** cross-family contract | *nothing from this file* — cross-family is a product invariant #154 owns; the profile carries no `require_cross_family` knob (decision 3a) |
 | **#155** canonical-path record layout | `research_repo` + `branch_prefix` (where `experiments/<exp>/` lives, on which branch) |
