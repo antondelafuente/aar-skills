@@ -349,6 +349,32 @@ if grep -q 'credential fill timed out after' "$WF" && grep -q 'fillrc=124' "$WF"
 else
   fail "F3 r11: credential-fill timeout is not handled as inconclusive"
 fi
+# F1 r12 (structural): the advisory `gh api` probe is bounded by `timeout` (no unbounded hang).
+if grep -q 'timeout "$to" env GH_TOKEN="$tok" WF_GH_INTERNAL=1 gh api -X PATCH' "$WF"; then
+  pass "F1 r12: advisory gh api probe is timeout-bounded (no unbounded hang)"
+else
+  fail "F1 r12: advisory gh api probe is not timeout-bounded"
+fi
+# F2 r12 (behavioral): a worktree whose origin is a NON-GitHub remote is NOT dry-run-probed (no arbitrary
+# remote helper executed); the probe notes it and falls back to the synthesized GitHub URLs.
+WT12="$TMP/wt-nongithub"; mkdir -p "$WT12"
+"$REAL_GIT" -C "$WT12" init -q
+"$REAL_GIT" -C "$WT12" remote add origin "https://gitlab.example.com/o/r.git"
+: > "$MUTLOG"
+RO_TARGET="$WT12" run_strict "RO_aaa" "" "" denied rejected || true
+if echo "$RO_OUT" | grep -q 'is not a GitHub remote'; then
+  # assert NO push targeted the non-GitHub origin URL (the push-target is the arg right after `push` + flags);
+  # a push whose remote URL is a `https://gitlab…`/non-github scheme would mean the non-GitHub origin was probed
+  # (arbitrary remote-helper risk). The synthesized fallback URLs all start with github.com, so a clean run has
+  # no push whose URL token begins with a non-github scheme.
+  if grep 'GIT_PUSH_ATTEMPT' "$MUTLOG" | grep -Eq -- ' (https://gitlab|ssh://gitlab|git@gitlab)'; then
+    fail "F2 r12: a non-GitHub origin URL was dry-run-probed (arbitrary remote helper risk)"
+  else
+    pass "F2 r12: non-GitHub origin skipped (not probed); synthesized GitHub URLs used instead"
+  fi
+else
+  fail "F2 r12: non-GitHub origin not flagged/skipped"
+fi
 # behavioral shim unit: build a shim like the function does (forward get to a logging helper, no-op store/erase)
 CREDLOG="$TMP/cred-ops.log"; : > "$CREDLOG"
 LOGHELPER="$TMP/loghelper.sh"

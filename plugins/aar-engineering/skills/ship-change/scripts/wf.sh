@@ -1141,13 +1141,14 @@ readonly_provenance_verdict(){
 # NEVER the certifier — provenance is the gate; this only sharpens the message (a "writable" can turn a PASS
 # into a FAIL, a "denied" never UPGRADES an unattested token to PASS).
 readonly_advisory_probe(){
-  local tok=$1 repo=$2 code out
+  local tok=$1 repo=$2 code out to=${WF_GIT_PROBE_TIMEOUT:-20}
   # An empty JSON object body is the load-bearing detail (a NO-body PATCH returns 400 = inconclusive; a body
   # with a -f field could MUTATE). We pipe '{}' via --input - so no settable field is ever supplied. real_gh
   # marker so the guard (if installed) passes this internal call through. CAPTURE the -i output FIRST with its
   # own `|| true` so a non-2xx gh exit (403/404 -> nonzero) does NOT blank the status under `set -o pipefail`
-  # (#166 code-review F4) — then parse the HTTP status line from the captured text.
-  out=$(printf '{}' | GH_TOKEN="$tok" real_gh api -X PATCH "repos/$repo" --input - -i 2>/dev/null || true)
+  # (#166 code-review F4) — then parse the HTTP status line. BOUND with `timeout` so a stalled `gh api` can't
+  # hang doctor (#166 code-review F1 r12 / AGENTS.md bounded background waits); a timeout -> inconclusive.
+  out=$(printf '{}' | timeout "$to" env GH_TOKEN="$tok" WF_GH_INTERNAL=1 gh api -X PATCH "repos/$repo" --input - -i 2>/dev/null || true)
   code=$(printf '%s\n' "$out" | awk 'toupper($1) ~ /^HTTP/ {print $2; exit}')
   case "$code" in
     2*)      echo writable ;;     # GitHub ACCEPTED the (empty, non-mutating) write attempt -> write-capable
@@ -1290,10 +1291,21 @@ readonly_probe_one_push_url(){
 # auth-rejected. Returns 0 PASS, 2 FAIL, 3 inconclusive.
 readonly_probe_git_push(){
   local repo=$1 wt=${2:-} u urls=() accepted=0 rejected=0 inconclusive=0 origin_url
-  # the actual origin push URL (covers SSH + a non-default push url) when a worktree dir is supplied.
+  # the actual origin push URL (covers SSH + a non-default push url) when a worktree dir is supplied — but ONLY
+  # if it's a real GitHub remote. A non-GitHub / custom-scheme remote could invoke an arbitrary remote-helper,
+  # which a GitHub-credential detector must not execute (#166 code-review F2 r12); such an origin is skipped
+  # (we still probe the synthesized GitHub URLs below). Mirror git_push_author's GitHub-host allowlist.
   if [ -n "$wt" ] && [ -d "$wt" ]; then
     origin_url=$(git -C "$wt" remote get-url --push origin 2>/dev/null || true)
-    [ -n "$origin_url" ] && urls+=("$origin_url")
+    if [ -n "$origin_url" ]; then
+      case "$origin_url" in
+        https://github.com/*|https://*@github.com/*|https://github.com:*|https://*@github.com:*|\
+        git@github.com:*|git@ssh.github.com:*|\
+        ssh://git@github.com/*|ssh://github.com/*|ssh://git@github.com:*|ssh://git@ssh.github.com*|ssh://ssh.github.com*)
+          urls+=("$origin_url") ;;
+        *) echo "    ambient git push: note — origin '$origin_url' is not a GitHub remote; probing synthesized GitHub URLs only (a non-GitHub remote helper is not executed)" ;;
+      esac
+    fi
   fi
   # always include BOTH synthesized canonical surfaces for a real owner/repo — HTTPS AND SSH — so an ambient
   # SSH key that can push is probed even when no worktree origin was supplied (#166 code-review F1 r4: an
