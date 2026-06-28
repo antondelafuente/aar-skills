@@ -319,16 +319,40 @@ if __name__ == "__main__":
     pid = deploy(nonce)
     ip, port, cost = wait_ssh(pid)
     # ENRICH: SSH endpoint + the run's real expiry (default 12h; a long run REFRESHes via
-    # pod_lease.sh refresh, or set GPU_JOB_LEASE_EXPIRY_MIN).
+    # pod_lease.sh refresh, or set GPU_JOB_LEASE_EXPIRY_MIN). FAIL CLOSED (review round-9 Finding 1):
+    # if enrich can't durably write the long expiry, the lease keeps only the SHORT intent expiry and
+    # the reaper would delete this active run minutes later. A pod with no durable lease is unusable
+    # under this contract, so a persistent enrich failure deletes the pod and exits — never hand back a
+    # POD_ID whose lease will be reaped out from under it.
     if nonce and _LEASE_ON:
         exp_min = env("GPU_JOB_LEASE_EXPIRY_MIN", "720")
-        try:
-            lease("enrich", nonce, "--ssh", f"{ip}:{port}", "--expiry-min", exp_min,
-                  *(["--cost", str(cost)] if cost is not None else []))
-            print(f"[lease] enriched {nonce} (expiry +{exp_min}min)", flush=True)
-        except Exception as e:
-            print(f"[lease] enrich FAILED for {nonce} ({e}) — lease stays at intent expiry; "
-                  f"REFRESH it or the reaper will reap on the short default", flush=True)
+        enriched = False
+        for attempt in range(3):
+            try:
+                lease("enrich", nonce, "--ssh", f"{ip}:{port}", "--expiry-min", exp_min,
+                      *(["--cost", str(cost)] if cost is not None else []))
+                # verify the long expiry actually landed on disk (not just that the call returned)
+                shown = lease("show", nonce, check=False) or ""
+                rec = json.loads(shown) if shown.strip().startswith("{") else {}
+                if rec.get("state") == "enriched" and isinstance(rec.get("expiry_at"), int) \
+                   and rec["expiry_at"] > time.time() + 60:
+                    enriched = True
+                    print(f"[lease] enriched {nonce} (expiry +{exp_min}min)", flush=True)
+                    break
+            except Exception as e:
+                print(f"[lease] enrich attempt {attempt+1} failed for {nonce} ({e})", flush=True)
+            time.sleep(2)
+        if not enriched:
+            print(f"[lease] enrich could not durably set the run expiry for {nonce} — FAILING CLOSED: "
+                  f"deleting pod {pid} (an un-enriched lease would be reaped mid-run)", flush=True)
+            gone = delete_pod_now(pid)
+            try:
+                lease("emergency", nonce, str(pid), check=False)   # mark immediately reapable as backstop
+            except Exception:
+                pass
+            raise SystemExit(f"[deploy] enrich failed; pod {pid} "
+                             + ("DELETED (fail-closed)" if gone else
+                                f"could NOT be deleted — REAP {pid} MANUALLY (lease {nonce})"))
     print(f"\nPOD_ID={pid}")
     if nonce:
         print(f"LEASE_NONCE={nonce}")

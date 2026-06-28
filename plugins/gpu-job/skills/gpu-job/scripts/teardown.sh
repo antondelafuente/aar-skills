@@ -14,6 +14,13 @@ set -euo pipefail
 PID=${1:?pod id}
 NONCE=${2:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
+# Back-compat (round-9 Finding 2): if no nonce was passed but acquire wrote a lease for this pod, find
+# it by pod id so the old `teardown.sh <pod-id>` call still closes/marks the lease (no stale lease the
+# reaper would keep retrying). A non-unique/absent match leaves NONCE empty (unchanged behavior).
+if [ -z "$NONCE" ] && [ -f "$HERE/pod_lease.sh" ]; then
+  NONCE=$(bash "$HERE/pod_lease.sh" find-by-pod "$PID" 2>/dev/null || true)
+  [ -n "$NONCE" ] && echo "teardown: located lease $NONCE for pod $PID (no nonce supplied)"
+fi
 KEY_NAME=$(grep -E "^API_KEY_ENV=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2-); KEY_NAME="${API_KEY_ENV:-${KEY_NAME:-RUNPOD_API_KEY}}"
 KEY=$(grep -E "^$KEY_NAME=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2- || eval echo "\${$KEY_NAME:?}")
 # Capture the DELETE's HTTP status — a non-2xx (wrong key, auth/network error) must NOT be trusted as a

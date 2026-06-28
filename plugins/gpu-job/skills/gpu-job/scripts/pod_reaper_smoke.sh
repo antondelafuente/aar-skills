@@ -316,4 +316,12 @@ EOF
 bash "$REAPER" >/dev/null 2>&1
 deleted pod-fresh2 && no fresh-reaping-reaped || ok fresh-reaping-protected
 
+# === round-9 Finding 3: a MALFORMED lease record is REPORTED by the sweep, not silently skipped ===
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+printf 'not json{' > "$GPU_JOB_LEASE_DIR/gpujob-corrupt.json"
+: > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt"
+MOUT=$(bash "$REAPER" 2>&1)
+echo "$MOUT" | grep -q "MALFORMED lease record" && ok malformed-lease-reported || no malformed-lease-reported
+rm -f "$GPU_JOB_LEASE_DIR/gpujob-corrupt.json"
+
 [ "$fails" = 0 ] && { echo "pod_reaper smoke PASS"; exit 0; } || { echo "pod_reaper smoke FAIL"; exit 1; }

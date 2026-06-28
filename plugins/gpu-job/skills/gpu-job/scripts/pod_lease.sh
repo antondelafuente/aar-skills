@@ -498,6 +498,28 @@ cmd_show(){
   cat "$file"
 }
 
+# find-by-pod: print the nonce of the NON-TERMINAL (active/reaping) lease bound to a pod id, for the
+# back-compat teardown path that gets only a pod id (round-9 Finding 2). >1 match or none -> empty.
+cmd_find_by_pod(){
+  local pod=$1
+  require_val "<pod-id>" "$pod"
+  [ -d "$ROOT" ] || return 0
+  local f match="" count=0
+  for f in "$ROOT"/*.json; do
+    [ -e "$f" ] || continue
+    local p st
+    p=$(get_field "$f" pod_id)
+    [ "$p" = "$pod" ] || continue
+    st=$(get_field "$f" state)
+    case "$st" in
+      intent|provisional|enriched|reaping)
+        match=$(get_field "$f" nonce); count=$((count+1)) ;;
+    esac
+  done
+  [ "$count" = 1 ] && printf '%s\n' "$match"
+  return 0
+}
+
 # list: print one `<id> <state> <pod_id> <expiry_at>` line per lease (the reaper's enumeration input).
 cmd_list(){
   [ -d "$ROOT" ] || return 0
@@ -607,7 +629,10 @@ main(){
     find-nonce)
       [ $# -eq 1 ] || die "usage: pod_lease.sh find-nonce <pod-name>"
       cmd_find_nonce "$1";;
-    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|expire|emergency|reaping|mark-deleted|claim-reaping|would-claim|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
+    find-by-pod)
+      [ $# -eq 1 ] || die "usage: pod_lease.sh find-by-pod <pod-id>"
+      cmd_find_by_pod "$1";;
+    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|expire|emergency|reaping|mark-deleted|claim-reaping|would-claim|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce|find-by-pod> ...";;
     *) die "unknown subcommand '$sub'";;
   esac
 }

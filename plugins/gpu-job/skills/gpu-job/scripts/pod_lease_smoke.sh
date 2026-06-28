@@ -142,6 +142,13 @@ rm -f "$TMP/gpujob-dupe.json"
 run provisional "$P" pod-bound >/dev/null
 [ -z "$(run find-nonce "$P")" ] && ok findnonce-skips-provisional || no findnonce-skips-provisional
 
+# --- find-by-pod: locate a non-terminal lease by its pod id (back-compat teardown, round-9 Finding 2) ---
+FBP=$(run intent RUNPOD_API_KEY --expiry-min 60); run provisional "$FBP" pod-fbp >/dev/null
+[ "$(run find-by-pod pod-fbp)" = "$FBP" ] && ok findbypod-active || no findbypod-active
+[ -z "$(run find-by-pod no-such-pod)" ] && ok findbypod-absent-empty || no findbypod-absent-empty
+run close "$FBP" >/dev/null
+[ -z "$(run find-by-pod pod-fbp)" ] && ok findbypod-skips-closed || no findbypod-skips-closed
+
 # --- validation: bad id rejected, empty option rejected, surplus args rejected ---
 if run provisional '../evil' pod >/dev/null 2>&1; then no reject-traversal; else ok reject-traversal; fi
 G=$(run intent RUNPOD_API_KEY)

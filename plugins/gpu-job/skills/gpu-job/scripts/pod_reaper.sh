@@ -214,8 +214,14 @@ reap_lease(){ # <nonce> <key> <pod-id>
 consider_lease(){ # <nonce>
   local nonce=$1 pod=${LEASE_POD[$nonce]} state=${LEASE_STATE[$nonce]}
   # We consider non-terminal leases AND `reaping` leases (a `reaping` lease may be a STALE claim left by
-  # a crashed reaper — round-6 Finding 1; claim-reaping reclaims it only if stale). closed/invalid skip.
-  case "$state" in intent|provisional|enriched|reaping) : ;; *) return ;; esac
+  # a crashed reaper — round-6 Finding 1; claim-reaping reclaims it only if stale). A `closed` lease is
+  # done; an `invalid` (malformed) record is REPORTED, never silently skipped (round-9 Finding 3) — a
+  # corrupt registry entry is exactly the bad state the sweep should surface.
+  case "$state" in
+    intent|provisional|enriched|reaping) : ;;
+    invalid) log "report-only (MALFORMED lease record — inspect): nonce=$nonce"; reported=$((reported+1)); return ;;
+    *) return ;;
+  esac
   # A lease with no bound pod id (a pending INTENT) is handled in step 2 by matching its nonce against
   # the LIVE pod list — we never DELETE a placeholder id here.
   [ -n "$pod" ] && [ "$pod" != "-" ] || return
