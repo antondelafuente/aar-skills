@@ -27,10 +27,16 @@ gate parses to decide the merge. It is a typed file living in the experiment's c
 (`experiments/<exp>/`, owned by #155), carrying **one response object per HIGH/MED finding** from the close
 `audit_experiment`. Each response names the finding by a **stable identifier** (so it survives re-review
 rounds), carries a **status from a closed set**, and carries the **evidence that status requires** (a commit
-SHA for `fixed`, a reason for `justified`, a follow-up issue for `deferred`). The merge gate evaluates a
-**deterministic, fail-closed** rule over the artifact — independent of the model — and merges only when every
-HIGH/MED finding has a valid response and no HIGH is left unresolved. A malformed or missing artifact, or a
-HIGH with no response, **blocks**; it is never read as clean.
+SHA for `fixed`, a reason for `justified`, a follow-up issue for `deferred`).
+
+The merge gate is **two layers, not one** (decision 4) — the same two-layer shape ship-change's
+disposition-aware close-gate already uses: a **deterministic structural gate** (the artifact exists, parses,
+accounts for every HIGH/MED finding, and each response carries the evidence its status requires — all
+model-independent and fail-closed) **and** a **semantic adjudication** by the cross-family close reviewer (does
+the author's `justified` reason actually resolve the finding; is a `deferred` genuinely out of scope). The
+structural layer can never pass a missing/malformed response; the semantic layer can never let a hand-waved
+`justified` pass. The merge needs **both** green. A malformed or missing artifact, a HIGH with no response, or
+a reviewer-rejected justification **blocks**; nothing is ever read as clean.
 
 The artifact is the close-side twin of two patterns already in the product: it borrows the **per-finding
 disposition** shape from ship-change's `fdispo` close-gate state (#138/#139) and the **closed-status +
@@ -71,40 +77,50 @@ finding the close `audit_experiment` raised, keyed to the finding by a stable id
 ```toml
 schema_version = 1                       # integer MAJOR; gate refuses an unknown MAJOR (decision 5)
 
-audit_sha       = "<commit sha the close audit reviewed>"   # REQUIRED. binds the triage to the reviewed head
-audit_findings_path = "experiments/<exp>/close_audit.md"    # REQUIRED. the audit output these respond to
+final_audit_round = 3                     # REQUIRED. the round number of the LAST close-audit re-run
+final_audit_sha   = "<commit sha the final re-run reviewed>"  # REQUIRED. the head the gate re-runs on
 
 [[finding]]
-id        = "H1"            # REQUIRED. stable finding id (decision 3) — matches the audit's emitted id
-severity  = "high"          # REQUIRED. one of: "high" | "med"  (LOW is recorded, never gated — decision 4)
-status    = "fixed"         # REQUIRED. one of the closed status set (decision 4)
-commit    = "<sha>"         # REQUIRED iff status=fixed — an in-PR commit that resolves the finding
+id            = "H1"        # REQUIRED. stable finding id (decision 3) — matches the audit's emitted id
+severity      = "high"      # REQUIRED. one of: "high" | "med"  (LOW is recorded, never gated — decision 4)
+raised_in_round = 1         # REQUIRED. the audit round that raised this finding (decision 2a)
+status        = "fixed"     # REQUIRED. one of the closed status set (decision 4)
+commit        = "<sha>"     # REQUIRED iff status=fixed — an in-PR commit that resolves the finding
 # reason   = "..."          # REQUIRED iff status=justified — why the finding does not invalidate the claim
 # issue    = "owner/repo#N" # REQUIRED iff status=deferred — the follow-up issue the deferral is tracked in
 
 [[finding]]
-id        = "H2"
-severity  = "high"
-status    = "justified"
-reason    = "Confound is bounded: the held-out split shows the same effect at 0.3pp, within noise."
+id            = "H2"
+severity      = "high"
+raised_in_round = 1
+status        = "justified"
+reason        = "Confound is bounded: the held-out split shows the same effect at 0.3pp, within noise."
 
 [[finding]]
-id        = "M1"
-severity  = "med"
-status    = "deferred"
-issue     = "owner/research-lab#88"
+id            = "M1"
+severity      = "med"
+raised_in_round = 2         # a finding the SECOND round surfaced (e.g. after the H1 fix)
+status        = "deferred"
+issue         = "owner/research-lab#88"
 ```
 
 Field semantics, normative:
 
-- **`audit_sha`** — the head commit the close `audit_experiment` reviewed. The gate **re-runs the close audit
-  on the final diff** (mirroring ship-change's re-review-on-final-diff integrity property, #130 §2) and
-  requires the artifact's `audit_sha` to equal that head; a stale `audit_sha` (the branch moved after the
-  triage was written) **blocks** — the triage must respond to the audit of the diff that actually merges, not
-  an earlier one.
+- **`final_audit_sha` / `final_audit_round`** — the head commit and round number of the **last** close-audit
+  re-run. The gate **re-runs the close audit on the final diff** (mirroring ship-change's re-review-on-final-diff
+  integrity property, #130 §2) and requires `final_audit_sha` to equal that head; a stale value (the branch
+  moved after the triage was written) **blocks**. The final re-run is used as a **residual-finding check**
+  (decision 2a): it must surface **no HIGH the artifact has not already accounted for** — a genuinely-new
+  unresolved HIGH in the final round blocks.
 - **`[[finding]].id`** — the stable identifier (decision 3) that joins a response to its finding across
-  re-review rounds. **Every** HIGH/MED id the close audit emitted MUST appear exactly once; a missing id, or a
-  response id not in the audit, **blocks** (decision 4).
+  re-review rounds.
+- **`[[finding]].raised_in_round`** — the audit round that first raised this finding (decision 2a). This is
+  what resolves the `fixed`-vs-final-re-run contradiction: a `fixed` finding **disappears from the final round's
+  audit** (that is what "fixed" means), so the gate must **not** require every response's id to appear in the
+  *final* audit. Instead it requires every HIGH/MED id from the round that **raised** it to carry exactly one
+  response (the union across rounds), and the final round to add no unaccounted HIGH. So a finding raised in
+  round 1 and fixed by round 3 is a valid `fixed` entry whose id is absent from round 3 — never an "unknown id"
+  block.
 - **`severity`** — `high` or `med`, mirrored from the audit so the gate applies the right rule without
   re-reading the audit body. LOW findings are **not** carried (decision 4) — the close protocol gates HIGH/MED
   only; LOW is advisory.
@@ -113,53 +129,100 @@ Field semantics, normative:
   `commit` and no `reason`, is malformed and **blocks**) — the same "status determines required evidence"
   discipline `fdispo` enforces.
 
+### 2a. Audit rounds — the union across rounds, not just the final re-run
+
+A close audit is **not** a single shot: the author fixes a HIGH, re-runs, the audit raises a new one, repeat.
+The artifact tracks the **union of HIGH/MED findings across all rounds**, each tagged with `raised_in_round`,
+because that is the only framing under which `fixed` is coherent (a fixed finding is gone from later rounds by
+construction). The gate's identity contract is therefore:
+
+- **Every HIGH/MED id any round raised has exactly one response** (the union, not the final round's set). A
+  missing response, a duplicate id, or a response id no round ever raised **blocks**.
+- **The final round (`final_audit_round`) adds no unaccounted HIGH.** Its re-run is the residual check that the
+  merged diff has no fresh HIGH the triage skipped — the integrity property that the *reviewed* diff is the
+  *merged* diff. A new HIGH in the final round with no response **blocks** (it must itself be fixed/justified
+  and the round re-run, converging to a final round that raises nothing new).
+
+This retires the earlier framing that made the final re-run the source of *required* ids — which contradicted
+`fixed` (FINDING 2): a fixed finding's id is legitimately absent from the final audit. The final re-run is the
+residual check; the per-round union is the response-completeness check.
+
 ### 3. Stable finding identifiers — emitted by the audit, not invented by the author
 
 A response must survive re-review: when the author fixes H1 and re-runs the close audit, the still-open
 findings must keep the **same ids** so their existing responses still apply and only genuinely-new findings
-need a new response. So the **finding id is owned by the audit runner, not the triage author** — `verify-claims`
-emits a stable id per finding in its `audit_experiment` output (the same `id` the artifact references), and the
-author copies it, never invents it. This is a small **prerequisite on the audit-output format**: the close
-`audit_experiment` must emit a per-finding stable id (and the `SUMMARY:` line the gate already parses stays as
-the count cross-check). Making the audit emit that id is a dependency this schema declares; it is **filed as
-the child that touches the audit-runner contract** (coordinating with #154, which is reworking the
-audit-runner cross-family contract — the id-emission lands in the same audit-output surface #154 touches, so
-the two are sequenced, not duplicated). Until the audit emits stable ids, the gate falls back to requiring a
-response per finding **by position+text-hash**, which is the fragile path this decision exists to retire — so
-the stable-id emission is the load-bearing prerequisite, not an optimization.
+need a new response. So the **finding id is owned by the audit runner, not the triage author** — `audit_experiment`
+emits a stable id per finding in its output (the id the artifact references), and the author copies it, never
+invents it. This schema **depends on** that id emission; it does not, by itself, deliver it.
+
+**The hard part is open design, so the id-emission is a `needs-design` child, not `ready` (FINDING 3).** The
+close audit is a **stateless model** call: nothing in the runner inherently remembers that this round's
+"confound in the held-out split" finding is *the same* finding as last round's. Preserving an id across rounds
+needs a concrete mechanism, and the choice is genuinely open — candidates: (a) a **carry-forward packet** —
+feed the prior round's `(id, finding-text)` list into the next audit prompt and instruct the model to reuse an
+id when it re-raises the same finding; (b) a **content hash** over a normalized finding text (fragile to
+re-wording — the failure mode FINDING 3 names); (c) a **post-hoc matcher** that aligns this round's findings to
+prior ids by similarity. Each has a different behavior for the cases that actually matter — a finding that is
+**re-worded** but unchanged, one that is **fixed** (must not match), one that **splits** into two, and a
+**genuinely new** one. Specifying that mechanism + its behavior on {changed, fixed, split, new} is the
+substance of the child, and it touches the **same audit-output surface #154 reworks** — so it is sequenced with
+#154, not a duplicate rewrite. **Until that child lands, the close gate has no id-stable input**, so the
+schema's `id` field is unbacked; the gate is therefore `blocked-by` the id-emission child (and this schema's own
+reference doc is the one piece that ships first, since it only *declares* the `id` field's contract).
 
 ### 4. The closed status set + the pass/fail rule (fail-closed)
 
 **The closed status set** (a HIGH/MED response carries exactly one):
 
 - **`fixed`** — the finding was resolved by a change on the branch. Requires `commit` (an in-PR SHA). The
-  reviewer's re-run on the final diff is what *confirms* it is actually fixed; the status is the author's claim,
-  the re-run is the check.
+  finding's id is keyed to the round that **raised** it (`raised_in_round`), not the final round — a fixed
+  finding is *absent* from the final re-run by construction (decision 2a). Confirmation is the residual check:
+  the final round must not re-raise it. So the status is the author's claim that the round-N finding is gone;
+  the final-round re-run is the structural check that it (and no equivalent) reappeared.
 - **`justified`** — the finding is real but does **not** invalidate the headline claim, with a recorded
   reason. Requires `reason`. This is the "explicitly justified HIGH" the close protocol already permits — the
-  status that makes a raw `high=0` parse wrong, and the reason the artifact exists.
+  status that makes a raw `high=0` parse wrong, and the reason the artifact exists. **`justified` is the
+  status whose soundness the semantic layer judges** (decision 4, layer 2): the structural gate checks the
+  `reason` field is present; the cross-family close reviewer judges whether the reason actually disposes of the
+  finding. A present-but-hand-waving reason passes structure and fails semantics — which is exactly why the
+  gate is two layers, not a deterministic parse alone (FINDING 1).
 - **`deferred`** — the finding is real, out of scope for *this* experiment's claim, tracked in a follow-up
   issue. Requires `issue` (a same-repo `#N` or `owner/repo#N`; a bare reason is **not** enough — an unbacked
   deferral is exactly the silent-drop failure the gate prevents). **A `deferred` HIGH does NOT by itself let a
   *valid* experiment merge** (decision 4a) — deferral parks follow-up work, it does not dispose of a HIGH that
   bears on whether the headline claim holds.
 
-**The pass/fail rule the gate evaluates (deterministic, model-independent, fail-closed):**
+**The pass/fail rule — two layers, both must pass, fail-closed (FINDING 1):**
+
+**Layer 1 — deterministic structural gate (model-independent):**
 
 1. The artifact exists, parses, and `schema_version` is a known MAJOR — else **BLOCK**.
-2. `audit_sha` equals the head the gate re-ran the close audit on — else **BLOCK** (stale triage).
-3. Every HIGH/MED finding id the (re-run) close audit emitted has **exactly one** response with a valid
-   status + its required evidence — a missing response, a duplicate, an unknown id, or malformed evidence
-   **BLOCKS**.
-4. **Every HIGH** is `fixed` or `justified` (a `deferred` HIGH does **not** pass for a *valid-conclusion*
-   experiment — decision 4a). A HIGH that is `deferred`, `unresolved`, or absent **BLOCKS**.
-5. **MED** findings may be `fixed`, `justified`, or `deferred` (deferral with a tracking issue is acceptable
-   for a MED) — but every MED still needs one of those explicit responses; an unanswered MED **BLOCKS**.
+2. `final_audit_sha` equals the head the gate re-ran the close audit on — else **BLOCK** (stale triage).
+3. Every HIGH/MED id raised by **any** audit round (the union, decision 2a) has **exactly one** response with a
+   valid status + its required evidence field present — a missing response, a duplicate id, an id no round
+   raised, or a missing/forbidden evidence field **BLOCKS**.
+4. The **final round adds no unaccounted HIGH** (decision 2a residual check) — a fresh HIGH in
+   `final_audit_round` with no response **BLOCKS**.
+5. **Every HIGH** is `fixed` or `justified` (a `deferred` HIGH does **not** pass for a *valid-conclusion*
+   experiment — decision 4a). A HIGH that is `deferred`, `unresolved`, or absent **BLOCKS**. **MED** may be
+   `fixed`, `justified`, or `deferred` (with its tracking issue), but every MED still needs one explicit
+   response; an unanswered MED **BLOCKS**.
 
-So the merge passes only when the artifact accounts for **every** HIGH/MED finding and **no HIGH is left
-unfixed-and-unjustified**. Anything else — including a parse failure or a permission error reading the audit —
-**fails closed as BLOCKED**, never clean. (A `WF`-style override hatch is out of scope: this is a research-flow
-gate; its escape hatch, if any, is #157's to define alongside the gate code.)
+**Layer 2 — semantic adjudication by the cross-family close reviewer (FINDING 1):**
+
+6. The close reviewer (the opposite family, the same engine that produced the audit) **reads the triage
+   artifact and judges the soundness** of each `justified` reason and each `deferred` scope-claim against its
+   finding — exactly as ship-change's disposition-aware path has the reviewer adjudicate dispositions rather
+   than trust the author's label. A `justified` the reviewer finds does not actually dispose of the finding, or
+   a `deferred` it finds is in-scope-for-the-claim, is a **residual HIGH** that **BLOCKS** until re-triaged
+   (fixed, re-justified convincingly, or escalated to a #152 terminal state). The structural gate guarantees a
+   response *exists* and is *well-formed*; the semantic layer guarantees the response is *true*.
+
+So the merge passes only when **both** layers are green: the artifact structurally accounts for every HIGH/MED
+finding across rounds with no HIGH left unfixed-and-unjustified, **and** the cross-family reviewer accepts every
+justification/deferral as sound. Anything else — a parse failure, a permission error reading the audit, a
+reviewer-rejected justification — **fails closed as BLOCKED**, never clean. (A `WF`-style override hatch is out
+of scope: this is a research-flow gate; its escape hatch, if any, is #157's to define alongside the gate code.)
 
 ### 4a. Terminal-state coupling — a `deferred` HIGH must not silently close a *valid* experiment
 
@@ -194,11 +257,15 @@ share the **per-finding response vocabulary** — the same status set (`fixed | 
 required-evidence-per-status rule, the same stable-id keying — so an agent learns one shape and a reviewer
 reads one grammar across both gates. They differ only in **what they bind to** (the clearance binds the
 reviewed *brief* commit and gates the *run*; the triage binds the close-audit head and gates the *merge*) and
-in their **container fields** (clearance carries an approver + the brief SHA; triage carries `audit_sha` + the
-findings path). The shared vocabulary is the load-bearing coherence requirement between #151 and #145; the
-implementation children of both should factor the shared per-finding grammar into **one reference section both
-reference docs cite**, not two copies that drift. (Concretely: the per-finding `[[finding]]` shape is the
-shared part; #151 and #145 each wrap it in their own container.)
+in their **container fields** (clearance carries an approver + the brief SHA; triage carries `final_audit_sha`
++ rounds). The shared vocabulary is the load-bearing coherence requirement between #151 and #145, so it gets a
+**single canonical home, not an optional later factoring (FINDING 4):** the shared per-finding `[[finding]]`
+grammar (the status set, the required-evidence-per-status rule, the stable-id keying) ships as **its own
+reference doc** (working name `FINDING_RESPONSE.md`), and **both** the close-triage doc (decision 7) and #145's
+design-clearance doc **cite it** rather than restating it. That shared doc is the **root child** both #151 and
+#145 are `blocked-by` — defining it once is the only way the two gates cannot drift. (Concretely: the
+per-finding `[[finding]]` shape lives in `FINDING_RESPONSE.md`; #151 and #145 each ship only their own container
++ pass/fail rule and reference the shared shape.)
 
 ### 7. Packaging — a product reference doc, per-skill copies, distinct from `aar-profile`'s `SCHEMA.md`
 
@@ -210,18 +277,20 @@ independently), with a **`.aar-ci/checks.sh` drift guard** (`cmp -s` the two cop
 `SCHEMA.md`** — that name is already taken by #193 and owns the instance-profile schema; the close-triage
 schema is its own doc (working name `CLOSE_TRIAGE.md`) with its own `SCHEMA_VERSION`, its own drift-guard
 clause in `checks.sh`, and its own version line. Reusing the `SCHEMA.md` name would collide two unrelated
-schemas under one drift guard and one version marker. (If #145 factors out the shared per-finding grammar per
-decision 6, that shared section is a third reference doc both cite — also per-skill-copied + drift-guarded.)
+schemas under one drift guard and one version marker. The shared per-finding grammar (`FINDING_RESPONSE.md`,
+decision 6) is a **third** reference doc — also per-skill-copied + drift-guarded with its own `SCHEMA_VERSION` —
+that `CLOSE_TRIAGE.md` (and #145's clearance doc) cite; it is the root both gates depend on (FINDING 4), not an
+optional later factoring.
 
 ## Interface contract (what the rest of #130 consumes)
 
 | Consumer | Reads from this interface |
 |---|---|
-| **#157** run-experiment close/merge gate | the artifact at `experiments/<exp>/close_triage.{toml,json}`; the status set; the fail-closed pass/fail rule (decision 4); the `audit_sha` re-run binding |
+| **#157** run-experiment close/merge gate | the artifact at `experiments/<exp>/close_triage.{toml,json}`; the status set; the **two-layer** pass/fail rule (decision 4: structural + semantic); the `final_audit_sha`/round residual-check binding (decision 2a) |
 | **#155** canonical-path record layout | the file name `close_triage.toml` + that it lives in `experiments/<exp>/` (so the layout reserves the path) |
 | **#152** terminal experiment states | the seam in decision 4a — a HIGH that is neither fixed nor justified is a #152 terminal signal, not a #151 deferral; the gate passes on EITHER a clean triage OR a #152 terminal declaration |
-| **#145** design-clearance schema | the **shared per-finding response vocabulary** (decision 6): same status set + required-evidence + stable-id keying; the two artifacts differ only in container + what they bind to |
-| **#154** audit-runner cross-family contract | the **stable finding-id emission** (decision 3): the close `audit_experiment` must emit a per-finding stable id the triage references; this lands in the audit-output surface #154 touches |
+| **#145** design-clearance schema | the **shared per-finding grammar** (`FINDING_RESPONSE.md`, decision 6) both gates cite; the two artifacts differ only in container + what they bind to |
+| **#154** audit-runner cross-family contract | the **stable finding-id emission** is a `needs-design` dependency (decision 3): preserving an id across stateless re-review rounds is open design; it lands in the same audit-output surface #154 touches, so it is sequenced with #154 |
 
 ## Alternatives considered
 
@@ -243,49 +312,73 @@ decision 6, that shared section is a third reference doc both cite — also per-
   terminal. Deferral parks follow-up work; it does not dispose of a claim-bearing HIGH.
 - **A separate status set from #145.** Rejected (decision 6) — the design and close gates solve the same
   per-finding problem; two vocabularies would make an agent learn two shapes and would drift. Shared
-  vocabulary, different container.
+  vocabulary (`FINDING_RESPONSE.md`), different container.
+- **A purely deterministic merge gate (no semantic layer).** Rejected (FINDING 1) — a deterministic parse can
+  check a `justified` reason *exists*, never that it is *sound*; a hand-waved justification would pass and merge
+  a flawed experiment. The gate is two layers: deterministic structure + cross-family semantic adjudication,
+  the same shape ship-change's disposition-aware path already uses.
+- **Final-re-run as the source of required ids.** Rejected (FINDING 2) — a `fixed` finding is gone from the
+  final round by construction, so requiring its id to appear there would block every fix. The union across
+  rounds (keyed by `raised_in_round`) is the response-completeness set; the final round is only the residual
+  check.
+- **Stable-id emission as a `ready` child.** Rejected (FINDING 3) — preserving an id across *stateless* audit
+  rounds (re-worded / fixed / split / new findings) is open design, so the id-emission is a `needs-design`
+  dependency, not a transcription task.
 - **Reuse the `aar-profile` `SCHEMA.md` file.** Rejected (decision 7) — that name + drift guard + version
   marker are #193's and own an unrelated schema; the close-triage schema is its own reference doc.
 
 ## Blast radius
 
-- **New product artifact (a later `ready` child, not this PR):** the close-triage schema reference doc
-  (working name `CLOSE_TRIAGE.md`), shipped as two byte-identical per-skill copies under `experiment-lifecycle`
-  with a `.aar-ci/checks.sh` drift guard + `SCHEMA_VERSION` marker — the #193 packaging precedent, a distinct
-  file from `aar-profile`'s `SCHEMA.md`.
+- **New product artifacts (later children, not this PR):** the shared **`FINDING_RESPONSE.md`** (the per-finding
+  grammar both gates cite) and the **`CLOSE_TRIAGE.md`** close-triage schema doc, each shipped as two
+  byte-identical per-skill copies under `experiment-lifecycle` with a `.aar-ci/checks.sh` drift guard +
+  `SCHEMA_VERSION` marker — the #193 packaging precedent, both distinct files from `aar-profile`'s `SCHEMA.md`.
 - **`run-experiment` close gate (a `blocked-by` child, #157's surface):** gains the parse-the-artifact +
-  fail-closed pass/fail step (decision 4); replaces the implicit `high=0` reading with the artifact read.
-- **Audit-output format (decision 3, coordinated with #154):** the close `audit_experiment` must emit a stable
-  per-finding id; lands in the same audit-runner surface #154 reworks.
-- **Cluster coupling:** **prerequisite** that unblocks the #157 close-gate wiring (it lists the triage schema
-  in its `blocked-by`). **Adjacent** to #155 (reserves the file path), #152 (the terminal-state seam, decision
-  4a), #145 (shared per-finding vocabulary, decision 6), and #154 (stable-id emission, decision 3). It
+  **two-layer** pass/fail step (decision 4: deterministic structural gate + cross-family semantic adjudication);
+  replaces the implicit `high=0` reading with the artifact read.
+- **Audit-output format (decision 3, a `needs-design` dependency coordinated with #154):** the close
+  `audit_experiment` must emit a stable per-finding id that survives stateless re-review rounds — the
+  preservation mechanism is open design; lands in the same audit-runner surface #154 reworks.
+- **Cluster coupling:** **prerequisite** that unblocks the #157 close-gate wiring (it lists the triage schema in
+  its `blocked-by`). **Adjacent** to #155 (reserves the file path), #152 (the terminal-state seam, decision 4a),
+  #145 (shares `FINDING_RESPONSE.md`, decision 6), and #154 (the id-emission dependency, decision 3). It
   **contradicts no sibling** — it defines the close gate's input contract and names, but does not implement,
   each neighbor's enforcement.
 - **No runtime behavior ships in this PR** — doc-only design. The only thing that "breaks" if mis-specified is
   the children built on it, which is why it is reviewed first.
 
-## Decomposition (spawned `ready` children)
+## Decomposition (spawned children)
 
-This is a single-schema design with no open sub-decision left after this doc, so its children are `ready`:
+The schema is settled, but the post-review pass surfaced one genuinely-open sub-design (the id-preservation
+mechanism, FINDING 3), so the children split into `ready` and `needs-design`:
 
-1. **Close-triage schema reference doc** — ship `CLOSE_TRIAGE.md` (two byte-identical per-skill copies) stating
-   exactly this schema (location, `[[finding]]` grammar, status set + required evidence, version rule), with
-   the `.aar-ci/checks.sh` drift guard + `SCHEMA_VERSION` marker (the #193 precedent). The root child the gate
-   reads. `ready`.
-2. **Stable finding-id emission in the close audit output** — make `audit_experiment` (close) emit a stable
-   per-finding id the artifact references (decision 3), in the audit-output surface, **sequenced with #154** so
-   the two do not both rewrite that surface. `ready`, but coordinate with #154's status.
+**`ready`:**
+1. **Shared per-finding grammar (`FINDING_RESPONSE.md`)** — the root child both this gate and #145 cite
+   (decision 6, FINDING 4): the `[[finding]]` shape, the status set (`fixed | justified | deferred`), the
+   required-evidence-per-status rule, the stable-id keying. Two byte-identical per-skill copies +
+   `.aar-ci/checks.sh` drift guard + `SCHEMA_VERSION`. **Ships first** — #145 and child 2 are `blocked-by` it.
+   `ready`.
+2. **Close-triage schema reference doc (`CLOSE_TRIAGE.md`)** — the close-specific container + the two-layer
+   pass/fail rule + the round model (decisions 1, 2, 2a, 4, 5, 7), citing `FINDING_RESPONSE.md`. Two per-skill
+   copies + drift guard + `SCHEMA_VERSION`. `ready`, **`blocked-by` child 1**.
 
-The **close-gate wiring itself** (parse the artifact, evaluate the pass/fail rule, the #152 terminal-state OR
-branch) is **#157's** `run-experiment` close-gate child, `blocked-by` child 1 here (and #155 for the path, #152
-for the terminal branch) — it is not a child this design spawns, it is the consumer #157 already tracks.
+**`needs-design`:**
+3. **Stable finding-id preservation across audit rounds** — the mechanism by which a stateless close
+   `audit_experiment` reuses an id when it re-raises the same finding (decision 3, FINDING 3): carry-forward
+   packet vs content-hash vs post-hoc matcher, and the defined behavior for {re-worded, fixed, split, new}
+   findings. Open design; sequenced with #154 (same audit-output surface). `needs-design`.
+
+The **close-gate wiring itself** (parse the artifact, evaluate the two-layer rule, the #152 terminal-state OR
+branch) is **#157's** `run-experiment` close-gate child, `blocked-by` children 1+2 here, child 3 (no
+id-stable input until it lands), #155 (path), and #152 (terminal branch) — it is not a child this design
+spawns, it is the consumer #157 already tracks.
 
 ## Rollout + rollback
 
 Doc-only design PR; lands the schema on `main` via the `--scaffold` gate, closing exactly #151. Then the
-`ready` children above land the reference doc + the audit-id emission as normal single-phase ship-change runs;
-the close-gate wiring follows as #157's `blocked-by` child once this and its co-requisites (#155, #152) land.
-Rollback is a plain revert of each spawned child — the reference doc is inert text until #157's gate consumes
-it, so reverting strands no run; the lifecycle falls back to the status-quo local-file close audit with no data
-loss (the audit engine itself is unchanged).
+`ready` children land in order (`FINDING_RESPONSE.md` first, then `CLOSE_TRIAGE.md`) as normal single-phase
+ship-change runs; the `needs-design` id-preservation child gets its own design pass (with #154); the close-gate
+wiring follows as #157's `blocked-by` child once all of these and its co-requisites (#155, #152) land. Rollback
+is a plain revert of each spawned child — the reference docs are inert text until #157's gate consumes them, so
+reverting strands no run; the lifecycle falls back to the status-quo local-file close audit with no data loss
+(the audit engine itself is unchanged).
