@@ -391,13 +391,39 @@ if echo "$PLAIN12" | grep -q 'SUPERSECRETTOKEN'; then
 else
   pass "F1 r14: plain doctor verdict advice redacts the credential-bearing target"
 fi
-# F2 r14 (structural): the HTTPS URL parse strips userinfo from the host and passes username= to credential
-# fill, so a username-qualified remote (https://user@github.com/…) is keyed on host=github.com, not user@host.
-if grep -q 'split off any `userinfo@` BEFORE taking the host' "$WF" \
+# F2 r14 (structural): credential fill is keyed on the PARSED authority host (url_host), and a username is
+# passed when present — so a username-qualified remote keys on host=github.com, not user@host.
+if grep -q 'parsed_host=\$(url_host "\$url")' "$WF" \
    && grep -q 'username=%s' "$WF"; then
-  pass "F2 r14: HTTPS parse strips userinfo from host + passes username to credential fill (structural)"
+  pass "F2 r14: credential fill keyed on parsed authority host + passes username (structural)"
 else
-  fail "F2 r14: HTTPS parse does not strip userinfo / pass username"
+  fail "F2 r14: credential fill host/username handling is wrong"
+fi
+# F1 r16b (HIGH): an authority-spoof remote `https://evil.example/path@github.com/o/r` has TRUE host
+# evil.example — it must be rejected by the parsed allowlist (NOT treated as github.com), so a github.com
+# credential is never handed to the attacker host. Unit-check url_host/is_github_remote_url on the spoof + the
+# behavioral path (the spoof origin is skipped, not probed).
+SPOOF_OK=1
+eval "$(awk '/^url_host\(\)\{/,/^\}$/' "$WF")" 2>/dev/null || SPOOF_OK=0
+eval "$(awk '/^is_github_remote_url\(\)\{/,/^\}$/' "$WF")" 2>/dev/null || SPOOF_OK=0
+if [ "$SPOOF_OK" = 1 ] \
+   && [ "$(url_host 'https://evil.example/path@github.com/o/r.git')" = evil.example ] \
+   && ! is_github_remote_url 'https://evil.example/path@github.com/o/r.git' \
+   && is_github_remote_url 'https://user@github.com/o/r.git'; then
+  pass "F1 r16b: authority-spoof (evil/path@github.com) parsed as host=evil.example -> rejected (no cred exfil)"
+else
+  fail "F1 r16b: authority-spoof not correctly rejected by the parsed host allowlist"
+fi
+# behavioral: a worktree whose origin is the spoof must be skipped (not dry-run-probed against the attacker host)
+WT16c="$TMP/wt-spoof"; mkdir -p "$WT16c"
+"$REAL_GIT" -C "$WT16c" init -q
+"$REAL_GIT" -C "$WT16c" remote add origin "https://evil.example/path@github.com/o/r.git"
+: > "$MUTLOG"
+RO_TARGET="$WT16c" RO_GIT_HTTPS=accepted run_strict "RO_aaa" "" "" denied rejected || true
+if grep 'GIT_PUSH_ATTEMPT' "$MUTLOG" | grep -q 'evil.example'; then
+  fail "F1 r16b: the authority-spoof origin was dry-run-probed (cred-exfil risk)"
+else
+  pass "F1 r16b: authority-spoof origin skipped (not probed against the attacker host)"
 fi
 if echo "$RO_OUT" | grep -q 'not a GitHub remote'; then
   # assert NO push targeted the non-GitHub origin URL (the push-target is the arg right after `push` + flags);

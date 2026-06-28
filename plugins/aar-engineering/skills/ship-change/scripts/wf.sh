@@ -1075,6 +1075,39 @@ doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 i
 # credential-bearing remote (https://user:TOKEN@host/…) never leaks its token into doctor/CI logs (#166 F1 r13).
 redact_userinfo(){ printf '%s' "$1" | sed -E 's#(://)[^/@[:space:]]+@#\1<redacted>@#g'; }
 
+# url_host <url> — extract the TRUE authority host from a remote URL, correctly (not a glob). The authority is
+# the segment after `://` up to the first `/`, `?`, or `#`; userinfo is everything up to the LAST `@` WITHIN
+# that authority (userinfo cannot contain `/`); the host is the authority minus userinfo minus any `:port`.
+# For scp-style `user@host:path`, the host is between the (optional) `user@` and the first `:`. Prints the host
+# (lowercased) or empty. This is the load-bearing anti-spoof: `https://evil.example/path@github.com/o/r` has
+# authority `evil.example` (the `@github.com/…` is PATH, not host), so this returns evil.example, NOT github.com
+# (#166 code-review F1 r16b).
+url_host(){
+  local u=$1 auth host
+  case "$u" in
+    *://*)
+      auth=${u#*://}            # strip scheme
+      auth=${auth%%/*}          # authority = up to first '/'
+      auth=${auth%%\?*}; auth=${auth%%#*}
+      auth=${auth##*@}          # drop userinfo (everything up to the LAST '@' in the authority)
+      host=${auth%%:*}          # drop :port
+      ;;
+    *@*:*)                       # scp-style user@host:path
+      host=${u#*@}; host=${host%%:*} ;;
+    *:*)                         # scp-style host:path (no user)
+      host=${u%%:*} ;;
+    *) host="" ;;
+  esac
+  printf '%s' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+# is_github_remote_url <url> — true ONLY if the URL's TRUE authority host is EXACTLY github.com or
+# ssh.github.com (parsed, not glob-matched), closing the `…@github.com/…`-in-path spoof (#166 F1 r16b).
+is_github_remote_url(){
+  local h; h=$(url_host "$1")
+  [ "$h" = github.com ] || [ "$h" = ssh.github.com ]
+}
+
 readonly_token_cmd(){ echo "${WF_READONLY_TOKEN_CMD:-}"; }            # the instance read-only minter seam
 readonly_token_info_cmd(){ echo "${WF_READONLY_TOKEN_INFO_CMD:-}"; }  # its paired machine-verifiable perms
 
@@ -1223,19 +1256,23 @@ readonly_probe_one_push_url(){
   local cred_in cred_out parsed_host parsed_proto parsed_path parsed_user rest
   parsed_proto=${url%%://*}; case "$url" in *://*) : ;; *) parsed_proto=ssh ;; esac
   parsed_user=""
+  # Use the PARSED authority host (url_host), never an inline glob-prone parse — so the host handed to
+  # credential fill is the URL's TRUE host, and a spoofed `…@github.com/…` path can never coax a github.com
+  # credential out for an attacker host (#166 code-review F1 r16b). All `urls` here are already validated as
+  # exactly github.com/ssh.github.com, so parsed_host is github.com/ssh.github.com by construction.
+  parsed_host=$(url_host "$url"); [ -n "$parsed_host" ] || parsed_host=github.com
   case "$url" in
     https://*)
       rest=${url#https://}
-      # split off any `userinfo@` BEFORE taking the host, so a username-qualified URL
-      # (https://user@github.com/o/r) yields host=github.com + username=user, not host=user@github.com
-      # (#166 code-review F2 r14 — a mis-parsed host would mis-key credential fill and risk a false-pass).
-      case "$rest" in
-        *@*) parsed_user=${rest%%@*}; rest=${rest#*@}; parsed_user=${parsed_user%%:*} ;;  # drop any :password
+      # userinfo (a username) is BEFORE the first '/' in the authority; extract it from the authority only.
+      local authority=${rest%%/*}
+      case "$authority" in
+        *@*) parsed_user=${authority%@*}; parsed_user=${parsed_user%%:*} ;;  # username, drop any :password
       esac
-      parsed_path=${rest#*/}; parsed_host=${rest%%/*}
-      [ "$parsed_path" = "$parsed_host" ] && parsed_path=""
+      parsed_path=${rest#*/}
+      [ "$parsed_path" = "$rest" ] && parsed_path=""
       ;;
-    *) parsed_host=github.com; parsed_path="" ;;
+    *) parsed_path="" ;;
   esac
   # `git credential fill` resolves the ambient credential using git's OWN rules (handles helpers with args,
   # url-scoped helpers, !-commands) and performs only `get` — no mutation. Run in the TARGET WORKTREE context
@@ -1305,14 +1342,8 @@ readonly_probe_git_push(){
     local nongithub_seen=0
     while IFS= read -r origin_url; do
       [ -n "$origin_url" ] || continue
-      case "$origin_url" in
-        https://github.com/*|https://github.com:*|https://*@github.com/*|https://*@github.com:*|\
-        git@github.com:*|git@ssh.github.com:*|\
-        ssh://git@github.com/*|ssh://github.com/*|ssh://git@github.com:*|ssh://github.com:*|\
-        ssh://git@ssh.github.com/*|ssh://ssh.github.com/*|ssh://git@ssh.github.com:*|ssh://ssh.github.com:*)
-          urls+=("$origin_url") ;;
-        *) nongithub_seen=1 ;;
-      esac
+      # PARSED host check (not a glob) — closes the `https://evil/path@github.com/…` authority spoof (#166 r16b).
+      if is_github_remote_url "$origin_url"; then urls+=("$origin_url"); else nongithub_seen=1; fi
     done < <(git -C "$wt" remote get-url --push --all origin 2>/dev/null || true)
     [ "$nongithub_seen" = 1 ] && echo "    ambient git push: note — a worktree origin push URL is not a GitHub remote; skipped (its URL is not echoed; a non-GitHub remote helper is not executed). Probing synthesized GitHub URLs only."
   fi
