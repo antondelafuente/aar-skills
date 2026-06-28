@@ -239,4 +239,29 @@ echo "$DOUT" | grep -q "DRY-RUN would bind+reap" && ok dryrun-logs-would-bind ||
 [ "$(lease show "$DRYPEND" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = intent ] \
   && ok dryrun-pending-not-bound || no dryrun-pending-not-bound
 
+# === round-6 Finding 2: an unknown/typo arg must FAIL, never silently run a live destructive sweep ===
+if bash "$REAPER" --dryrun >/dev/null 2>&1; then no unknown-arg-rejected; else ok unknown-arg-rejected; fi
+if bash "$REAPER" extra >/dev/null 2>&1; then no surplus-arg-rejected; else ok surplus-arg-rejected; fi
+
+# === round-6 Finding 1: a STALE `reaping` lease (crashed reaper) is RECLAIMED + reaped ===
+: > "$DEL_LOG"; : > "$TMP/delfail"; rm -f "$TMP"/pods_*.txt
+STALE=$(mk_lease pod-stale -1 RUNPOD_API_KEY)
+lease claim-reaping "$STALE" >/dev/null         # claim it, then leave it stuck `reaping` (simulated crash)
+[ "$(lease show "$STALE" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = reaping ] \
+  && ok stale-fixture-reaping || no stale-fixture-reaping
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-stale $STALE
+EOF
+# a 0s staleness window makes the claim immediately stale -> the sweep reclaims + reaps it
+GPU_JOB_STALE_REAPING_SEC=0 bash "$REAPER" >/dev/null 2>&1
+deleted pod-stale && ok stale-reaping-reaped || no stale-reaping-reaped
+# a FRESH reaping claim (default 900s window) is NOT reclaimed by a sweep
+: > "$DEL_LOG"
+FRESH2=$(mk_lease pod-fresh2 -1 RUNPOD_API_KEY); lease claim-reaping "$FRESH2" >/dev/null
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-fresh2 $FRESH2
+EOF
+bash "$REAPER" >/dev/null 2>&1
+deleted pod-fresh2 && no fresh-reaping-reaped || ok fresh-reaping-protected
+
 [ "$fails" = 0 ] && { echo "pod_reaper smoke PASS"; exit 0; } || { echo "pod_reaper smoke FAIL"; exit 1; }

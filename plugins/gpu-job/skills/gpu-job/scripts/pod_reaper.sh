@@ -48,6 +48,9 @@ CFG="$HOME/.config/gpu-job/env"
 
 DRY=0
 [ "${1:-}" = "--dry-run" ] && { DRY=1; shift; }
+# Reject any other/leftover argument — a typo like `--dryrun` must NOT silently run a LIVE destructive
+# sweep (round-6 Finding 2).
+[ $# -eq 0 ] || { echo "pod_reaper: unexpected argument(s): $* (only optional --dry-run is accepted)" >&2; exit 2; }
 
 log(){ echo "[reaper $(date -u +%H:%M:%S)] $*"; }
 
@@ -194,11 +197,17 @@ reap_lease(){ # <nonce> <key> <pod-id>
 # Decide for one expired-candidate lease, including the legacy keepalive check.
 consider_lease(){ # <nonce>
   local nonce=$1 pod=${LEASE_POD[$nonce]} state=${LEASE_STATE[$nonce]}
-  case "$state" in intent|provisional|enriched) : ;; *) return ;; esac   # closed/reaping/invalid: skip
+  # We consider non-terminal leases AND `reaping` leases (a `reaping` lease may be a STALE claim left by
+  # a crashed reaper — round-6 Finding 1; claim-reaping reclaims it only if stale). closed/invalid skip.
+  case "$state" in intent|provisional|enriched|reaping) : ;; *) return ;; esac
   # A lease with no bound pod id (a pending INTENT) is handled in step 2 by matching its nonce against
   # the LIVE pod list — we never DELETE a placeholder id here.
   [ -n "$pod" ] && [ "$pod" != "-" ] || return
-  bash "$LEASE" is-reapable "$nonce" || { kept=$((kept+1)); return; }     # not expired -> keep
+  # A `reaping` lease skips the is-reapable gate (its expiry was already past when claimed); reap_lease's
+  # claim-reaping decides whether it's a reclaimable STALE claim or a live reaper's fresh claim.
+  if [ "$state" != reaping ]; then
+    bash "$LEASE" is-reapable "$nonce" || { kept=$((kept+1)); return; }   # not expired -> keep
+  fi
   local key_ref key
   key_ref=$(bash "$LEASE" show "$nonce" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("key_ref",""))' 2>/dev/null)
   key=$(resolve_key "$key_ref")
@@ -277,32 +286,39 @@ done
 
 # 2. report-only over live pods that no lease accounts for. A pod with no lease and no UNIQUE matching
 #    pending-intent nonce is REPORTED, never deleted.
-declare -A PROCESSED_POD
+# HANDLED_POD is set only when a pod is DEFINITIVELY handled (reaped, or reported as unknown/ambiguous/
+# accounted-for) — NOT on a key_ref-mismatch (round-6 Finding 4): two key_refs resolving to the same
+# account must not let the FIRST key mark a half-born pod processed before the MATCHING key_ref reaps
+# it. SEEN_POD_KR dedups the same pod re-listed under the SAME key only.
+declare -A HANDLED_POD SEEN_POD_KR
 for kr in "${!KEY_FOR_REF[@]}"; do
   [ "${LIST_OK[$kr]:-0}" = 1 ] || continue                 # an unlistable key was already reported
   key=${KEY_FOR_REF[$kr]}
   while read -r pod name; do
     [ -n "${pod:-}" ] || continue
-    [ -n "${PROCESSED_POD[$pod]:-}" ] && continue          # already handled (same pod under another key listing)
-    PROCESSED_POD["$pod"]=1
-    [ -n "${POD_TO_NONCE[$pod]:-}" ] && continue          # accounted for by a lease
+    [ -n "${SEEN_POD_KR[$pod|$kr]:-}" ] && continue        # same pod re-listed under the same key
+    SEEN_POD_KR["$pod|$kr"]=1
+    [ -n "${HANDLED_POD[$pod]:-}" ] && continue            # already definitively handled under another key
+    if [ -n "${POD_TO_NONCE[$pod]:-}" ]; then HANDLED_POD["$pod"]=1; continue; fi   # accounted for by a lease
     # A duplicated live name is ambiguous -> report-only, never reap (Finding 4).
     if [ "${NAME_COUNT[$name]:-0}" -gt 1 ]; then
-      log "report-only (AMBIGUOUS — $name on >1 live pod): pod=$pod"; reported=$((reported+1)); continue
+      log "report-only (AMBIGUOUS — $name on >1 live pod): pod=$pod"; reported=$((reported+1)); HANDLED_POD["$pod"]=1; continue
     fi
     # match an unknown pod to a UNIQUE PENDING INTENT by nonce (find-nonce returns only intent leases
     # with no pod_id; ambiguous-intent -> empty=report)
     m=$(bash "$LEASE" find-nonce "$name")
     if [ -z "$m" ]; then
-      log "report-only (UNKNOWN pod, no lease — NEVER deleted): pod=$pod name=$name"; reported=$((reported+1)); continue
+      log "report-only (UNKNOWN pod, no lease — NEVER deleted): pod=$pod name=$name"; reported=$((reported+1)); HANDLED_POD["$pod"]=1; continue
     fi
     # SCOPE the match to THIS key (round-3 Finding 4): the intent's recorded key_ref must equal the key
     # we're currently listing under, or a pod under another account could be rebound + deleted by the
-    # wrong lease. Mismatch -> report-only.
+    # wrong lease. Mismatch -> report-only AND do NOT mark handled, so the MATCHING key_ref (which may be
+    # iterated later) still gets to reap this half-born pod (round-6 Finding 4).
     m_kr=$(bash "$LEASE" show "$m" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("key_ref",""))' 2>/dev/null)
     if [ "$m_kr" != "$kr" ]; then
-      log "report-only (pending-intent under a different key_ref '$m_kr' != '$kr'): pod=$pod nonce=$m"; reported=$((reported+1)); continue
+      log "report (pending-intent under a different key_ref '$m_kr' != '$kr'; awaiting its own key): pod=$pod nonce=$m"; reported=$((reported+1)); continue
     fi
+    HANDLED_POD["$pod"]=1
     # The created-but-id-never-returned case: a live pod whose NAME is an EXPIRED intent nonce — the
     # half-born pod the intent exists to catch. Bind the discovered id + reap under the locked claim.
     if bash "$LEASE" is-reapable "$m"; then

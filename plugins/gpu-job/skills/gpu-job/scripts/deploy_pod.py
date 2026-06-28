@@ -238,8 +238,9 @@ def deploy(nonce=None):
                               f"DELETE the un-leased pod", flush=True)
                         gone = delete_pod_now(pid)
                         try:
-                            # emergency unreaped-pod record: the one place the sweep/human must look
-                            lease("enrich", nonce, "--expiry-min", "0", check=False)
+                            # emergency record: bind the discovered id + force expiry NOW so the reaper
+                            # reaps it if the synchronous DELETE above didn't (the one place to look).
+                            lease("emergency", nonce, str(pid), check=False)
                         except Exception:
                             pass
                         raise SystemExit(f"[deploy] provisional lease write failed; pod {pid} "

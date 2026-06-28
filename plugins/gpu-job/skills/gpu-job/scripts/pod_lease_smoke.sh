@@ -82,6 +82,20 @@ CF=$(run intent RUNPOD_API_KEY --expiry-min 120); run provisional "$CF" pod-cf >
 if run claim-reaping "$CF" >/dev/null 2>&1; then no claim-fresh-fails; else ok claim-fresh-fails; fi
 [ "$(field "$CF" state)" = provisional ] && ok claim-fresh-no-mutation || no claim-fresh-no-mutation
 
+# --- claim-reaping staleness (Finding 1): a FRESH reaping claim is NOT reclaimable; a STALE one is ---
+FRC=$(run intent RUNPOD_API_KEY --expiry-min -1); run provisional "$FRC" pod-frc >/dev/null
+run claim-reaping "$FRC" >/dev/null                       # first claim succeeds, sets claimed_at=now
+if GPU_JOB_STALE_REAPING_SEC=900 run claim-reaping "$FRC" >/dev/null 2>&1; then no fresh-reaping-not-reclaimable; else ok fresh-reaping-not-reclaimable; fi
+# with a 0s staleness window, the same claim is immediately stale -> reclaimable (a crashed-reaper retry)
+if GPU_JOB_STALE_REAPING_SEC=0 run claim-reaping "$FRC" >/dev/null 2>&1; then ok stale-reaping-reclaimable; else no stale-reaping-reclaimable; fi
+
+# --- emergency: binds a pod id + forces expiry NOW even from an intent-only lease (Finding 3) ---
+EM=$(run intent RUNPOD_API_KEY --expiry-min 600)          # intent only, future expiry
+run emergency "$EM" pod-em >/dev/null
+[ "$(field "$EM" pod_id)" = pod-em ]   && ok emergency-binds-pod   || no emergency-binds-pod
+[ "$(field "$EM" state)" = provisional ] && ok emergency-provisional || no emergency-provisional
+if run is-reapable "$EM"; then ok emergency-reapable || true; else no emergency-reapable; fi
+
 # --- unclaim-reaping: reverts a reaping lease to a reapable active state (enriched if ssh present) ---
 run enrich "$CR" --ssh 5.5.5.5:22 --expiry-min -1 >/dev/null 2>&1 || true   # CR is reaping -> enrich refused; use a fresh one
 UC=$(run intent RUNPOD_API_KEY --expiry-min -1); run provisional "$UC" pod-uc >/dev/null

@@ -57,7 +57,7 @@ set -euo pipefail
 # caller's shell must never leak into a lease write (round-3 Finding 3). Clear them up front — every
 # real mutation sets the ones it means via an inline `VAR=val write_record` call, which re-exports just
 # those for that single subprocess.
-unset POD_ID SSH STATE COST EXPIRY_MIN NONCE KEY_REF CREATE 2>/dev/null || true
+unset POD_ID SSH STATE COST EXPIRY_MIN NONCE KEY_REF CREATE CLAIMED_AT 2>/dev/null || true
 
 ROOT="${GPU_JOB_LEASE_DIR:-$HOME/.config/gpu-job/leases}"
 
@@ -171,6 +171,9 @@ if not creating:
     cost = os.environ.get("COST", "")
     if cost != "":
         rec["cost_per_hr"] = cost
+    ca = os.environ.get("CLAIMED_AT", "")
+    if ca != "":
+        rec["claimed_at"] = int(ca)
 em = os.environ.get("EXPIRY_MIN", "")
 if em != "":
     rec["expiry_at"] = now + int(float(em) * 60)
@@ -293,6 +296,28 @@ cmd_refresh(){
   echo "refreshed lease $id (expiry +${expiry_min}min)"
 }
 
+# emergency: the provisional-write-failure path (deploy_pod.py). The pod is REST-created and billing but
+# its lease is still `intent`; this binds the discovered pod id AND forces expiry to NOW in one atomic
+# write, tolerant of the intent state (round-6 Finding 3 — enrich refuses an intent-only lease, so it
+# couldn't force expiry here). The result is a provisional, already-expired lease the reaper reaps on
+# the next sweep — the explicit emergency record, never a silent un-leased orphan.
+cmd_emergency(){
+  local id=$1 pod=$2
+  require_val "<pod-id>" "$pod"
+  local file; file=$(record_path "$id")
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    intent|provisional|enriched) : ;;
+    absent)  die "emergency: no lease for '$id'";;
+    invalid) die "emergency: lease '$id' is malformed — inspect $file";;
+    closed)  die "emergency: lease '$id' is closed (terminal) — refusing";;
+    reaping) echo "emergency: lease '$id' already reaping (no-op)"; return 0;;
+    *) die "emergency: unexpected state '$state'";;
+  esac
+  POD_ID="$pod" STATE=provisional EXPIRY_MIN="0" write_record "$file"
+  echo "emergency lease $id bound pod $pod, expired NOW (reaper will reap)"
+}
+
 # expire: set expiry_at to NOW so the lease is IMMEDIATELY reapable on the next sweep. Used by teardown
 # when a delete could not be verified gone (round-4 Finding 3): the lease must not keep its future run
 # expiry, or the reaper wouldn't retry the abandoned-but-billing pod for hours. Refuses terminal leases.
@@ -346,28 +371,37 @@ cmd_reaping(){
 # iff the claim succeeded (caller may now DELETE); exit 1 if a concurrent refresh moved expiry into the
 # future (no mutation — the pod is kept). This collapses the former is-reapable + reaping two-call
 # window where a refresh could land between the unlock and the mark.
+# A reaping claim older than this is STALE (the reaper crashed after claiming, before delete+verify) and
+# is reclaimable, so a stuck `reaping` lease never bills forever (round-6 Finding 1). Instance-tunable.
+STALE_REAPING_SEC="${GPU_JOB_STALE_REAPING_SEC:-900}"
+
 cmd_claim_reaping(){
   local id=$1; local file; file=$(record_path "$id")
-  # reapable? (same predicate as is-reapable, but evaluated HERE inside the lock)
-  local reapable
-  reapable=$(python3 - "$file" <<'PY'
-import json, sys, time
+  # Reclaimable INSIDE the lock iff: a reapable (expired, non-terminal) lease, OR a STALE `reaping`
+  # claim (a prior reaper crashed mid-reap). A `reaping` claim younger than the staleness window is
+  # owned by a live reaper -> not reclaimable (exit 1, no double-reap).
+  local verdict
+  verdict=$(STALE="$STALE_REAPING_SEC" python3 - "$file" <<'PY'
+import json, os, sys, time
 try:
     d = json.load(open(sys.argv[1]))
     if not isinstance(d, dict):
         raise ValueError
 except Exception:
     print("no"); sys.exit(0)
-state = d.get("state")
-exp = d.get("expiry_at")
-if state in ("intent", "provisional", "enriched") and isinstance(exp, int) and exp <= int(time.time()):
-    print("yes")
+now = int(time.time()); state = d.get("state"); exp = d.get("expiry_at")
+stale = int(os.environ.get("STALE", "900"))
+if state in ("intent", "provisional", "enriched") and isinstance(exp, int) and exp <= now:
+    print("claim")
+elif state == "reaping":
+    ca = d.get("claimed_at")
+    print("claim" if (not isinstance(ca, int) or (now - ca) >= stale) else "no")
 else:
     print("no")
 PY
 )
-  [ "$reapable" = yes ] || { echo "claim-reaping: lease '$id' not reapable (refreshed/closed) — keep" >&2; exit 1; }
-  STATE=reaping write_record "$file"
+  [ "$verdict" = claim ] || { echo "claim-reaping: lease '$id' not reclaimable (refreshed/closed/fresh-claim) — keep" >&2; exit 1; }
+  CLAIMED_AT="$(date -u +%s)" STATE=reaping write_record "$file"
   echo "claimed lease $id for reaping"
 }
 
@@ -490,6 +524,10 @@ main(){
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "expire: unexpected extra argument(s): $*"
       with_lock "$id" cmd_expire "$id";;
+    emergency)
+      validate_id "${1:-}"; local id=$1; shift
+      [ $# -ge 1 ] || die "usage: pod_lease.sh emergency <nonce> <pod-id>"
+      with_lock "$id" cmd_emergency "$id" "$@";;
     reaping)
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "reaping: unexpected extra argument(s): $*"
@@ -518,7 +556,7 @@ main(){
     find-nonce)
       [ $# -eq 1 ] || die "usage: pod_lease.sh find-nonce <pod-name>"
       cmd_find_nonce "$1";;
-    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|expire|reaping|claim-reaping|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
+    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|expire|emergency|reaping|claim-reaping|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
     *) die "unknown subcommand '$sub'";;
   esac
 }
