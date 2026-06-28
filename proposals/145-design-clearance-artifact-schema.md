@@ -291,15 +291,23 @@ identity and content:
    error, or unknown major version → BLOCK.
 2. **`decision == "cleared"`.** Any other value (`blocked`, or absent) → BLOCK.
 3. **`experiment`** equals the `experiments/<exp>/` directory name → else BLOCK (mis-filed artifact).
-4. **Brief integrity (the re-clearance trigger).** Each drift-checked unit exists at `brief_commit` and its
-   **current working-tree content** matches its `brief_blobs` digest: `DESIGN.md` whole, `START.md` whole, and
-   the **gate-definition section of `CHECKLIST.md`** (the static gates — *not* the run-evidence section the
-   executor mutates; see "Checklist" above). The executor compares content, not commit identity (clearance is
-   its own commit on top, so `HEAD != brief_commit` always — comparing SHAs directly would block every run);
-   each unit's current digest must equal its `brief_blobs` entry. Any drift-checked unit changed after clearance
-   → BLOCK with "brief changed since clearance — re-clear before running." This is #130's "any later change
-   forces re-clearance" for the load-bearing brief content, made mechanical, while leaving checklist evidence
-   freely writable.
+4. **Brief integrity (the re-clearance trigger) — two-sided, both against `brief_blobs`.** The drift-checked
+   units are `DESIGN.md` whole, `START.md` whole, and the **gate-definition block of `CHECKLIST.md`** (the
+   static gates — *not* the run-evidence section the executor mutates; see "Checklist" above). For each unit the
+   executor performs **both** comparisons, and BLOCKs on either mismatch:
+   - **(a) `brief_blobs` actually describes the audited commit.** Recompute the unit's digest **from the Git
+     tree at `brief_commit`** and require it equals the `brief_blobs` entry. This closes the hole where a
+     `brief_blobs` digest is fabricated to match drifted working-tree content while `brief_commit` (the audited
+     SHA) holds different bytes — without it, the gate could bind the audit SHA but run un-audited content.
+   - **(b) the working tree has not drifted since clearance.** Recompute the unit's digest from the **current
+     working-tree content** and require it equals the same `brief_blobs` entry.
+
+   The executor compares content digests, not commit identity (clearance is its own commit on top, so
+   `HEAD != brief_commit` always — comparing SHAs directly would block every run). (a) anchors `brief_blobs` to
+   the audited commit; (b) is the re-clearance trigger. Any unit failing either → BLOCK with the precise reason
+   ("brief_blobs does not match brief_commit" or "brief changed since clearance — re-clear before running").
+   This is #130's "any later change forces re-clearance" for the load-bearing brief content, made mechanical,
+   while leaving checklist evidence freely writable.
 5. **Audit binds the cleared brief.** `design_audit.audit_commit == brief_commit` → else BLOCK (the audited
    design is not the brief being run). Consistent with fixing findings via the fix loop above — the binding
    audit is the *final* one.
@@ -441,7 +449,11 @@ Doc-only design PR: lands the schema on `main` via the `--scaffold` gate, then s
    consumer child.
 1. **`design-experiment`: write `CLEARANCE.json` at clearance** — the producer step: after the authorized
    non-merge-satisfying clearance event exists against the final brief commit, record the `approval` block,
-   finding responses, `brief_commit`, and `brief_blobs`; commit + a writer-side schema assert.
+   finding responses, `brief_commit`, and `brief_blobs`; commit + a writer-side schema assert. **Includes the
+   checklist contract restructure**: add the `BEGIN GATES`/`END GATES` markers to `CHECKLIST_TEMPLATE.md` and
+   update both `design-experiment` (gates defined inside the block) and `run-experiment` (evidence written
+   *outside* the block, "tick in place" relocated below `END GATES`) instructions + tests, so producer and
+   consumer hash the same gate bytes and in-place evidence edits never trip the drift check.
 2. **`run-experiment`: read + evaluate `CLEARANCE.json` as the pre-spend gate (GitHub path only)** — the
    consumer step + the 7-rule fail-closed proceed rule, with smokes that each of these BLOCKs: a
    missing/malformed file; a brief-drifted file (gate-definition section changed) — while checklist *evidence*
