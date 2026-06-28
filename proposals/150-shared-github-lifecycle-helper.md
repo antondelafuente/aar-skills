@@ -39,9 +39,12 @@ marks some of those functions *merge-authority* — they must load their code fr
 the branch under review — and ships a poisoned-helper smoke that proves the split holds; **(3)** a host for the
 library that is neither the build plugin nor the read-only audit plugin; and **(4)** a rollback path that keeps
 `wf.sh` working throughout and lets the extraction be reverted as one unit before any experiment PR depends on
-it. The cross-family *enforcement* logic stays where it already lives — the helper carries the identity and
-posting mechanics, but it does not become a second home for the "is this reviewer the opposite family" check
-(that boundary is owned by #154 and is explicitly out of this helper's scope; see *Blast radius*).
+it. The cross-family enforcement boundary is **one rule, stated once and the same everywhere** (round-5
+FINDING 2): the helper enforces explicit-family, fail-closed on the model-judged rungs **it itself runs** (the
+`--design` and close reviews — exactly as `wf.sh` already does for `--scaffold`/`--code`), while the **read-only
+rungs** (`verify_claim`, `--data`) are enforced by **#154** in `verify-claims` / the audit-runner contract,
+where they actually run. The helper is not a second home for the read-only-rung check; it is the right home for
+the rungs it runs. (See decision 5 and *Blast radius*.)
 
 ### 1. The function surface — what the library exports (the public contract)
 
@@ -269,17 +272,19 @@ a fresh machine is a silent install break. The contract:
   verify-claims, with the merge-authority subset re-materialized from base ref by the trusted loader/entrypoint
   (decision 2). The library's location is therefore not hardcoded to one install layout — it is discovered, with
   a fail-closed error if the dependency is absent (never a silent fallback to a missing/forked copy).
-- **One canonical machine-readable dependency source (round-4 FINDING 3 / round-5 FINDING 2).** "Declared
-  dependency" must not collapse into README-only discipline *or* spread across multiple possible homes. The
-  canonical source is **exactly one repo-owned CI manifest, `.aar-ci/plugin-deps.conf`** (a simple
-  `<consumer>: <dependency>` map), and **both** the consumers' resolution path **and** the cross-plugin smoke
-  read *that same file* — not plugin.json (harness-dependent, not guaranteed across harnesses), not prose. A
-  consumer's resolution-failure error prints the **exact companion install command** so a fresh install is
-  self-correcting. (If a harness later supports a native `plugin.json` dependency field, that becomes an
-  additive convenience; `.aar-ci/plugin-deps.conf` stays the canonical source the smoke enforces.)
+- **The runtime-readable dependency contract is PACKAGED inside each consumer plugin; `.aar-ci` validates it
+  (round-5 FINDING 1).** A fresh-installed consumer reads from its **plugin cache dir**, not repo-root `.aar-ci`,
+  so the contract a consumer must read at runtime lives in an **installed/plugin-packaged** surface — a small
+  declared file *inside the consumer's own plugin dir* (e.g. `plugins/<consumer>/.aar-deps`, a one-line
+  `requires: aar-github-lifecycle`), which IS present in the install cache. The consumer resolves its dependency
+  by reading its *own packaged* declaration; on failure it prints the **exact companion install command** so a
+  fresh install is self-correcting. `.aar-ci` does **not** become the file consumers read — it **validates** the
+  packaged contract (a `checks.sh` assertion that each consumer's packaged `.aar-deps` is present and names the
+  helper) and the cross-plugin smoke exercises it. (If a harness later supports a native `plugin.json` dependency
+  field, that is an additive convenience; the packaged `.aar-deps` stays the canonical runtime-readable source.)
 - **Cross-plugin install smoke (a deliverable).** Today `.aar-ci/fake_home_smoke.sh` installs only the single
-  plugin under test. The extraction child extends the smoke (or adds a companion) to read
-  `.aar-ci/plugin-deps.conf` and install **each consumer together with its declared `aar-github-lifecycle`
+  plugin under test. The extraction child extends the smoke (or adds a companion) to read each consumer's
+  **packaged** `.aar-deps` and install **each consumer together with its declared `aar-github-lifecycle`
   dependency** in a virgin HOME, then assert the consumer can *resolve and source* the helper — the install-path
   proof that the dependency contract holds, the same role the existing fake-HOME smoke plays for a single plugin.
 - **Codex install documentation, not a product-tree mirror (round-5 FINDING 3).** The product tree carries no
@@ -341,10 +346,13 @@ The boundary is: helper enforces family on what it runs; #154 enforces it on wha
 - **Fold the library into `experiment-lifecycle` (a consumer) instead of a dedicated plugin.** Rejected: one of
   the two consumers (ship-change, in `aar-engineering`) would then depend on the *other* consumer's plugin —
   the same dependency-direction problem, just rotated. The shared mechanism belongs below both consumers.
-- **Draw the trust split at the file level (whole helper is merge-authority, always base-ref).** Rejected:
-  over-broad — it would force the cosmetic PR-body renderer and the identity minter through base-ref
-  materialization for no security benefit, and a future runtime-only function would inherit a constraint it
-  doesn't need. The function-level split (decision 2) keeps the merge-authority set minimal and explicit.
+- **Treat the function-level split as the runtime boundary (keep a branch-sourced runtime subset in the
+  merge-authority process).** Rejected (round-4 FINDING 1): sourcing *any* branch shell runs its side effects
+  before the trusted copy loads, so a per-function "runtime may run from branch" boundary is not real. The split
+  is retained only as *documentation* of which functions are gate-bearing; the operative rule is that any command
+  touching credentials/GitHub base-sources the whole helper+driver. (Identity minting is itself merge-authority
+  and base-sourced — there is no exemption for it; only static, credential-free commands are exempt from base
+  entry.) The function-level labels keep the gate-bearing set explicit for review and for placing new functions.
 - **Big-bang refactor (move everything, delete the `wf.sh` copies in one PR with no shim).** Rejected: `wf.sh`
   is the machinery every future scaffold change depends on; a regression there blocks *all* shipping. The
   rollout (below) keeps `wf.sh` behavior-identical behind the extraction and makes the change one revertible
@@ -357,9 +365,10 @@ The boundary is: helper enforces family on what it runs; #154 enforces it on wha
   smokes}` + `.aar-ci` hook), so it passes the module-shape convention and the fake-HOME install gate. The
   SKILL.md documents the library; the library is *sourced by drivers*, not invoked by an agent.
 - **Install surface** (decision 4): `.claude-plugin/marketplace.json` + the README install list (incl. the Codex
-  symlink doc) gain the new plugin; a new canonical `.aar-ci/plugin-deps.conf` declares the
-  consumer→`aar-github-lifecycle` dependency; `.aar-ci/fake_home_smoke.sh` gains a cross-plugin install
-  assertion that reads that manifest (each consumer + its declared helper dependency resolves in a virgin HOME).
+  symlink doc) gain the new plugin; each consumer plugin gains a packaged `.aar-deps` declaration (the
+  runtime-readable dependency contract, present in the install cache); `.aar-ci/checks.sh` gains a validator for
+  it and `.aar-ci/fake_home_smoke.sh` gains a cross-plugin install assertion that reads each consumer's packaged
+  `.aar-deps` (each consumer + its declared helper dependency resolves in a virgin HOME).
 - **`aar-engineering` / `wf.sh`** is refactored to source the shared library instead of carrying its own copies
   of the extracted primitives, *and* to route its merge-authority subcommands through the installed/base
   launcher (decision 2 — the worktree driver becomes a refusing stub for those). This is the one cross-cutting
@@ -371,9 +380,10 @@ The boundary is: helper enforces family on what it runs; #154 enforces it on wha
 - **`experiment-lifecycle`** (`design-experiment` / `run-experiment`) gains a *new* dependency on the shared
   helper — wired by the consumer children #156 / #157, not by this extraction. This doc only fixes the contract
   they consume.
-- **Explicitly NOT in scope (owned elsewhere):** the cross-family *family-check* enforcement on the four
-  audit rungs is **#154**'s (audit-runner cross-family contract) — the helper carries identity/posting mechanics
-  and the merge-authority trust split, not the family check. The experiment triage-artifact schema is **#151**;
+- **Cross-family enforcement boundary (the one rule):** the helper enforces explicit-family fail-closed on the
+  rungs **it runs** (`--design`, close); the **read-only** rungs (`verify_claim`, `--data`) are **#154**'s
+  (audit-runner cross-family contract). The helper is not a second home for the read-only-rung check.
+- **Explicitly NOT in scope (owned elsewhere):** the experiment triage-artifact schema is **#151**;
   the design-clearance schema is **#145**; the canonical record path is **#155**. The helper touches none of
   their contracts; it sits below them.
 - **Product vs instance:** the helper and the `wf.sh` refactor are **product** (scaffold). The experiment PRs
