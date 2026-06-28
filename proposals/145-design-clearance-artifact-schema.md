@@ -61,10 +61,23 @@ not just author + SHA. So:
   `finding_responses` (e.g. flipping an unanswered HIGH to `justified`) after clearance invalidates the
   attestation and BLOCKs. The actor is committing to *these responses on this brief*, not just "I approve."
 
-(The `CLEARANCE.json` digest is computed over the file with the `approval.event_*`/digest fields excluded, to
-avoid the circularity of a file hashing its own attestation pointer.) The JSON thus records *pointers and the
-verdict*; the two external events anchor both the **identity** (authorized actor, cleared SHA) **and the
-content** (findings + responses) — so the gate cannot be passed by editing the branch files alone.
+**Digests are over a canonical serialization, not raw bytes.** A content digest is only deterministic if
+producer and consumer hash identical bytes, so this schema fixes both *what* is hashed and *how* it is
+serialized:
+
+- The attested `CLEARANCE.json` digest is `sha256` over a defined **`attested_clearance` subdocument** — the
+  object `{ schema_version, experiment, decision, brief_commit, digest_algorithm, brief_blobs, design_audit,
+  finding_responses }` (i.e. everything *except* the `approval`/`cleared_at` block, which carries the
+  attestation pointer and so cannot be inside what it attests) — serialized as **JCS, RFC 8785** (canonical
+  JSON: UTF-8, sorted keys, no insignificant whitespace, canonical number forms). The clearance event's marker
+  carries the digest of *that* canonical subdocument.
+- The `findings_record` is likewise serialized as JCS before hashing, so `findings_sha256` and the audit
+  event's attested digest are computed over the same canonical bytes.
+
+Defining the exact subdocument + JCS serialization is what makes the attestation implementable; producer and
+consumer run the identical transform. The JSON thus records *pointers and the verdict*; the two external events
+anchor both the **identity** (authorized actor, cleared SHA) **and the content** (findings + responses) — so the
+gate cannot be passed by editing the branch files alone.
 
 **The clearance event is NOT a merge-satisfying GitHub `APPROVED` review.** #130 decision 2 is explicit: the
 design review gates the *run*, never the merge — only the *close* gate posts the final merge-satisfying native
@@ -170,7 +183,7 @@ and the surviving responses are `justified`/`deferred`, never `fixed`.
 | `finding_responses[].severity` | enum `high` \| `med` | yes | Echoes the finding's severity (LOW findings need no response). |
 | `finding_responses[].status` | enum `justified` \| `deferred` | yes | The verdict on a finding that **survives** into the cleared brief. |
 | `finding_responses[].evidence` | string | yes | Why: the justification or the deferral rationale. Non-empty. |
-| `finding_responses[].followup_issue` | string | required iff `status=="deferred"` | The issue the deferral is tracked in. |
+| `finding_responses[].followup_issue` | string | required iff `status=="deferred"` | The issue the deferral is tracked in. Must be a valid issue reference — `#123` or a full GitHub issue URL (the same syntax `ship-change`'s `disposition_gate.sh` enforces); the executor rejects a malformed link. |
 
 The status vocabulary is the close-gate triage artifact's `{fixed | justified | deferred}` **minus `fixed`**.
 The reason is structural, not a divergence (see "The fix loop"): a `fixed` finding required a post-audit brief
@@ -223,12 +236,25 @@ section excluded from the digest). So:
   re-clearance, honoring #130's "later brief change forces re-clearance" for the load-bearing part.
 - The **evidence is freely mutable** — the executor records its work without tripping the gate.
 
-`brief_files` lists `["DESIGN.md", "START.md", "CHECKLIST.md"]`, and `brief_blobs` pins `DESIGN.md` and
-`START.md` whole plus the checklist's **gate-definition section** (not the evidence section). The exact
-split-point — a separate `CHECKLIST.gates.md` immutable file vs. a delimited section within `CHECKLIST.md` — is
-an implementation choice for the producer/consumer children; the *contract* this schema fixes is "gate
-definitions are pinned and drift-checked; run-evidence is not." This satisfies both #130 (the brief's gates are
-bound at clearance) and the run-mutability reality.
+**The split is a concrete delimiter, fixed here** (not left to the children) so producer and consumer hash the
+same bytes. Today's `CHECKLIST_TEMPLATE.md` interleaves protocol + annotated record in one file, so the schema
+mandates a delimited **gates block** within `CHECKLIST.md`:
+
+```
+<!-- BEGIN GATES (immutable after clearance) -->
+... gate definitions: what must pass ...
+<!-- END GATES -->
+... run-evidence below: freely mutable by the executor ...
+```
+
+`CHECKLIST.md#gates` is the canonical content **between** those two markers (the markers included, the bytes
+outside excluded), normalized to UTF-8 with trailing-whitespace stripped per line — that exact byte range is
+what `brief_blobs["CHECKLIST.md#gates"]` digests, and the executor recomputes the same range. The executor
+writes evidence only *outside* the block, so its edits never change the digested bytes. (`CHECKLIST_TEMPLATE.md`
+gains these markers — a one-line addition to the producer child's template edit.) `brief_files` lists all three
+files (#130); `brief_blobs` pins `DESIGN.md` and `START.md` whole plus this gates block. The contract: gate
+definitions are pinned and drift-checked; run-evidence is not — satisfying both #130 (the brief's gates bound at
+clearance) and the run-mutability reality.
 
 ### Path and produce/consume contract
 
@@ -285,17 +311,21 @@ identity and content:
    this experiment; the SHA it names equals `approval.cleared_sha == brief_commit`; **and the
    `CLEARANCE.json` digest it attests equals the on-disk digest** (computed over the file with the
    `approval.event_*`/digest fields excluded). A missing event, an APPROVE-typed event, an unauthorized actor, a
-   wrong repo/PR, a SHA mismatch, or a digest mismatch → BLOCK. (The digest attestation is what stops a designer
-   editing `finding_responses` after clearance: the authorized actor committed to *these* responses.)
+   wrong repo/PR, a SHA mismatch, or a digest mismatch → BLOCK. The attested digest is `sha256` over the
+   **canonical `attested_clearance` subdocument** (JCS / RFC 8785; the subdocument defined above) — producer and
+   consumer run the identical transform, so the check is deterministic. (The digest attestation is what stops a
+   designer editing `finding_responses` after clearance: the authorized actor committed to *these* responses.)
 7. **Finding-response completeness, validated against the externally-attested findings record.** The executor
    loads `design_audit.findings_record`, verifies `sha256(findings_record) == findings_sha256` **AND that this
    digest equals the one the posted `--design` audit event attests** (else BLOCK — the findings were edited
    after the audit GitHub published). It then requires: every HIGH and every MED finding **id present in the
    findings record** has exactly one `finding_responses` entry with matching `id` and `severity`; every response
    `id` exists in the record (no phantom responses); every response has non-empty `evidence`; every `deferred`
-   has a `followup_issue`. A HIGH/MED with no response, a phantom/mismatched id, an empty evidence, or a deferral
-   with no issue → BLOCK. (`summary` is a fast cross-check only; the *externally-attested record* is the
-   denominator, so a hand-shrunk count or a re-hashed local file can't hide an unanswered finding.)
+   has a `followup_issue` that is a **valid issue reference** (`#123` or a GitHub issue URL — the
+   `disposition_gate.sh` syntax). A HIGH/MED with no response, a phantom/mismatched id, an empty evidence, or a
+   deferral with a missing/malformed issue link → BLOCK. (`summary` is a fast cross-check only; the
+   *externally-attested record* is the denominator, so a hand-shrunk count or a re-hashed local file can't hide
+   an unanswered finding.)
 
 The executor records the verdict (proceed or the block reason) to its run log / ledger, so the
 proceed-decision is itself auditable. The block reason is a single precise line (which rule failed), never a
