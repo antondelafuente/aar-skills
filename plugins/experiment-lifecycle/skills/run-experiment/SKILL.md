@@ -71,21 +71,17 @@ executor is **never-re-invoked** — you sit parked, nothing errored, the comput
 autonomous detached execution, the moment you start execution — before launching any compute or detached driver — arm an
 independent, recurring self-wake** as your standing waker (any single in-process waker can die and leave you parked; the
 independent waker is the mandatory backstop). If any background work leaves billable compute running, arm the idle-cost
-teardown backstop before you detach. The autonomous self-wake must, each tick: check each job's **done-marker**, a
-**liveness** signal (compute busy = alive; idle AND not-done = hung), AND a **positive-progress** signal (a stage
-advancing / bytes growing — liveness alone can't tell working from a wedged hot-loop), plus the driver log for
-BLOCKED/errors; and it must honor a **look-again deadline** — a deadline quietly gone past with compute still billing is
+teardown backstop before you detach. The autonomous self-wake must, each tick: check each job's **done-marker** plus the
+driver log for BLOCKED/errors, and honor a **look-again deadline** — a deadline quietly gone past with compute still billing is
 the signal you parked, so STOP re-waiting, diagnose, and notify the human.
 
-This self-wake is the experiment-surface instance of the harness-wide **bounded-wait** rule (AGENTS.md
-"Bounded background waits": every background wait needs a deadline + a liveness/positive-progress check + a
-failure path that wakes you — silence is not progress). For an **autonomous detached run**, this is a
-capability requirement, not a best-effort preference. If your substrate
-cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and then park. Mark the
-`CHECKLIST.md` self-wake gate **FAIL**, notify/escalate before GPU/API spend, and either relaunch in a substrate that
-can own its wake or keep the work explicitly controller-supervised. A blocking watcher that keeps the executor turn
-alive is controller-supervised, not autonomous detached; if it leaves billable compute running in the background, still
-arm the idle-cost teardown backstop.
+The self-wake's **deadline + failure path** IS the bounded-wait guarantee — you do **not** sit in a continuous
+in-turn poll verifying liveness between ticks (that re-reads context every poll and drains usage). For an
+**autonomous detached run** the self-wake is a capability requirement: if your substrate cannot arm an independent
+recurring wake, do **not** silently substitute a continuous in-process poller and park — mark the `CHECKLIST.md`
+self-wake gate **FAIL**, notify/escalate before GPU/API spend, and relaunch in a substrate that can own its wake.
+(Codex has no `CronCreate`-style wake; its cheap-sleep equivalent is designed in #223.) If billable compute runs in
+the background, still arm the idle-cost teardown backstop.
 
 > **Claude Code implementation:** a non-durable recurring `CronCreate` (~every 12 min) whose prompt re-checks the pods
 > and honors a `LOOK_AGAIN.md` marker (`last_looked` / `look_again_by`, generous). Session-scoped (wakes only its
@@ -178,7 +174,7 @@ the human — and mention what you moved.)
 
 **Default = the detached driver.** scp a self-contained, **idempotent** `*.sh` (skip cells whose output exists): resolve
 base → serve/train → eval → parse → copy artifacts to your store → `touch …/.done`. Run it detached (`setsid nohup`),
-then watch with a background until-loop SSH-checking the done-marker (plus the self-wake you already armed).
+then let the self-wake you already armed check the done-marker each tick (don't sit in a continuous in-turn poll loop).
 
 **Use the `gpu-job` helpers** — its driver library owns the foot-guns (GPU-stage handoffs that wait for the prior runner
 and poll until VRAM frees; port/serve waits; artifact-exists checks; liveness; safe process-tree kills; LoRA merges
