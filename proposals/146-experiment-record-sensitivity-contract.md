@@ -291,6 +291,18 @@ sensitive). This makes
 the gate enforce consistency against a *checked* assertion, and keeps the public-default safe without flipping
 the product floor to private-by-default (see the decision note).
 
+**On a public trail, `standard` requires a RESOLVABLE trigger inventory (Finding-2).** The `[record_visibility]`
+block is *optional* for an instance that publishes only non-sensitive work — but the verification above only
+holds if the trigger inventories exist to check against. So the rule is: **accepting `sensitivity = "standard"`
+on a non-private repo requires the `prerelease_model_ids` + `private_dataset_handles` inventories to be present
+and resolvable.** If the block (or either inventory) is absent or unresolvable on a public trail, the gate
+**fails closed to effective `sensitive`** (aggregate behavior/RESULTS become pointer-only) — it does *not*
+silently publish a `standard` it cannot verify. A *private* repo may run `standard` without the inventory (the
+trail is not world-readable). The "public-safe with no config" property therefore means: a fresh instance's
+*payload tiers* keep all raw payload off the trail regardless — but **aggregate `standard` publishing on a
+public repo is gated on a present trigger inventory**, never granted by default. This closes the "optional block
+⇒ unverifiable standard" hole without forcing the inventory on private-repo instances.
+
 **Why a sidecar, not `DESIGN.md` front-matter (prior Finding-1 fix).** The visibility metadata *decides* visibility,
 so it cannot itself be pointer-only — yet `DESIGN.md` is free-form and therefore pointer-only until #155
 schematizes it (a circularity). Resolving it: the declaration is a **separate, mandatory, structured sidecar
@@ -326,8 +338,9 @@ verifies it.)
 ### Validation + fail-closed rules (the gate)
 
 A single **validator** is the contract's enforcement point. It takes (record-type, record-body, policy) and
-either returns a trail-safe rendering or BLOCKS. It runs at three boundaries — the same fail-closed shape
-ship-change's own merge gate uses (parse an authoritative verdict; missing/garbled → BLOCK):
+either returns a trail-safe rendering or BLOCKS. It runs at four boundaries — produce, post, **push (the
+primary remote gate)**, and merge — the same fail-closed shape ship-change's own merge gate uses (parse an
+authoritative verdict; missing/garbled → BLOCK):
 
 1. **Produce-time (write a record to the branch).** `design-experiment` / `run-experiment` call the validator
    before committing any record. T0 body present inline → BLOCK. A **free-form** T1 body (legacy audit output,
@@ -345,11 +358,19 @@ ship-change's own merge gate uses (parse an authoritative verdict; missing/garbl
    non-private repo → BLOCK. **Also at PR-open:** a `sensitivity: sensitive` experiment whose effective
    (instance-floor ⊓ per-experiment) policy would post to a non-private repo, or inline any payload → BLOCK
    before the PR is created.
-3. **Merge-time (the close gate, re-check).** The merge gate re-runs the validator over the **full diff being
-   merged** (every record file the PR adds/edits) so a hand-edited branch or a bypassed produce-time call
-   cannot smuggle a T0 body, a free-form T1 body, or un-redacted T1 payload onto `main`. This mirrors
-   ship-change's "re-review the final diff" integrity property: the merged trail is the validated trail. A
-   `require_private_repo: true` (instance OR per-experiment) policy against a public repo also BLOCKS here.
+3. **Push-time (the publish boundary — the primary remote gate, Finding-1).** The long-lived draft PR branch
+   is *itself* a published surface (#130: "that long-lived draft PR is the in-flight visibility surface"), so
+   the real publish boundary is **`git push` / PR-update**, not merge. The validator runs over the **exact tree/
+   commit range being pushed** before every push that updates the remote branch or PR — a hand-edited or
+   bypassed-produce-time commit is caught *here*, before it reaches the remote history, not only at merge. On a
+   public repo this is enforced as a **pre-push hook + the helper's (#150) push path** so an ad-hoc `git push`
+   is also gated. The exact tree is validated (not just the diff) so a payload reintroduced in a later commit
+   and reverted still cannot transit the remote.
+4. **Merge-time (the close gate, re-check — defense-in-depth).** The merge gate re-runs the validator over the
+   **full tree being merged** so a bypassed push gate still cannot land a T0 body, a free-form T1 body, or
+   un-redacted T1 payload on `main`. This mirrors ship-change's "re-review the final diff" property — but it is
+   now explicitly the **last line, not the only line** (the push gate is primary). A `require_private_repo`
+   (instance `[github].private` OR per-experiment) policy against a public repo also BLOCKS here.
 
 **Fail-closed posture (explicit):** unknown record type → treat as **T0** (most restrictive) and BLOCK if any
 inline body is present — a new record type cannot accidentally publish before it is classified. A malformed or
@@ -400,14 +421,15 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
 ## Blast radius
 
 - **No code in this PR.** Doc-only design; the deliverable is the contract above. Two `ready` children (the
-  dependency-free validator *library*; the `verify-claims` structured sanitized audit-emit) and one
-  `blocked-by` child (the produce/post/merge wiring) are spawned (see Rollout).
+  dependency-free validator *library*; the `verify-claims` structured *finding-schema* emitter) and two
+  `blocked-by` children (the `artifact_ref` materialization; the produce/post/push/merge wiring) are spawned
+  (see Rollout).
 - **Unblocks (the umbrella's `blocked-by` wiring):** #155 (canonical-path record layout) consumes the tier
   table to decide which record content is committed vs pointer-ized, **and owns schematizing the free-form
   brief into the safe-field allowlist this contract defines** (until #155 lands, the brief is pointer-only);
   #156 (design-experiment PR-open + --design
   review posting) consumes the produce-time + post-time validation; #157 (run-experiment push/close + merge
-  gate) consumes all three boundaries. None of those may be authorized until this lands (umbrella rule); this
+  gate) consumes all four boundaries (produce/post/push/merge). None of those may be authorized until this lands (umbrella rule); this
   doc is the thing that unblocks them.
 - **Builds on merged #153 (instance-profile interface):** #153 is now merged. This contract is the enforcer
   #153 named for its required `[github].private` assertion ("#146 owns when a repo must be private … the gate
@@ -424,16 +446,20 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
   the *enforcement call site* on the rungs it runs (--design, close, post, merge); this contract supplies the
   validator and rules it calls. The helper does not own the classification — same separation #130 decision 5
   uses for cross-family enforcement.
-- **Touches `verify-claims`:** the structured sanitized audit-emit is a producer-interface change in
-  `verify-claims` (its canonical home), spawned as a `ready` child — not coupled to the GitHub wiring. The
+- **Touches `verify-claims`:** the structured *finding-schema* emitter is a producer-interface change in
+  `verify-claims` (its canonical home), spawned as a `ready` child — schema + payload slots only; `artifact_ref`
+  materialization is a separate `blocked-by` child so `verify-claims` stays read-only (issues no handles). The
   posted review is *rendered from* that structured record, so the helper never validates free-form reviewer
   prose.
 - **Touches #151 (triage schema) / #145 (clearance schema) / #152 (terminal states):** classifies their
   records as T1 and states the payload-field rule for them; their internal field schemas remain theirs. No
   contradiction — each declares its own payload fields; this says how they render.
 - **Product/instance boundary:** the contract + validator are **product** (ship in the skills/helper); the
-  `record_visibility` policy values and the repo's actual visibility are **instance** config (#153). The
-  defaults are public-safe so a fresh instance is safe with no configuration.
+  `record_visibility` policy values and the repo's actual visibility are **instance** config (#153). A fresh
+  instance is **payload-safe with no configuration** (the tier defaults keep all raw payload off the trail);
+  but *aggregate `standard` publishing on a public repo* is gated on a present trigger inventory (Finding-2) —
+  absent it, the gate fails closed to effective `sensitive`, so "no config" never means "publishes unverified
+  standard."
 
 ## Rollout + rollback
 
@@ -445,24 +471,32 @@ narrow piece that does not, and files the rest blocked):
 
 - **`ready` — the record-visibility validator *library*.** A pure function `validate(record_type, body,
   policy) → safe_render | BLOCK` plus the public-safe default policy and its own unit smoke (a T0 body inline,
-  a loosening tier override, a payload quote over `max_quote_chars`, an unknown record type, a malformed
-  `evidence:` quote — each must BLOCK). This is `ready` because it has **no** GitHub / helper / profile / skill
+  a free-form T1 body inline, a loosening tier override, a payload quote over `max_quote_chars`, an unknown
+  record type, a missing trigger inventory on a public-trail `standard`, a raw-path `handle`, an inline `sha256`
+  on a sensitive pointer, a missing `visibility.toml` — each must BLOCK). This is `ready` because it has **no** GitHub / helper / profile / skill
   dependency — it is a self-contained classifier+redactor tested against fixture record bodies. The tiers, the
   table, the pointer shape, the two T1 surfaces, and the policy schema are all fixed in this doc, so it carries
   no open design.
-- **`ready` — the `verify-claims` structured sanitized audit-emit.** A separate child against the
-  `verify-claims` producers (`verify_claim` / `audit_experiment`): emit a structured sanitized record (named
-  safe fields the producer guarantees payload-free + every quote/excerpt as an `artifact_ref`) alongside the
-  existing free-form output, with its own canonical schema + producer-side tests. This is **`ready`** (no
-  GitHub/helper dependency — it's a producer interface change) and it belongs in `verify-claims`, its canonical
-  home, not coupled to the GitHub wiring (Finding-2 fix). The GitHub wiring *consumes* this schema; it does not
-  own it.
-- **`blocked-by` — the produce/post/merge wiring.** Wiring the validator into `design-experiment` /
+- **`ready` — the `verify-claims` structured *finding* emitter (schema only).** A child against the
+  `verify-claims` producers (`verify_claim` / `audit_experiment`): emit a structured sanitized **finding
+  schema** — named safe fields (id, closed-enum severity, dimension, a content-validated summary) with every
+  quote/excerpt carried as a **typed payload slot** — alongside the existing free-form output, with its own
+  canonical schema + producer-side tests. This is **`ready`** (no GitHub/helper/artifact-index dependency — it
+  is a pure producer-output-shape change that separates safe fields from payload slots) and it belongs in
+  `verify-claims`, its canonical home, not coupled to the GitHub wiring.
+- **`blocked-by` — `artifact_ref` materialization of the payload slots.** Turning each payload slot into a
+  resolvable `artifact_ref` requires the **handle issuer/resolver** (the artifact-index, F-4), which is the
+  artifact-record layer — so materialization is `blocked-by` the artifact-index + #155, *not* `ready`
+  (Finding-3 fix). The schema emitter above ships first with payload-slot placeholders; materialization wires
+  the slots to real handles once the index exists. (This keeps `verify-claims` read-only: it emits the schema +
+  slots; it does not issue handles.)
+- **`blocked-by` — the produce/post/push/merge wiring.** Wiring the validator into `design-experiment` /
   `run-experiment` (produce-time), the helper's review/PR-body post path rendered from the structured record
-  (post-time), and the merge gate (merge-recheck). Filed `blocked-by` #150 (helper hosts the post/merge call
-  sites), #153 (the `record_visibility` policy block lives in its profile), #155 (record layout + brief
-  schema), **and the structured-emit child above** (the post path renders from it). It cannot land before those
-  seams exist.
+  (post-time), the **pre-push gate** (push-time, the primary remote boundary), and the merge gate
+  (merge-recheck, defense-in-depth). Filed `blocked-by` #150 (helper hosts the post/push/merge call sites),
+  #153 (the `[record_visibility]` block + the `private` enforcement), #155 (record layout + brief schema), the
+  **structured finding-schema emitter** (the post path renders from it), and the **`artifact_ref`
+  materialization** child (pointers must resolve). It cannot land before those seams exist.
 
 Rollback is a normal revert of the validator + wiring; with the contract reverted, the umbrella's `blocked-by`
 pieces are simply un-authorized again — no data loss, since no experiment-PR path ships before this contract's
