@@ -4,7 +4,9 @@
 # fail-closed is-desired-active, atomic writes, the update-vs-stop/close race (Finding 1 from the
 # child-1 design review), and the child-3 needs-relaunch request + opaque session-handle (request/clear,
 # fail-closed is-relaunch-requested, request cleared by stop/close); plus the #188 finding-2 rule that
-# request-relaunch requires a bound handoff_path (fail-closed without one; --handoff binds it atomically).
+# request-relaunch requires a bound handoff_path (fail-closed without one; --handoff binds it atomically),
+# and the agent-facing lifecycle aliases (`start`/`checkpoint`/`status`) preserving the same fail-closed
+# behavior.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -211,5 +213,31 @@ if run session-handle legacy >/dev/null 2>&1; then no legacy-no-handle; else ok 
 run update legacy --session-handle "tmux:legacy" >/dev/null
 [ "$(run session-handle legacy)" = "tmux:legacy" ] && ok legacy-update-backfills || no legacy-update-backfills
 [ "$(jget legacy handoff_path)" = "/art/legacy/TEMP.md" ] && ok legacy-update-preserves || no legacy-update-preserves
+printf '{"desired_active":true,"stopped":false,"closed":false,"handoff_path":"/art/noid/TEMP.md","lease_pod_ids":[],"created_at":1}\n' > "$TMP/noid.json"
+printf '%s\n' "$(run status noid)" | grep -qx 'run_id=' && ok status-missing-run-id-empty || no status-missing-run-id-empty
+
+# ===== agent-facing lifecycle aliases: same state machine, smaller executor vocabulary =====
+run start a1 --handoff /art/a1/TEMP.md --session-handle "tmux:a1" >/dev/null
+if active a1; then ok alias-start-active; else no alias-start-active; fi
+[ "$(run session-handle a1)" = "tmux:a1" ] && ok alias-start-session-handle || no alias-start-session-handle
+run checkpoint a1 --handoff /art/a1/TEMP2.md --lease-pod podZ >/dev/null
+[ "$(jget a1 handoff_path)" = "/art/a1/TEMP2.md" ] && ok alias-checkpoint-handoff || no alias-checkpoint-handoff
+[ "$(run show a1 | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin)["lease_pod_ids"]))')" = "podZ" ] \
+  && ok alias-checkpoint-pod || no alias-checkpoint-pod
+status=$(run status a1)
+printf '%s\n' "$status" | grep -qx 'state=active' && ok status-state || no status-state
+printf '%s\n' "$status" | grep -qx 'desired_active=true' && ok status-desired-active-bool || no status-desired-active-bool
+printf '%s\n' "$status" | grep -qx 'handoff_path=/art/a1/TEMP2.md' && ok status-handoff || no status-handoff
+printf '%s\n' "$status" | grep -qx 'session_handle=tmux:a1' && ok status-session-handle || no status-session-handle
+printf '%s\n' "$status" | grep -qx 'lease_pod_ids=podZ' && ok status-pods || no status-pods
+printf '%s\n' "$status" | grep -qx 'relaunch_requested=false' && ok status-relaunch-bool || no status-relaunch-bool
+
+# Alias commands must preserve fail-closed and argument validation.
+if run start a1 >/dev/null 2>&1; then no alias-start-over-active-refused; else ok alias-start-over-active-refused; fi
+run stop a1 >/dev/null
+if run checkpoint a1 --handoff /evil >/dev/null 2>&1; then no alias-checkpoint-terminal-refused; else ok alias-checkpoint-terminal-refused; fi
+if run status nonesuch >/dev/null 2>&1; then no status-missing-failclosed; else ok status-missing-failclosed; fi
+if run status broken >/dev/null 2>&1; then no status-corrupt-failclosed; else ok status-corrupt-failclosed; fi
+if run status a1 extra >/dev/null 2>&1; then no status-surplus-rejected; else ok status-surplus-rejected; fi
 
 [ "$fails" = 0 ] && { echo "run_supervision_record smoke PASS"; exit 0; } || { echo "run_supervision_record smoke FAIL"; exit 1; }
