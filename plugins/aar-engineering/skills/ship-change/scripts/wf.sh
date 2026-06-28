@@ -440,10 +440,13 @@ git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args..
         args+=("$a")
       done
       [ "$swapped" = 1 ] || die "git_push_author: expected an 'origin' remote arg to replace with the tokenized URL"
-      # Return the push's status IMMEDIATELY on failure, BEFORE the upstream bookkeeping below — otherwise the
-      # function's exit status would be the trailing `git config`'s (0) and a caller's `… || die` would never
-      # fire on a failed push (#165 review). set -e does not stop inside a function used in a `|| die` context.
-      WF_GH_INTERNAL=1 GH_TOKEN="$tok" git -C "$wt" -c credential.helper= push "${args[@]}" || return $?
+      # The tokenized URL ALREADY carries the credential (x-access-token:$tok) and `-c credential.helper=`
+      # disables any helper, so the push needs NEITHER GH_TOKEN NOR the WF_GH_INTERNAL marker in its env. We
+      # deliberately DON'T export them here so a pre-push hook can't inherit the engineer token + guard-bypass
+      # marker (#165 review). Return the push's status IMMEDIATELY on failure, BEFORE the upstream bookkeeping
+      # below — else the function's exit status would be the trailing `git config`'s (0) and a caller's
+      # `… || die` would never fire (set -e does not stop inside a function in a `|| die` context).
+      git -C "$wt" -c credential.helper= push "${args[@]}" || return $?
       if [ "$want_upstream" = 1 ]; then
         # set upstream to the NAMED origin remote (never the tokenized URL). The branch arg is the worktree's
         # current branch; configure branch.<b>.remote=origin + .merge=refs/heads/<b> directly so nothing

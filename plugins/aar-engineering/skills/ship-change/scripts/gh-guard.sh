@@ -77,7 +77,13 @@ fi
 declare -a ARGV=("$@")
 is_value_flag(){
   case "$1" in
-    -R|--repo|-H|--hostname|--jq|-q|-t|--template|-F|-f|--field|--raw-field|-X|--method|--input|--cache) return 0 ;;
+    # gh global + common subcommand value-taking flags. Listing the common READ-FILTER flags too
+    # (--event/--state/--search/--label/…) lets the positional scan skip THEIR values, so a value that looks
+    # like a verb (`gh run list --event push`) is never mis-read as a command verb (#165 review).
+    -R|--repo|-H|--hostname|--jq|-q|-t|--template|-F|-f|--field|--raw-field|-X|--method|--input|--cache|\
+    -L|--limit|-S|--state|-l|--label|-A|--author|-a|--assignee|--search|--event|--status|--workflow|\
+    -b|--body|-B|--base|--head|--branch|--milestone|--project|--app|--json|--template|--starting-after|\
+    --created|--updated|--sort|--order|--user|--org|--owner|--visibility|--topic|--language) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -134,19 +140,23 @@ is_mutating_verb(){
     *) return 1 ;;
   esac
 }
-# has_mutating_positional: check the LEADING run of positional words (the verb + an immediately-following
-# nested sub-verb) for a mutating verb — `gh repo deploy-key add`, `gh project item-add`. It STOPS at the
-# first flag, so a flag's VALUE deep in the args (`gh run list --event push`) is never mis-read as a verb
-# (#165 review F2-regression). Returns 0 if a verb in that leading run is mutating. The nested command word
-# (subcommand groups like `repo deploy-key`, `project item`) is NEVER itself a flag, so a real nested write
-# always sits in this leading positional run before any flag.
+# has_mutating_positional: scan the positional words (skipping flags AND the VALUE of a known value-taking
+# flag) for a mutating verb, so a nested write is caught WHEREVER it sits — `gh repo deploy-key add`, and even
+# `gh repo deploy-key -R o/r add k.pub` (a flag before the nested verb) (#165 review). Because is_value_flag
+# now covers the common read-FILTER flags, a flag's value that looks like a verb (`--event push`) is consumed
+# as that flag's value and never scanned as a command verb — resolving the earlier false-block without
+# reopening the flag-before-verb bypass. A bare unlisted `--foo bar` skips only `--foo` (1 token), so a `bar`
+# that is itself a mutating verb is conservatively redirected (fail toward the redirect — acceptable for an
+# ergonomic guard). Returns 0 if any scanned positional word is a mutating verb.
 has_mutating_positional(){
   local start=$1 i n=${#ARGV[@]} tok
   i=$start
   while [ "$i" -lt "$n" ]; do
     tok=${ARGV[$i]}
-    # stop at the first FLAG: everything after it is options/values, not the command's verb path.
-    [ "${tok#-}" != "$tok" ] && break
+    if [ "${tok#-}" != "$tok" ]; then
+      if is_value_flag "$tok"; then i=$((i+2)); continue; fi   # skip the flag AND its value
+      i=$((i+1)); continue                                     # bare/unknown flag: skip just it
+    fi
     if is_mutating_verb "$tok"; then return 0; fi
     i=$((i+1))
   done
