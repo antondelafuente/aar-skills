@@ -194,27 +194,42 @@ declaration-side gap regardless of how sharp the inference is.)
 
 **Scope: the `AUDIT_VERIFIER_FAMILY` declaration applies to the rungs whose family `verify-claims`
 resolves** — the four read-only/close rungs plus the `--scaffold`/`--code` resolution *inside*
-`audit_experiment.sh`. It does **not** loosen `wf.sh`'s separate **preflight** for `--scaffold`/`--code`,
-which fast-fails a Codex author whose `AUDIT_VERIFIER_CMD` is not a Claude-*string* (#134). That preflight is
-intentionally a string check (it runs before the audit, to give a clear early error), and on this fleet the
-ship-change verifier is always a real `claude -p …` command — so the wrapper-declaration path is not needed
-there. If a future install genuinely needs a wrapper verifier for ship-change rungs, updating the `wf.sh`
-preflight to consult the shared resolver is a scoped follow-up (it rides the decision-4 drift check that
-already keeps the two matchers aligned) — not required for the four-rung guarantee this doc backs.
+`audit_experiment.sh`. The ship-change preflight in `wf.sh` is governed by a **defined contract, not a fleet
+assumption**: **ship-change rungs require a self-identifying (direct-CLI) verifier command** — `wf.sh`'s
+preflight string-checks the command before invoking the audit, for every install, precisely so a Codex
+author gets a clear early error rather than a deep cross-family BLOCK. Wrapper/opaque verifiers are
+**out of scope for ship-change rungs by contract** (not because this fleet happens to use `claude -p`).
+The defined extension point for an install that genuinely needs a wrapper verifier on ship-change rungs is
+to make the command self-identifying, *or* to extend the `wf.sh` preflight to consume the shared resolver +
+`AUDIT_VERIFIER_FAMILY` — a scoped follow-up that rides the decision-4 drift check keeping the two matchers
+aligned. Either way the rule is uniform across installs; it does not depend on this fleet's verifier shape.
 
 #### 6. Each rung writes a durable cross-family marker into its audit artifact (so #150 can validate, not re-check)
 
 The #130 helper (#150) *posts and merges* already-produced audit outputs for the read-only rungs without
 re-running them. For that to be safe, a fresh reader (and the helper's merge gate) must be able to tell an
 **enforced cross-family** audit from a stale or family-blind one — but today the resolved families are only
-echoed to **stderr**, which does not survive into the committed artifact. **Decision: each rung writes a
-small machine-readable marker into (or beside) its output file** — `subject_family`, `auditor_family`, and a
-`contract_version` — as a stable header (or sidecar) on the audit artifact. This lets #150 *validate the
-marker* (right families, current contract version) without re-implementing family matching — keeping the
-enforcement canonical in `verify-claims` while giving the helper a verifiable signal. The marker also makes
-a stale/manual family-blind output (no marker, or an old contract version) detectable rather than silently
-trusted. The exact serialization (a fenced header block vs a `.family.json` sidecar) is an implementation
-detail of the helper child, but the *fields* are fixed here as the contract #150 reads.
+echoed to **stderr**, which does not survive into the committed artifact. Because **#150 consumes this
+marker**, its schema cannot be left as an implementation detail (an interface a sibling depends on must be
+pinned, or that sibling cannot be `ready`). **Decision: pin the marker concretely now:**
+
+- **Location:** a sidecar JSON file `<artifact>.family.json` next to each audit output (e.g.
+  `AUDIT.md.family.json`, `DESIGN_AUDIT.md.family.json`, `<claims>.verdict.md.family.json`). A sidecar (not
+  an in-file header) keeps the human-readable audit text untouched and is trivially machine-parsed.
+- **Schema (fixed fields):** `{ "contract_version": <int>, "rung": "verify_claim|design|data|close|scaffold|code",
+  "subject_family": "claude|codex", "auditor_family": "claude|codex|<allowlisted>", "artifact": "<basename>" }`.
+- **`contract_version` semantics:** a single integer the shared helper owns, bumped on any
+  backward-incompatible change to this contract (the family vocabulary, the marker fields, the resolution
+  rules). #150 rejects a marker whose `contract_version` it does not recognize (fail-closed on an
+  unknown/old version) — so a stale artifact from a prior contract is detectable, not silently trusted.
+- **How #150 derives the *expected* subject:** from the experiment's recorded subject for that rung —
+  the design-author / executor family the experiment lifecycle already records (per the #130
+  instance-profile + record contract, #153/#155). #150 validates `subject_family` in the marker == that
+  recorded subject, and `auditor_family != subject_family`, and a recognized `contract_version`. It does
+  **not** re-run or re-match family; it reads the marker the audit runner wrote.
+
+The marker fields and these rules are the contract #150 reads; the helper child implements the writer and
+#150 the reader, but neither carries an open design decision now.
 
 ## Alternatives considered
 
