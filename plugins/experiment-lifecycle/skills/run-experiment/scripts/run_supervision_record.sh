@@ -1,28 +1,42 @@
 #!/bin/bash
 # run_supervision_record.sh — the run-supervision record: machine-consumed desired-state for a
-# model-free relaunch supervisor (the #54 crash-resilience design, child 1). PRODUCT helper — no
-# instance specifics (session names, relaunch commands, systemd wiring are all instance, consumed
-# via this API).
+# model-free relaunch supervisor (the #54 crash-resilience design; child 1 + child 3). PRODUCT helper —
+# no instance specifics (session names, relaunch commands, systemd wiring are all instance, consumed
+# via this API; the session_handle field below records the instance value OPAQUELY — the product never
+# interprets it).
 #
 # WHAT IT IS: a tiny per-run JSON record carrying RELAUNCH-scoped state only —
-#   desired_active / stopped / closed / handoff_path / lease_pod_ids / timestamps. It LINKS to the
-#   gpu-job pod lease(s) (the #54 child-2 record) by pod id; it never holds pod-DELETION policy
-#   (that is the lease's domain). The model-free supervisor reads `is-desired-active` to decide
-#   whether a gone session should be relaunched (desired-active, not stopped, not closed) or left
-#   alone (a deliberate /quit or a finished run).
+#   desired_active / stopped / closed / handoff_path / lease_pod_ids / session_handle /
+#   relaunch_requested / relaunch_reason / timestamps. It LINKS to the gpu-job pod lease(s) (the #54
+#   child-2 record) by pod id; it never holds pod-DELETION policy (that is the lease's domain). The
+#   model-free supervisor reads `is-desired-active` to decide whether a gone session should be
+#   relaunched (desired-active, not stopped, not closed) or left alone (a deliberate /quit or a
+#   finished run), reads `is-relaunch-requested` for the positive agent-declared "relaunch me" signal,
+#   and reads `session-handle` for the opaque instance binding telling it WHICH session a run maps to.
 #
 # WHY A HELPER, NOT PROSE: the record is genuinely stateful, so one product implementation owns the
 #   atomic-write + monotonic-state semantics rather than every consumer (claude-pane-loop.sh, the
-#   instance stop helpers, the supervisor) re-deriving them and drifting.
+#   instance stop helpers, the supervisor, a StopFailure-style hook) re-deriving them and drifting.
+#   The needs-relaunch signal is part of THIS record for the same reason (#54 child 3, design-review
+#   HIGH): it is machine-consumed relaunch state naming the same handoff_path, so it must not be a
+#   parallel on-disk marker re-implementing atomic writes.
 #
 # STATE MACHINE (monotonic; stop/close are TERMINAL):
 #   create  -> desired_active=true, stopped=false, closed=false
-#   update  -> refresh handoff_path / add lease_pod_ids; FAILS CLOSED if already stopped or closed
-#              (never resurrects a deliberately-stopped or finished run)
+#   update  -> refresh handoff_path / add lease_pod_ids / set session_handle; FAILS CLOSED if already
+#              stopped or closed (never resurrects a deliberately-stopped or finished run)
 #   stop    -> stopped=true (a /quit or manual kill: do NOT resurrect). Terminal.
 #   close   -> closed=true (run finished). Terminal.
-#   is-desired-active -> exit 0 iff desired_active && !stopped && !closed; else exit 1 (a MISSING
+#   request-relaunch -> relaunch_requested=true (the agent / a StopFailure-style hook asks the
+#              supervisor to recover this run — the can't-resume-in-place case). FAILS CLOSED on a
+#              stopped/closed/missing/corrupt record (a deliberately-ended run is never requested back).
+#   clear-relaunch   -> relaunch_requested=false (the supervisor's act-then-clear path, so one request
+#              is acted on once and not re-triggered). Idempotent; allowed on a still-active record.
+#   is-desired-active   -> exit 0 iff desired_active && !stopped && !closed; else exit 1 (a MISSING
 #              record is exit 1 — fail-closed, an unknown run is never resurrected).
+#   is-relaunch-requested -> exit 0 iff a relaunch is requested AND the run is still desired-active;
+#              else exit 1 (a stopped/closed/missing/corrupt record is exit 1 — fail-closed).
+#   session-handle -> print the opaque instance handle ("" + exit 1 if unset/missing).
 #
 # CONCURRENCY: every mutation takes a per-record flock for the whole read-modify-write window, and
 #   the terminal-state guard runs INSIDE that lock — so a concurrent `update` cannot read-modify-write
@@ -30,11 +44,15 @@
 #   lock, so a crash mid-write never leaves a half-written record.
 #
 # USAGE:
-#   run_supervision_record.sh create <run-id> [--handoff PATH]
-#   run_supervision_record.sh update <run-id> [--handoff PATH] [--lease-pod ID]...
+#   run_supervision_record.sh create <run-id> [--handoff PATH] [--session-handle H]
+#   run_supervision_record.sh update <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H]
 #   run_supervision_record.sh stop   <run-id>
 #   run_supervision_record.sh close  <run-id>
-#   run_supervision_record.sh is-desired-active <run-id>     # exit 0/1, no output
+#   run_supervision_record.sh request-relaunch <run-id> [--reason TEXT]
+#   run_supervision_record.sh clear-relaunch   <run-id>
+#   run_supervision_record.sh is-desired-active     <run-id>  # exit 0/1, no output
+#   run_supervision_record.sh is-relaunch-requested <run-id>  # exit 0/1, no output
+#   run_supervision_record.sh session-handle        <run-id>  # print opaque handle (exit 1 if unset)
 #   run_supervision_record.sh show   <run-id>                # print the JSON (debug)
 #
 # Record root is instance-overridable: ${AAR_RUN_SUPERVISION_DIR:-$HOME/.config/run-supervision}.
@@ -105,9 +123,13 @@ PY
 # "true"/"false"/""), create (true/false). Preserves existing fields it doesn't touch. On `create` it
 # writes a fresh record (the on-disk state has already been classified + guarded by the caller); for any
 # non-create mutation, malformed existing JSON fails CLOSED (exit 3) rather than being treated as empty.
+# Optional env extras (relaunch supervisor, #54 child 3): SESSION_HANDLE (non-empty -> set the opaque
+# instance-owned handle; "" -> leave), SET_RELAUNCH ("true"/"false"/"" -> set/clear the needs-relaunch
+# request flag; "" -> leave), RELAUNCH_REASON (free-text reason recorded with a request; cleared with it).
 write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create>
   local file=$1 handoff=$2 add_pods=$3 set_stopped=$4 set_closed=$5 create=$6
   HANDOFF="$handoff" ADD_PODS="$add_pods" SET_STOPPED="$set_stopped" SET_CLOSED="$set_closed" CREATE="$create" \
+  SESSION_HANDLE="${SESSION_HANDLE:-}" SET_RELAUNCH="${SET_RELAUNCH:-}" RELAUNCH_REASON="${RELAUNCH_REASON:-}" \
   python3 - "$file" <<'PY'
 import json, os, sys, tempfile, time
 
@@ -135,16 +157,25 @@ if creating:
         "closed": False,
         "handoff_path": None,
         "lease_pod_ids": [],
+        "session_handle": None,
+        "relaunch_requested": False,
+        "relaunch_reason": None,
         "created_at": now,
     }
 rec.setdefault("desired_active", True)
 rec.setdefault("stopped", False)
 rec.setdefault("closed", False)
 rec.setdefault("lease_pod_ids", [])
+rec.setdefault("session_handle", None)
+rec.setdefault("relaunch_requested", False)
+rec.setdefault("relaunch_reason", None)
 
 handoff = os.environ.get("HANDOFF", "")
 if handoff:
     rec["handoff_path"] = handoff
+session_handle = os.environ.get("SESSION_HANDLE", "")
+if session_handle:
+    rec["session_handle"] = session_handle
 add_pods = [p for p in os.environ.get("ADD_PODS", "").splitlines() if p]
 if add_pods:
     seen = list(rec.get("lease_pod_ids") or [])
@@ -152,12 +183,26 @@ if add_pods:
         if p not in seen:
             seen.append(p)
     rec["lease_pod_ids"] = seen
+set_relaunch = os.environ.get("SET_RELAUNCH", "")
+if set_relaunch == "true":
+    rec["relaunch_requested"] = True
+    reason = os.environ.get("RELAUNCH_REASON", "")
+    rec["relaunch_reason"] = reason or None
+elif set_relaunch == "false":
+    rec["relaunch_requested"] = False
+    rec["relaunch_reason"] = None
 if os.environ.get("SET_STOPPED") == "true":
     rec["stopped"] = True
     rec["desired_active"] = False
+    # a deliberately-stopped run is never owed a relaunch — clear any pending request so a stale
+    # request can't outlive the stop and be observed by a supervisor that races the stop.
+    rec["relaunch_requested"] = False
+    rec["relaunch_reason"] = None
 if os.environ.get("SET_CLOSED") == "true":
     rec["closed"] = True
     rec["desired_active"] = False
+    rec["relaunch_requested"] = False
+    rec["relaunch_reason"] = None
 rec["updated_at"] = now
 
 d = os.path.dirname(path) or "."
@@ -196,10 +241,11 @@ require_val(){ # <flag> <value>
 
 cmd_create(){
   local id=$1; shift
-  local handoff="" got_handoff=0
+  local handoff="" got_handoff=0 session_handle=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --handoff) require_val --handoff "${2:-}"; handoff=$2; got_handoff=1; shift 2;;
+      --handoff)        require_val --handoff "${2:-}";        handoff=$2; got_handoff=1; shift 2;;
+      --session-handle) require_val --session-handle "${2:-}"; session_handle=$2;         shift 2;;
       *) die "create: unknown arg '$1'";;
     esac
   done
@@ -215,17 +261,18 @@ cmd_create(){
     invalid) die "create: run '$id' has a malformed record on disk — inspect/remove $file before re-creating";;
     *)       die "create: unexpected record state '$state' for '$id'";;
   esac
-  write_record "$file" "$handoff" "" "" "" "true"
+  SESSION_HANDLE="$session_handle" write_record "$file" "$handoff" "" "" "" "true"
   echo "created run-supervision record: $file (desired-active)"
 }
 
 cmd_update(){
   local id=$1; shift
-  local handoff="" pods=""
+  local handoff="" pods="" session_handle=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --handoff)   require_val --handoff "${2:-}";   handoff=$2;             shift 2;;
-      --lease-pod) require_val --lease-pod "${2:-}"; pods="${pods}${2}"$'\n'; shift 2;;
+      --handoff)        require_val --handoff "${2:-}";        handoff=$2;             shift 2;;
+      --lease-pod)      require_val --lease-pod "${2:-}";      pods="${pods}${2}"$'\n'; shift 2;;
+      --session-handle) require_val --session-handle "${2:-}"; session_handle=$2;      shift 2;;
       *) die "update: unknown arg '$1'";;
     esac
   done
@@ -240,7 +287,7 @@ cmd_update(){
     active)  : ;;
     *)       die "update: unexpected record state '$state' for '$id'";;
   esac
-  write_record "$file" "$handoff" "$pods" "" "" "false"
+  SESSION_HANDLE="$session_handle" write_record "$file" "$handoff" "$pods" "" "" "false"
   echo "updated run-supervision record: $file"
 }
 
@@ -278,6 +325,48 @@ cmd_close(){
   echo "closed run-supervision record: $file (inactive)"
 }
 
+cmd_request_relaunch(){
+  local id=$1; shift
+  local reason=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reason) require_val --reason "${2:-}"; reason=$2; shift 2;;
+      *) die "request-relaunch: unknown arg '$1'";;
+    esac
+  done
+  local file; file=$(record_path "$id")
+  # The needs-relaunch signal as record state (NOT a parallel file): a positive "recover this run" ask
+  # from the agent or a StopFailure-style hook. Fail CLOSED on a terminal/missing/corrupt record — a
+  # deliberately-stopped or finished run must never be requested back.
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    absent)  die "request-relaunch: no record for '$id' (create it first)";;
+    invalid) die "request-relaunch: run '$id' has a malformed record on disk — refusing to modify (inspect $file)";;
+    stopped) die "request-relaunch: run '$id' is stopped (terminal) — refusing to request a relaunch of a deliberately-stopped run";;
+    closed)  die "request-relaunch: run '$id' is closed (terminal) — refusing to request a relaunch of a finished run";;
+    active)  : ;;
+    *)       die "request-relaunch: unexpected record state '$state' for '$id'";;
+  esac
+  SET_RELAUNCH=true RELAUNCH_REASON="$reason" write_record "$file" "" "" "" "" "false"
+  echo "requested relaunch: $file"
+}
+
+cmd_clear_relaunch(){
+  local id=$1; local file; file=$(record_path "$id")
+  # The supervisor's act-then-clear path: clear the request once it has acted so it isn't re-triggered.
+  # Idempotent (clearing an already-clear request is a no-op write). Fail closed on missing/corrupt; a
+  # terminal record already has the flag cleared, so allow the clear there too (idempotent finalize).
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    absent)  die "clear-relaunch: no record for '$id'";;
+    invalid) die "clear-relaunch: run '$id' has a malformed record on disk — refusing to modify (inspect $file)";;
+    stopped|closed|active) : ;;
+    *)       die "clear-relaunch: unexpected record state '$state' for '$id'";;
+  esac
+  SET_RELAUNCH=false write_record "$file" "" "" "" "" "false"
+  echo "cleared relaunch request: $file"
+}
+
 # is-desired-active: exit 0 iff supervisor should relaunch this run; exit 1 otherwise. No mutation, but
 # read under the lock so it never observes a half-applied state. A MISSING record is exit 1 (fail-closed).
 cmd_is_desired_active(){
@@ -293,6 +382,34 @@ cmd_is_desired_active(){
   exit 1
 }
 
+# is-relaunch-requested: exit 0 iff a relaunch is requested AND the run is still relaunch-eligible
+# (desired-active). A stopped/closed/missing/corrupt record is exit 1 — fail-closed, so a stale request
+# can never trigger a relaunch of a run that was deliberately ended after the request was set.
+cmd_is_relaunch_requested(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local requested active stopped closed
+  requested=$(get_field "$file" relaunch_requested)
+  active=$(get_field "$file" desired_active)
+  stopped=$(get_field "$file" stopped)
+  closed=$(get_field "$file" closed)
+  if [ "$requested" = "true" ] && [ "$active" = "true" ] && [ "$stopped" != "true" ] && [ "$closed" != "true" ]; then
+    exit 0
+  fi
+  exit 1
+}
+
+# session-handle: print the opaque instance-owned session handle for this run; exit 1 (no output) if the
+# record or the handle is absent. The product never interprets the value — it is the instance's binding
+# from this run-id to whatever process/session it owns (tmux name, systemd unit, pid-file path, …).
+cmd_session_handle(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local h; h=$(get_field "$file" session_handle)
+  [ -n "$h" ] || exit 1
+  printf '%s\n' "$h"
+}
+
 cmd_show(){
   local id=$1; local file; file=$(record_path "$id")
   [ -f "$file" ] || die "show: no record for '$id'"
@@ -303,24 +420,29 @@ main(){
   local sub=${1:-}; shift || true
   local id=${1:-}
   case "$sub" in
-    create|update|stop|close|is-desired-active|show) validate_id "$id"; shift;;
-    "") die "usage: run_supervision_record.sh <create|update|stop|close|is-desired-active|show> <run-id> [...]";;
+    create|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|show)
+      validate_id "$id"; shift;;
+    "") die "usage: run_supervision_record.sh <create|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|show> <run-id> [...]";;
     *) die "unknown subcommand '$sub'";;
   esac
   # commands that take NO further args must reject surplus tokens — a malformed wrapper call must fail
   # closed, especially before a terminal mutation, not silently stop/close a run.
   case "$sub" in
-    stop|close|show|is-desired-active)
+    stop|close|clear-relaunch|show|is-desired-active|is-relaunch-requested|session-handle)
       [ $# -eq 0 ] || die "$sub: unexpected extra argument(s): $*";;
   esac
   case "$sub" in
-    create)            with_lock "$id" cmd_create "$id" "$@";;
-    update)            with_lock "$id" cmd_update "$id" "$@";;
-    stop)              with_lock "$id" cmd_stop   "$id";;
-    close)             with_lock "$id" cmd_close  "$id";;
-    # is-desired-active exits 0/1 from inside with_lock; preserve that exit code
-    is-desired-active) with_lock "$id" cmd_is_desired_active "$id";;
-    show)              with_lock "$id" cmd_show   "$id";;
+    create)                with_lock "$id" cmd_create           "$id" "$@";;
+    update)                with_lock "$id" cmd_update           "$id" "$@";;
+    stop)                  with_lock "$id" cmd_stop             "$id";;
+    close)                 with_lock "$id" cmd_close            "$id";;
+    request-relaunch)      with_lock "$id" cmd_request_relaunch "$id" "$@";;
+    clear-relaunch)        with_lock "$id" cmd_clear_relaunch   "$id";;
+    # the is-* predicates + session-handle exit 0/1 from inside with_lock; preserve that exit code
+    is-desired-active)     with_lock "$id" cmd_is_desired_active     "$id";;
+    is-relaunch-requested) with_lock "$id" cmd_is_relaunch_requested "$id";;
+    session-handle)        with_lock "$id" cmd_session_handle        "$id";;
+    show)                  with_lock "$id" cmd_show             "$id";;
   esac
 }
 
