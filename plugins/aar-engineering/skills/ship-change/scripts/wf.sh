@@ -29,10 +29,17 @@
 # Usage: run `wf.sh help` (or `-h` / no args) for the lifecycle short-list; SKILL.md is the full runbook.
 # (The command list lives in ONE place — the usage() function below — not duplicated here.)
 #
-# Auth: authenticate gh (gh auth login) OR export GH_TOKEN for ordinary ambient GitHub access.
+# Auth: the ambient agent GitHub credential MUST be read-only (writes go through the engineer token path).
+#      Authenticate gh (gh auth login) OR export GH_TOKEN for ordinary ambient READ access only.
 #      Protected workflow mutations that name an author are strict by default: they use the engineer
 #      identity seams below, or fail before falling back to ambient auth.
 #      wf.sh sources NO env file itself.
+#      WF_READONLY_TOKEN_CMD prints the ambient READ-ONLY token; WF_READONLY_TOKEN_INFO_CMD reads its
+#      token (on stdin) and prints that token's canonical GitHub permissions JSON so `wf.sh doctor
+#      --readonly` can authoritatively confirm read-only-ness (it FAILS CLOSED on an unattested token).
+#      WF_DOCTOR_SKIP_LIVE_PROBES=1 skips the read-only detector's LIVE network probes (advisory API +
+#      git-push) for a hermetic/offline doctor run (provenance still runs); WF_GIT_PROBE_TIMEOUT (default
+#      20s) bounds the git-push --dry-run probe so it can never hang doctor.
 #      WF_ENGINEER_TOKEN_CMD_CLAUDE / _CODEX print GitHub tokens for engineer identities.
 #      WF_ENGINEER_GIT_AUTHOR_CLAUDE / _CODEX are "Name <email>" strings for strict open commits.
 #      WF_REVIEWER_TOKEN_CMD remains a legacy alias for WF_ENGINEER_TOKEN_CMD_CODEX.
@@ -64,6 +71,7 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh finish <worktree> <author> --design   two-phase DESIGN merge: gate on --scaffold (doc-only PR), spawn ready issues after
   wf.sh doctor <author> [repo-or-worktree] report ambient + engineer identity readiness without printing tokens
+  wf.sh doctor <author> [repo-or-worktree] --readonly  STRICT read-only-ambient detector: exits non-zero if the ambient credential is not authoritatively read-only (API + git-push, per-source, non-mutating)
   wf.sh locate-audit [repo]               print the verify-claims reviewer that would run (introspection/test)
   wf.sh dispositions                       print close-gate disposition labels (one per line)
   wf.sh install-gh-guard [bindir] [--force]  install the gh write-guard wrapper ahead of gh on PATH (default ~/.local/bin; --force replaces a non-guard gh)
@@ -1035,10 +1043,22 @@ doctor_token(){  # doctor_token <family> <repo> <label>; returns 0 ok, 1 missing
   if [ -z "$tok" ]; then
     echo "  $label token: missing ($(engineer_token_seam "$fam"))"; return 1
   fi
-  if full=$(GH_TOKEN="$tok" real_gh api "repos/$repo" --jq .full_name 2>/dev/null); then
+  # NEVER send a URL-shaped / credential-bearing value into `gh api repos/<repo>` — it would leak userinfo into
+  # the API request + child argv (#166 code-review F1 r18f). Use a CLEAN owner/repo slug only: the value as-is
+  # if it's already clean, else a slug derived from a GitHub URL; otherwise skip the API access check.
+  local apirepo=""
+  if is_clean_repo_slug "$repo"; then apirepo=$repo
+  elif is_github_remote_url "$repo"; then apirepo=$(github_repo_slug "$repo"); fi
+  if [ -z "$apirepo" ]; then
+    # can't verify repo access against a non-clean/non-GitHub target -> do NOT count the token as verified
+    # (return 2 = configured-but-unverified, so plain doctor doesn't read READY without a real access check —
+    # #166 code-review F2 r18g).
+    echo "  $label token: minted but repo-access NOT verified (target is not a bare owner/repo: $(redact_userinfo "$repo"))"; return 2
+  fi
+  if full=$(GH_TOKEN="$tok" real_gh api "repos/$apirepo" --jq .full_name 2>/dev/null); then
     echo "  $label token: ok (repo access=$full)"; return 0
   fi
-  echo "  $label token: minted but cannot access $repo"; return 2
+  echo "  $label token: minted but cannot access $apirepo"; return 2
 }
 
 doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 invalid
@@ -1050,6 +1070,496 @@ doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 i
     echo "  author git identity: missing (WF_ENGINEER_GIT_AUTHOR_$(family_suffix "$author"))"; return 1
   fi
   echo "  author git identity: ok ($(git_author_name "$val") <$(git_author_email "$val")>)"; return 0
+}
+
+# ============================================================================================================
+# READ-ONLY-AMBIENT DETECTOR (#166, child #2 of #149) — is the AMBIENT GitHub credential read-only?
+#
+# Certifies a PASS only by PROVENANCE (authoritative granted-permissions with no write/admin category), never
+# by enumerating probes (a finite probe set can't prove "no reachable write scope" for an opaque token). Any
+# uninspectable/unattested token FAILS CLOSED. An empirical 403/422 denial probe is ADVISORY ONLY — it can
+# turn a PASS into a FAIL (422 = definitely write-capable) but a 403 floor never UPGRADES an unattested token
+# to PASS. Covers the gh/API surface AND the ambient `git push` surface, per credential SOURCE, and NEVER
+# performs a real mutation (the contents probe carries no sha+content; the git probe is --dry-run only).
+# ============================================================================================================
+
+# redact_userinfo <string> — strip a `user:secret@` userinfo segment from any URL-shaped value so a
+# credential-bearing remote never leaks its token into doctor/CI logs (#166 F1 r13). Covers BOTH the `://…@`
+# URL form AND the scp-style `[user[:secret]@]host:path` form (no scheme — #166 code-review F1 r18g).
+redact_userinfo(){
+  printf '%s' "$1" \
+    | sed -E 's#(://)[^/@[:space:]]+@#\1<redacted>@#g' \
+    | sed -E 's#(^|[[:space:]])[^/@:[:space:]]+:[^/@[:space:]]+@([^/[:space:]]+:)#\1<redacted>@\2#g'
+}
+
+# url_host <url> — extract the TRUE authority host from a remote URL, correctly (not a glob). The authority is
+# the segment after `://` up to the first `/`, `?`, or `#`; userinfo is everything up to the LAST `@` WITHIN
+# that authority (userinfo cannot contain `/`); the host is the authority minus userinfo minus any `:port`.
+# For scp-style `user@host:path`, the host is between the (optional) `user@` and the first `:`. Prints the host
+# (lowercased) or empty. This is the load-bearing anti-spoof: `https://evil.example/path@github.com/o/r` has
+# authority `evil.example` (the `@github.com/…` is PATH, not host), so this returns evil.example, NOT github.com
+# (#166 code-review F1 r16b).
+url_host(){
+  local u=$1 auth host
+  case "$u" in
+    *://*)
+      auth=${u#*://}            # strip scheme
+      auth=${auth%%/*}          # authority = up to first '/'
+      auth=${auth%%\?*}; auth=${auth%%#*}
+      auth=${auth##*@}          # drop userinfo (everything up to the LAST '@' in the authority)
+      host=${auth%%:*}          # drop :port
+      ;;
+    *@*:*)                       # scp-style user@host:path
+      host=${u#*@}; host=${host%%:*} ;;
+    *:*)                         # scp-style host:path (no user)
+      host=${u%%:*} ;;
+    *) host="" ;;
+  esac
+  printf '%s' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+# is_github_remote_url <url> — true ONLY if the URL's TRUE authority host is EXACTLY github.com or
+# ssh.github.com (parsed, not glob-matched), closing the `…@github.com/…`-in-path spoof (#166 F1 r16b).
+is_github_remote_url(){
+  local h; h=$(url_host "$1")
+  [ "$h" = github.com ] || [ "$h" = ssh.github.com ]
+}
+
+# github_repo_slug <github-url> — extract the bare `owner/repo` from a (already GitHub-validated) remote URL of
+# any form (https://github.com/o/r[.git], git@github.com:o/r[.git], ssh://git@github.com/o/r[.git]). Prints the
+# slug or empty. Used to synthesize the canonical probe URLs when the caller's repo value is URL-shaped (#166 r18e).
+github_repo_slug(){
+  local u=$1 path
+  case "$u" in
+    *://*) path=${u#*://}; path=${path%%\?*}; path=${path%%#*}; path=${path#*/} ;;  # after authority
+    *:*)   path=${u#*:} ;;                                                          # scp-style host:path
+    *)     path=$u ;;
+  esac
+  path=${path%.git}; path=${path#/}
+  # REJECT (don't truncate) anything that isn't exactly owner/repo — silently truncating an extra-segment URL
+  # could make the detector probe a DIFFERENT repo than the supplied remote (#166 code-review F3 r18h). ALWAYS
+  # return 0 (empty output on rejection) so a bare `slug=$(github_repo_slug …)` assignment can't trip `set -e`
+  # (#166 code-review r18i) — callers handle the empty value explicitly.
+  if is_clean_repo_slug "$path"; then printf '%s' "$path"; fi
+  return 0
+}
+
+# is_clean_repo_slug <s> — true ONLY for a well-formed bare `owner/repo`: exactly one slash, BOTH components
+# non-empty, the GitHub-name charset ([A-Za-z0-9._-]) only, and NEITHER component is `.`/`..` (path traversal).
+# So `/repo`, `owner/`, `../user`, `a/b/c`, and URL-shaped values are all rejected — a value used in a
+# `gh api repos/<slug>` path or a synthesized push URL is always a real owner/repo (#166 code-review F1 r18h).
+is_clean_repo_slug(){
+  local s=$1 owner repo
+  case "$s" in
+    */*/*) return 1 ;;                    # more than one slash
+    */*) owner=${s%%/*}; repo=${s#*/} ;;  # exactly one slash
+    *) return 1 ;;                        # no slash
+  esac
+  [ -n "$owner" ] && [ -n "$repo" ] || return 1
+  case "$owner" in ""|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$repo"  in ""|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  return 0
+}
+
+readonly_token_cmd(){ echo "${WF_READONLY_TOKEN_CMD:-}"; }            # the instance read-only minter seam
+readonly_token_info_cmd(){ echo "${WF_READONLY_TOKEN_INFO_CMD:-}"; }  # its paired machine-verifiable perms
+
+# perms_has_write <json> — true (returns 0) if a GitHub-permissions JSON object is NOT provably read-only.
+# READ-ONLY ALLOWLIST (fail-closed, #166 code-review F1): a token is read-only IFF EVERY permission value is
+# EXACTLY "read" or "none". ANY other value — "write", "admin", "maintain", "triage", a future write-ish
+# level, OR a non-string value — counts as write (we never enumerate write levels; we allowlist the two safe
+# ones and fail toward write on everything else). Unparseable / missing python3 also fails toward write.
+perms_has_write(){
+  local json=$1
+  command -v python3 >/dev/null 2>&1 || { return 0; }   # can't parse -> can't certify read-only -> treat as write
+  python3 - "$json" <<'PY'
+import json,sys
+raw=sys.argv[1]
+try:
+    obj=json.loads(raw)
+except Exception:
+    sys.exit(0)  # unparseable -> cannot certify read-only -> "has write" (fail toward write)
+perms = obj.get("permissions", obj) if isinstance(obj, dict) else obj
+if not isinstance(perms, dict) or not perms:
+    sys.exit(0)  # no readable permission map -> cannot certify read-only -> fail toward write
+for v in perms.values():
+    # ALLOWLIST: only an exact-string "read"/"none" is safe; anything else (incl. non-string) is write.
+    if not (isinstance(v, str) and v.lower() in ("read", "none")):
+        sys.exit(0)   # a non-allowlisted permission value -> treat as write
+sys.exit(1)           # every value is read/none -> read-only
+PY
+}
+
+# readonly_provenance_verdict <token> — classify a token's read-only-ness AUTHORITATIVELY. Prints a one-word
+# verdict on stdout: "readonly" | "write" | "unprovable". Uses, in order:
+#   (1) GitHub App installation-token permissions — `gh api installation/repositories`? No: the granted set is
+#       on the token itself. We read it via `gh api -H 'Authorization: token <t>' rate_limit`? No — the
+#       authoritative source is the installation token's own metadata, exposed at the `/installation` resource
+#       for the App-auth context. We fetch the App installation permissions the token carries.
+#   (2) the read-only minter's paired token-info command (machine-verifiable perms tied to THIS token).
+# Anything else -> "unprovable" (FAIL CLOSED). Never mutates (all GETs).
+readonly_provenance_verdict(){
+  local tok=$1 info_cmd perms_json
+  # (1) GitHub App installation token: its granted permissions are returned by GET /installation? The
+  #     canonical authoritative read is the App installation's permissions object. For an installation token,
+  #     `gh api /installation/permissions`-style endpoints are not public, but the installation's permissions
+  #     are echoed on the token-mint response. We can't re-mint here; instead we read the permissions the
+  #     INSTANCE attests via the paired info command (the only machine-verifiable provenance available to a
+  #     detector that did not itself mint the token). So provenance flows through the info-command seam.
+  info_cmd=$(readonly_token_info_cmd)
+  if [ -n "$info_cmd" ]; then
+    # the info command emits canonical permissions JSON for the token on its stdin (so it can verify the perms
+    # are tied to THIS token, not a generic claim). BOUND it with `timeout` so a hanging instance seam can't
+    # hang doctor (#166 code-review F2 r17b); fail closed (unprovable) if it errors, times out, or emits nothing.
+    local to=${WF_GIT_PROBE_TIMEOUT:-20}
+    if perms_json=$(printf '%s' "$tok" | timeout "$to" bash -c "$info_cmd" 2>/dev/null) && [ -n "$perms_json" ]; then
+      if perms_has_write "$perms_json"; then echo write; else echo readonly; fi
+      return 0
+    fi
+    echo unprovable; return 0
+  fi
+  # No paired info command: try the GitHub App installation-token self-describing path. A `gh api` GET that
+  # echoes the token's own granted permissions is `GET /` with the token? GitHub does NOT return granted scope
+  # for an opaque PAT, and a fine-grained PAT's scope is not machine-readable via the API. So with no info
+  # seam we cannot authoritatively confirm read-only-ness -> FAIL CLOSED.
+  echo unprovable
+}
+
+# readonly_advisory_probe <token> <repo> — ADVISORY ONLY. Sends a PATCH /repos/{owner}/{repo} with an EMPTY
+# JSON object body ({}). PROVEN non-mutating against a live disposable repo (see proposals/166 PR evidence):
+# with an empty object GitHub validates permission and returns 200 echoing the repo object WITHOUT changing any
+# field (updated_at unchanged), so a write-capable token -> 200 ("writable" signal) and a read-only / no-access
+# token -> 403 or 404 ("denied"); NEITHER mutates the repo. Prints "denied" | "writable" | "inconclusive".
+# NEVER the certifier — provenance is the gate; this only sharpens the message (a "writable" can turn a PASS
+# into a FAIL, a "denied" never UPGRADES an unattested token to PASS).
+readonly_advisory_probe(){
+  local tok=$1 repo=$2 code out to=${WF_GIT_PROBE_TIMEOUT:-20}
+  # An empty JSON object body is the load-bearing detail (a NO-body PATCH returns 400 = inconclusive; a body
+  # with a -f field could MUTATE). We pipe '{}' via --input - so no settable field is ever supplied. real_gh
+  # marker so the guard (if installed) passes this internal call through. CAPTURE the -i output FIRST with its
+  # own `|| true` so a non-2xx gh exit (403/404 -> nonzero) does NOT blank the status under `set -o pipefail`
+  # (#166 code-review F4) — then parse the HTTP status line. BOUND with `timeout` so a stalled `gh api` can't
+  # hang doctor (#166 code-review F1 r12 / AGENTS.md bounded background waits); a timeout -> inconclusive.
+  out=$(printf '{}' | timeout "$to" env GH_TOKEN="$tok" WF_GH_INTERNAL=1 gh api -X PATCH "repos/$repo" --input - -i 2>/dev/null || true)
+  code=$(printf '%s\n' "$out" | awk 'toupper($1) ~ /^HTTP/ {print $2; exit}')
+  case "$code" in
+    2*)      echo writable ;;     # GitHub ACCEPTED the (empty, non-mutating) write attempt -> write-capable
+    422)     echo writable ;;     # validation-reject AFTER the permission check passed -> write-capable too
+    403|404) echo denied ;;       # forbidden / not-visible -> no reachable write on this floor
+    *)       echo inconclusive ;; # 400/5xx/garbled -> advisory says nothing (provenance still gates)
+  esac
+}
+
+# readonly_probe_source <label> <token-or-empty> <repo> — probe ONE credential source in ISOLATION. Prints a
+# report line and returns: 0 = authoritatively read-only (PASS), 1 = source absent (skipped), 2 = NOT read-only
+# (write-capable or unprovable -> FAIL). The advisory probe only sharpens the message; provenance is the gate.
+readonly_probe_source(){
+  local label=$1 tok=$2 repo=$3 verdict advisory
+  if [ -z "$tok" ]; then echo "    $label: absent (not set)"; return 1; fi
+  verdict=$(readonly_provenance_verdict "$tok")
+  advisory=""
+  # The advisory probe is a LIVE network call; skip it under the no-network mode (WF_DOCTOR_SKIP_LIVE_PROBES=1)
+  # so plain `doctor` stays hermetic in smokes. Provenance (the gate) still runs. ALSO require `$repo` to be a
+  # CLEAN owner/repo slug — never embed a URL-shaped target (which can carry a userinfo token) into the
+  # `gh api repos/<repo>` path, or the token would leak into the API request/logs (#166 code-review F1 r17b).
+  if [ "${WF_DOCTOR_SKIP_LIVE_PROBES:-0}" != 1 ] && is_clean_repo_slug "$repo"; then
+    advisory=$(readonly_advisory_probe "$tok" "$repo" 2>/dev/null) || advisory=inconclusive
+  fi
+  case "$verdict" in
+    readonly)
+      # provenance says read-only; if the advisory probe loudly says writable, that's a contradiction -> FAIL.
+      if [ "$advisory" = writable ]; then
+        echo "    $label: FAIL (provenance=readonly but advisory probe accepted a write — investigate the attesting seam)"; return 2
+      fi
+      echo "    $label: read-only (authoritative provenance; advisory=${advisory:-skipped})"; return 0 ;;
+    write)
+      echo "    $label: FAIL (authoritative provenance shows a write/admin permission; advisory=${advisory:-skipped})"; return 2 ;;
+    *)  # unprovable -> FAIL CLOSED. Note the advisory hint but never let a 403 floor upgrade it to PASS.
+      echo "    $label: FAIL-CLOSED (read-only-ness not authoritatively confirmable — no WF_READONLY_TOKEN_INFO_CMD provenance; advisory=${advisory:-skipped}, advisory NEVER certifies a PASS)"; return 2 ;;
+  esac
+}
+
+# readonly_probe_one_push_url <url> [worktree] — `git push --dry-run` ONE url, non-mutating, under an isolated
+# config with a read-only credential replay. ASYMMETRIC: sets RO_PUSH_RC=0 only when the dry-run is ACCEPTED
+# (the FAIL signal); RO_PUSH_RC=1 for EVERY other outcome (rejected / transport failure / timeout / error) —
+# "not demonstrably writable", which is advisory and never a read-only PASS.
+RO_PUSH_RC=1
+readonly_probe_one_push_url(){
+  local url=$1 wt=${2:-} tmp rc to=${WF_GIT_PROBE_TIMEOUT:-20} shim
+  RO_PUSH_RC=1
+  # the context git uses for resolving the AMBIENT credential: the TARGET WORKTREE when supplied (so its
+  # worktree-LOCAL credential config is honored), else the default ctx.
+  local credctx=(); [ -n "$wt" ] && [ -d "$wt" ] && credctx=(-C "$wt")
+  tmp=$(mktemp -d) || { RO_PUSH_RC=1; return; }
+  (
+    git -C "$tmp" init -q 2>/dev/null
+    # LOCAL commit identity so the probe commit never depends on a global git user.name/email (#166 F2), AND
+    # disable HOOKS + SIGNING so a globally-configured core.hooksPath / commit.gpgsign can never run during
+    # this supposedly side-effect-free probe (#166 code-review F1 r7).
+    git -C "$tmp" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+        -c user.name="wf-doctor" -c user.email="wf-doctor@local" \
+        commit -q --no-verify --allow-empty -m probe 2>/dev/null
+  ) || { rm -rf "$tmp"; RO_PUSH_RC=1; return; }
+  # MUTATION-SAFE credential layer (#166 code-review F1 r8/r9/r10). A successful auth on a `--dry-run` push
+  # makes git call the credential helper's `store` (verified empirically), which MUTATES the user's credential
+  # store; and git honors URL-SCOPED helpers + helpers WITH ARGUMENTS that hand-rolled shim parsing gets wrong.
+  # So instead of re-implementing git's helper resolution, we let GIT ITSELF resolve the ambient credential
+  # read-only via `git credential fill` (run in the REAL config — fill performs ONLY the `get` step, never
+  # store/erase), then run the dry-run push under an ISOLATED config (no inherited helper can run) with a
+  # trivial STATIC helper that just replays that pre-resolved credential for `get` and no-ops store/erase.
+  # This both preserves detection (a real ambient credential is found by git's own correct parsing) and makes
+  # store/erase impossible.
+  shim="$tmp/cred-ro-shim.sh"
+  local cred_in cred_out parsed_host parsed_proto parsed_path parsed_user rest push_url
+  parsed_proto=${url%%://*}; case "$url" in *://*) : ;; *) parsed_proto=ssh ;; esac
+  parsed_user=""
+  # Use the PARSED authority host (url_host), never an inline glob-prone parse — so the host handed to
+  # credential fill is the URL's TRUE host, and a spoofed `…@github.com/…` path can never coax a github.com
+  # credential out for an attacker host (#166 code-review F1 r16b). All `urls` here are already validated as
+  # exactly github.com/ssh.github.com, so parsed_host is github.com/ssh.github.com by construction.
+  parsed_host=$(url_host "$url"); [ -n "$parsed_host" ] || parsed_host=github.com
+  case "$url" in
+    https://*)
+      rest=${url#https://}
+      # userinfo (a username) is BEFORE the first '/' in the authority; extract it from the authority only.
+      local authority=${rest%%/*}
+      case "$authority" in
+        *@*) parsed_user=${authority%@*}; parsed_user=${parsed_user%%:*} ;;  # username, drop any :password
+      esac
+      parsed_path=${rest#*/}
+      [ "$parsed_path" = "$rest" ] && parsed_path=""
+      ;;
+    *) parsed_path="" ;;
+  esac
+  # Build a USERINFO-STRIPPED push URL for EVERY accepted GitHub form, so a credential-bearing origin never
+  # exposes a secret in the `git push` child argv (#166 code-review F1/F2 r18c). The credential under test is
+  # the AMBIENT one (resolved by `git credential fill` + replayed via the shim); a credential EMBEDDED in the
+  # remote URL is an explicit, non-ambient credential and is deliberately NOT replayed — the ambient surface is
+  # still fully covered because we ALSO probe the synthesized clean github.com URLs. So dropping URL userinfo
+  # neither leaks a secret nor weakens the ambient-credential alarm.
+  # SSH auth is KEY-based and GitHub REQUIRES the username `git` (it is the literal SSH user, NOT a secret) — so
+  # for SSH/scp forms we KEEP the username (defaulting to `git`) and strip only a `:password` if any; dropping
+  # the username entirely would make ssh try the local Unix user and false-negative a writable github key (#166
+  # code-review F1 r18d). For HTTPS the userinfo IS the credential, so it's fully dropped (cred via the shim).
+  local ssh_user
+  case "$url" in
+    https://*)
+      if [ -n "$parsed_path" ]; then push_url="https://${parsed_host}/${parsed_path}"; else push_url="https://${parsed_host}/"; fi ;;
+    ssh://*)
+      # ssh://[user[:secret]@]host[:port]/path -> ssh://<user>@host[:port]/path (keep user, drop :secret).
+      local sshrest=${url#ssh://} sshauth sshport=""
+      sshauth=${sshrest%%/*}; local sshpath=${sshrest#*/}; [ "$sshpath" = "$sshrest" ] && sshpath=""
+      case "$sshauth" in *@*) ssh_user=${sshauth%@*}; ssh_user=${ssh_user%%:*}; sshauth=${sshauth##*@} ;; *) ssh_user=git ;; esac
+      [ -n "$ssh_user" ] || ssh_user=git
+      case "$sshauth" in *:*) sshport=":${sshauth#*:}"; sshauth=${sshauth%%:*} ;; esac
+      if [ -n "$sshpath" ]; then push_url="ssh://${ssh_user}@${sshauth}${sshport}/${sshpath}"; else push_url="ssh://${ssh_user}@${sshauth}${sshport}/"; fi ;;
+    *@*:*)
+      # scp-style [user[:secret]@]host:path -> <user>@host:path (keep user, drop ALL userinfo incl. any secret).
+      # Rebuild from the host AFTER the userinfo `@`, never from `${url#*:}` (which keeps `secret@host:` when the
+      # userinfo carries a password — #166 code-review F2 r18f).
+      ssh_user=${url%%@*}; ssh_user=${ssh_user%%:*}; [ -n "$ssh_user" ] || ssh_user=git
+      local scp_hostpath=${url##*@}                       # host:path (userinfo dropped)
+      push_url="${ssh_user}@${scp_hostpath}" ;;
+    *:*)
+      # bare scp-style host:path with NO user -> add the required `git@`.
+      push_url="git@${url}" ;;
+    *) push_url=$url ;;
+  esac
+  # `git credential fill` resolves the ambient credential using git's OWN rules (handles helpers with args,
+  # url-scoped helpers, !-commands) and performs only `get` — no mutation. Run in the TARGET WORKTREE context
+  # (credctx) so worktree-local helpers are honored. We DO pass the URL path, but we DON'T force
+  # `credential.useHttpPath` — git's DEFAULT path behavior is what a real push uses, so a host-wide
+  # credential-store entry is still resolved (the asymmetric design means we only care about the ACCEPTED case;
+  # we no longer try to faithfully classify the rejected case, so the host-vs-path tension is moot — #166 r15).
+  # Prompts disabled so it can't block; a TIMEOUT just yields an empty cred -> the push will auth-reject ->
+  # advisory (no false read-only PASS is possible from this surface).
+  cred_in=$(printf 'protocol=%s\nhost=%s\n' "$parsed_proto" "$parsed_host")
+  [ -n "$parsed_path" ] && cred_in=$(printf '%s\npath=%s' "$cred_in" "$parsed_path")
+  [ -n "$parsed_user" ] && cred_in=$(printf '%s\nusername=%s' "$cred_in" "$parsed_user")
+  cred_in=$(printf '%s\n\n' "$cred_in")
+  cred_out=$(printf '%s' "$cred_in" | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
+               timeout "$to" git "${credctx[@]}" credential fill 2>/dev/null || true)
+  # build the static get-only replay helper (no-ops store/erase). Only meaningful for the HTTPS surface; SSH
+  # auth uses the key, not this helper, and the isolated config + BatchMode handle the SSH side.
+  {
+    printf '#!/bin/bash\n'
+    printf 'op=$1\n'
+    printf 'if [ "$op" != get ]; then cat >/dev/null 2>&1 || true; exit 0; fi  # no-op store/erase (never mutate)\n'
+    printf 'cat >/dev/null 2>&1 || true\n'
+    # replay the pre-resolved credential verbatim (may be empty -> no ambient HTTPS credential -> auth-reject).
+    printf 'cat <<'\''WF_CRED_EOF'\''\n%s\nWF_CRED_EOF\n' "$cred_out"
+  } > "$shim"
+  chmod +x "$shim"
+  # Disable every interactive/ambient-helper PROMPT but keep the AMBIENT credential surface reachable for `get`
+  # via the read-only shim — that is exactly what we must catch, WITHOUT the store/erase mutation. Bound with
+  # `timeout` so a DNS/network/helper stall can never hang doctor (#166 F2 / AGENTS.md bounded background waits).
+  # ISOLATE git config (GIT_CONFIG_GLOBAL/SYSTEM -> /dev/null + NOSYSTEM=1) so NO inherited helper — unscoped OR
+  # URL-scoped (credential.https://github.com.helper) — runs and writes the store (#166 F1 r9); then install
+  # ONLY the read-only shim, which forwards `get` to the snapshotted helpers but no-ops store/erase. The repo's
+  # OWN tmp config carries the shim + ssh/hooks settings via -c, which survive the global/system isolation.
+  rc=0
+  # FULL config isolation: global+system+NOSYSTEM AND GIT_CONFIG_COUNT=0 so inherited env-injected config
+  # (GIT_CONFIG_KEY_n/VALUE_n) can't add a credential helper alongside the shim and run store/erase (#166 r18).
+  # Reset the helper chain (-c credential.helper=) BEFORE installing ONLY the read-only shim, so nothing else
+  # handles store/erase for this push.
+  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 \
+        timeout "$to" git -C "$tmp" -c core.askPass= -c core.hooksPath=/dev/null \
+        -c credential.helper= -c "credential.helper=$shim" \
+        -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
+        push --dry-run --no-verify "$push_url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" >/dev/null 2>&1 || rc=$?
+  rm -rf "$tmp"
+  # ASYMMETRIC: ONLY an ACCEPTED dry-run (rc 0) is meaningful -> RC=0 (the caller raises a FAIL). EVERY other
+  # outcome — auth rejection, authz denial, pre-auth transport failure, timeout, any error — is simply "not
+  # demonstrably writable" -> RC=1 (advisory; never a read-only PASS). We no longer parse rejection messages to
+  # tell auth-reject from transport failure, because the caller treats them identically and the surface can
+  # never certify read-only anyway. This removes the entire fragile message-pattern classification (#166 r15).
+  if [ "$rc" = 0 ]; then RO_PUSH_RC=0; else RO_PUSH_RC=1; fi
+}
+
+# readonly_probe_git_push <repo> [worktree-dir] — probe the AMBIENT git-push surface, non-mutating, as a
+# ONE-DIRECTIONAL ALARM. Probes the worktree's actual GitHub origin push URL (when given) AND the synthesized
+# canonical GitHub HTTPS+SSH URLs. An ACCEPTED `git push --dry-run` -> FAIL (an ambient credential can push);
+# anything else is ADVISORY ONLY (this surface NEVER certifies read-only — see the asymmetry rationale below).
+# Returns 2 FAIL (accepted), 1 advisory (not demonstrably writable). Never returns a PASS.
+readonly_probe_git_push(){
+  local repo=$1 wt=${2:-} u urls=() accepted=0 rejected=0 origin_url
+  # the actual origin push URL (covers SSH + a non-default push url) when a worktree dir is supplied — but ONLY
+  # if it's a real GitHub remote. A non-GitHub / custom-scheme remote could invoke an arbitrary remote-helper,
+  # which a GitHub-credential detector must not execute (#166 code-review F2 r12); such an origin is skipped
+  # (we still probe the synthesized GitHub URLs below). Mirror git_push_author's GitHub-host allowlist.
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    # ALL push URLs, not just the first — git supports multiple `pushurl`s and a later one could be GitHub
+    # (#166 code-review F2 r16). Validate each against a STRICT GitHub-host allowlist that requires a `/` or `:`
+    # DELIMITER right after the host, so a homograph/suffix host like `ssh.github.com.evil` or
+    # `github.com.evil` is NOT treated as GitHub (#166 code-review F1 r16). A non-GitHub url is skipped (never
+    # executed — it could invoke an arbitrary remote helper) and its raw text is never echoed (userinfo leak).
+    local nongithub_seen=0
+    while IFS= read -r origin_url; do
+      [ -n "$origin_url" ] || continue
+      # PARSED host check (not a glob) — closes the `https://evil/path@github.com/…` authority spoof (#166 r16b).
+      if is_github_remote_url "$origin_url"; then urls+=("$origin_url"); else nongithub_seen=1; fi
+    done < <(git -C "$wt" remote get-url --push --all origin 2>/dev/null || true)
+    [ "$nongithub_seen" = 1 ] && echo "    ambient git push: note — a worktree origin push URL is not a GitHub remote; skipped (its URL is not echoed; a non-GitHub remote helper is not executed). Probing synthesized GitHub URLs only."
+  fi
+  # always include BOTH synthesized canonical surfaces for a real owner/repo — HTTPS AND SSH — so an ambient
+  # SSH key that can push is probed even when no worktree origin was supplied (#166 code-review F1 r4: an
+  # owner/repo-only target must never PASS the git surface on HTTPS alone while an ambient SSH key can push).
+  # ONLY synthesize from a CLEAN owner/repo (one slash, no scheme/userinfo/host/colon) — a `repo` that is
+  # actually a full URL (e.g. when a worktree has a non-GitHub origin) must NOT be embedded in a synthesized URL
+  # (it could carry a userinfo token, #166 code-review F1 r13).
+  # Determine the owner/repo SLUG to synthesize the canonical HTTPS+SSH probes from. Prefer the passed-in
+  # `$repo` when it's already a clean owner/repo; otherwise — when it's URL-shaped (e.g. gh_repo returned a URL
+  # for a worktree origin) — DERIVE a clean slug from the FIRST allowlisted GitHub origin URL's path, so the
+  # OTHER canonical surface (e.g. SSH when the origin is HTTPS) is still probed (#166 code-review F1 r18e).
+  local slug=""
+  if is_clean_repo_slug "$repo"; then
+    slug=$repo
+  elif [ "${#urls[@]}" -gt 0 ]; then
+    slug=$(github_repo_slug "${urls[0]}")
+  fi
+  if [ -n "$slug" ] && is_clean_repo_slug "$slug"; then
+    urls+=("https://github.com/$slug.git"); urls+=("git@github.com:$slug.git")
+  fi
+  # de-dup so the same canonical URL isn't probed twice (origin may equal a synthesized form).
+  if [ "${#urls[@]}" -gt 0 ]; then
+    local -a uniq=(); local seen
+    for u in "${urls[@]}"; do
+      seen=0; for s in "${uniq[@]:-}"; do [ "$s" = "$u" ] && { seen=1; break; }; done
+      [ "$seen" = 0 ] && uniq+=("$u")
+    done
+    urls=("${uniq[@]}")
+  fi
+  if [ "${#urls[@]}" = 0 ]; then echo "    ambient git push: no GitHub remote to probe (advisory; provenance is the gate)"; return 1; fi
+  for u in "${urls[@]}"; do
+    readonly_probe_one_push_url "$u" "$wt"
+    case "$RO_PUSH_RC" in
+      0) accepted=$((accepted+1)) ;;
+      *) rejected=$((rejected+1)) ;;   # auth-rejected OR inconclusive — both are merely "not demonstrably writable"
+    esac
+  done
+  # ASYMMETRIC by design (#166 code-review r15, confirmed cross-family): faithfully proving "a real push would
+  # be REJECTED" from a synthetic, non-mutating env is structurally leaky (credential helpers, useHttpPath
+  # host-vs-path scoping, url.insteadOf, http.extraHeader, ssh config, …) — every attempt to make the negative
+  # faithful either inherits a side effect or diverges from a real push. So the git-push surface is a
+  # ONE-DIRECTIONAL ALARM: an ACCEPTED dry-run is a hard FAIL (ambient push auth was demonstrably accepted);
+  # ANYTHING ELSE is ADVISORY ONLY and never contributes a read-only PASS. The categorical read-only PASS rests
+  # solely on API PROVENANCE. This makes the synthetic-env false-PASS class structurally impossible (the probe
+  # can only ADD a failure signal, never remove one).
+  if [ "$accepted" -gt 0 ]; then
+    echo "    ambient git push: FAIL (--dry-run was ACCEPTED on a probed GitHub remote — an ambient credential can push; --dry-run did NOT update the remote)"; return 2
+  fi
+  echo "    ambient git push: no ambient push credential was accepted (advisory — this surface only ever raises a FAIL; the read-only PASS is decided by API provenance, never by this probe)"; return 1
+}
+
+# doctor_readonly_section <repo> — print the read-only-ambient report for ALL sources + the git surface.
+# Returns 0 iff EVERY present API source is authoritatively read-only AND the git surface is read-only (or
+# inconclusive is treated as NOT-PASS under strict). Sets DOCTOR_RO_FAIL=1 on any FAIL/FAIL-CLOSED.
+DOCTOR_RO_FAIL=0
+doctor_readonly_section(){
+  local repo=$1 wt=${2:-} strict=${3:-0} any_present=0 rc gitrc minted minted_verdict
+  DOCTOR_RO_FAIL=0
+  echo "  read-only ambient credential (#166):"
+  # --- API surface, per SOURCE in isolation -------------------------------------------------------------
+  # GH_TOKEN
+  if [ -n "${GH_TOKEN:-}" ]; then
+    any_present=1
+    rc=0; readonly_probe_source "GH_TOKEN" "${GH_TOKEN:-}" "$repo" || rc=$?
+    [ "$rc" = 2 ] && DOCTOR_RO_FAIL=1
+  else
+    echo "    GH_TOKEN: absent (not set)"
+  fi
+  # GITHUB_TOKEN
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    any_present=1
+    rc=0; readonly_probe_source "GITHUB_TOKEN" "${GITHUB_TOKEN:-}" "$repo" || rc=$?
+    [ "$rc" = 2 ] && DOCTOR_RO_FAIL=1
+  else
+    echo "    GITHUB_TOKEN: absent (not set)"
+  fi
+  # stored `gh auth` credential: read its token via the real gh (marker bypasses the guard), in ISOLATION
+  # from the env tokens (clear GH_TOKEN/GITHUB_TOKEN for this read so we get the STORED credential, not env).
+  local stored_tok
+  stored_tok=$(env -u GH_TOKEN -u GITHUB_TOKEN WF_GH_INTERNAL=1 gh auth token 2>/dev/null || true)
+  if [ -n "$stored_tok" ]; then
+    any_present=1
+    rc=0; readonly_probe_source "stored gh auth" "$stored_tok" "$repo" || rc=$?
+    [ "$rc" = 2 ] && DOCTOR_RO_FAIL=1
+  else
+    echo "    stored gh auth: absent (no gh auth login credential)"
+  fi
+  # --- the read-only minter seam itself (if wired): confirm it yields an authoritative read-only token -----
+  if [ -n "$(readonly_token_cmd)" ]; then
+    # BOUND the minter with `timeout` so a hanging instance seam can't hang doctor (#166 F2 r17b).
+    if minted=$(timeout "${WF_GIT_PROBE_TIMEOUT:-20}" bash -c "$(readonly_token_cmd)" 2>/dev/null) && [ -n "$minted" ]; then
+      minted_verdict=$(readonly_provenance_verdict "$minted")
+      case "$minted_verdict" in
+        readonly) echo "    WF_READONLY_TOKEN_CMD: ok (mints an authoritatively read-only token)" ;;
+        write)    echo "    WF_READONLY_TOKEN_CMD: FAIL (mints a WRITE-capable token)"; DOCTOR_RO_FAIL=1 ;;
+        *)        echo "    WF_READONLY_TOKEN_CMD: FAIL-CLOSED (minted token's read-only-ness not authoritatively confirmable — wire WF_READONLY_TOKEN_INFO_CMD)"; DOCTOR_RO_FAIL=1 ;;
+      esac
+    else
+      echo "    WF_READONLY_TOKEN_CMD: FAIL (configured but produced no token)"; DOCTOR_RO_FAIL=1
+    fi
+  else
+    echo "    WF_READONLY_TOKEN_CMD: not configured (instance has not wired the read-only minter seam)"
+  fi
+  # --- ambient git-push surface (ASYMMETRIC ALARM) -----------------------------------------------------------
+  # This surface only ever ADDS a FAIL (a demonstrably-accepted push); it NEVER grants the read-only PASS (that
+  # is API provenance). So a SKIPPED git probe — no-network mode, or no target — is NOT a fail-closed condition:
+  # it just means "this advisory alarm didn't run", and the provenance gate stands on its own. (#166 r15)
+  if [ "${WF_DOCTOR_SKIP_LIVE_PROBES:-0}" = 1 ]; then
+    echo "    ambient git push: skipped (WF_DOCTOR_SKIP_LIVE_PROBES=1 — no-network mode; advisory alarm only)"
+  elif [ -n "$repo" ] || [ -n "$wt" ]; then
+    gitrc=0; readonly_probe_git_push "$repo" "$wt" || gitrc=$?
+    [ "$gitrc" = 2 ] && DOCTOR_RO_FAIL=1   # ONLY a demonstrably-accepted push fails closed
+  else
+    echo "    ambient git push: skipped (no repo target; advisory alarm only)"
+  fi
+  if [ "$any_present" = 0 ]; then
+    echo "    (no ambient API credential present in this shell — nothing to certify; that is itself read-only-by-absence on the API surface)"
+  fi
+  [ "$DOCTOR_RO_FAIL" = 0 ]
 }
 
 # render_pr_body <worktree> <doc-relpath> <issue> — the PR body as a generated VIEW of the committed
@@ -1339,19 +1849,41 @@ uninstall-gh-guard)  # wf.sh uninstall-gh-guard [bindir] — remove the gh write
 locate-audit)  # wf.sh locate-audit [context-repo] — print the verify-claims reviewer wf.sh would run (introspection/test)
   locate_audit "${1:-}" ;;
 
-doctor)  # wf.sh doctor <author> [repo-or-worktree] — report lifecycle identity readiness without printing tokens
-  need_gh; AUTHOR=${1:?usage: wf.sh doctor <claude|codex> [repo-or-worktree]}; TARGET=${2:-$ORIGIN_REPO}
+doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report lifecycle identity readiness without printing tokens.
+  # --readonly: run ONLY the read-only-ambient detector (#166) and EXIT NON-ZERO on any FAIL/FAIL-CLOSED —
+  # the machine-consumable form rollout + CI invoke. Plain `doctor` prints the read-only section as a labeled
+  # reporter but does not fold it into the identity-readiness exit code (one explicit gate, not two semantics).
+  need_gh
+  RO_ONLY=0; DARGS=()
+  for a in "$@"; do case "$a" in --readonly) RO_ONLY=1 ;; *) DARGS+=("$a") ;; esac; done
+  set -- "${DARGS[@]}"
+  AUTHOR=${1:?usage: wf.sh doctor <claude|codex> [repo-or-worktree] [--readonly]}; TARGET=${2:-$ORIGIN_REPO}
   check_author "$AUTHOR"
+  DWT=""   # the worktree DIR (if TARGET is a dir) so the git-push probe can read the ACTUAL origin push url
   if [ -d "$TARGET" ]; then
     DREPO=$(gh_repo "$TARGET" 2>/dev/null) || die "doctor target is a directory but not a git repo/worktree with an origin remote: $TARGET (pass owner/repo instead)"
+    DWT=$TARGET
   else
     DREPO=$TARGET
+  fi
+  # --readonly: the strict, machine-consumable detector. Run ONLY the read-only-ambient section and exit
+  # non-zero on any FAIL/FAIL-CLOSED — the form rollout + CI invoke (#166 design-review F1).
+  if [ "$RO_ONLY" = 1 ]; then
+    echo "wf.sh doctor --readonly"
+    echo "  repo: $(redact_userinfo "$DREPO")"
+    if doctor_readonly_section "$DREPO" "$DWT" 1; then
+      echo "READONLY-PASS: every ambient API credential source is authoritatively read-only by provenance, and no ambient push credential was demonstrably accepted"
+    else
+      echo "READONLY-FAIL: the ambient credential is NOT authoritatively read-only (see FAIL/FAIL-CLOSED lines above) — demote the ambient credential / wire WF_READONLY_TOKEN_CMD+WF_READONLY_TOKEN_INFO_CMD"
+      exit 1
+    fi
+    exit 0
   fi
   REVIEWER=$(opposite_family "$AUTHOR")
   echo "wf.sh doctor"
   echo "  author: $AUTHOR"
   echo "  reviewer: $REVIEWER"
-  echo "  repo: $DREPO"
+  echo "  repo: $(redact_userinfo "$DREPO")"
   if ambient_identity_allowed; then
     echo "  ambient workflow fallback: ENABLED (WF_ALLOW_AMBIENT_IDENTITY=1)"
   else
@@ -1392,6 +1924,17 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] — report lifecycle identit
     [ "$git_author_rc" = 0 ] || ready=0
   fi
   [ "$model_rc" = 0 ] || ready=0
+  # Read-only-ambient detector (#166) — printed as a LABELED REPORTER. Deliberately NOT folded into the
+  # identity-readiness exit code (the strict gate is `wf.sh doctor <author> [repo] --readonly`); this keeps a
+  # single exit-code semantics for plain doctor (identity readiness) and one explicit gate for the read-only
+  # contract (#166 design-review F1).
+  doctor_readonly_section "$DREPO" "$DWT" || true
+  RDREPO=$(redact_userinfo "$DREPO")   # redact userinfo in the displayed command hints too (#166 F1 r14)
+  if [ "$DOCTOR_RO_FAIL" = 0 ]; then
+    echo "  read-only ambient verdict: PASS (run \`wf.sh doctor $AUTHOR $RDREPO --readonly\` for the strict gate)"
+  else
+    echo "  read-only ambient verdict: FAIL — ambient credential is not authoritatively read-only (advisory here; \`wf.sh doctor $AUTHOR $RDREPO --readonly\` is the gating form, exits non-zero)"
+  fi
   if [ "$ready" = 1 ]; then
     echo "READY: the full ship-change workflow identity path would proceed under current configuration"
   else

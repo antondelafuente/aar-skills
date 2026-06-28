@@ -1,0 +1,137 @@
+# Proposal: provenance-gated read-only-ambient detector (#166)
+
+> The canonical design doc (ADR + PR description). Reviewed by `--scaffold` before build. Lands on main.
+
+## Problem
+
+The #149 design makes the ambient agent GitHub credential read-only so a bare `gh` write fails closed.
+But an instance can forget to demote its ambient token, and then the footgun persists *silently* — a
+write-capable owner token stays reachable in every agent shell and nothing complains. There is no way to
+ask an install "is your ambient credential actually read-only?" and get a trustworthy yes/no.
+
+`wf.sh doctor` today only reports engineer-identity readiness (are the bot tokens mintable, is the git
+author set, is the model reviewer wired). It says nothing about whether the *ambient* credential — the
+one a reflexive bare `gh` or `git push` would use — can write. So the load-bearing capability change from
+#149 has no detector, which is exactly why child #2 exists: a check an install can run routinely that
+fails loudly when the ambient credential is still write-capable, covering BOTH the `gh`/API surface and
+the ambient `git push` surface, and NEVER performing a real mutation on either while it checks.
+
+## Approach
+
+Add a `wf.sh doctor` read-only-ambient section plus a `.aar-ci` smoke. The detector reports, per
+credential source and per surface, whether the *ambient* credential is read-only — and certifies a PASS
+only by PROVENANCE, never by enumerating probes.
+
+**Why provenance, not probing.** You cannot prove "this opaque token holds no reachable write permission"
+by hitting a finite set of endpoints — a fine-grained PAT could carry some *other* write scope
+(`workflow`, `actions`, `deployments`, `pages`, …) an issues/PRs/contents probe never touches, and it
+would false-pass. So the detector does not try to enumerate every write surface. It instead:
+
+- **PASSES only on authoritative read-only confirmation.** Either (a) the credential is a GitHub App
+  **installation token** whose `installation/permissions` JSON `doctor` fetches and finds contains **no**
+  `write`/`admin` permission value; or (b) it comes from the instance's read-only minter seam
+  (`WF_READONLY_TOKEN_CMD`) paired with a machine-verifiable token-info command
+  (`WF_READONLY_TOKEN_INFO_CMD`) that emits the token's canonical permissions, which `doctor` parses and
+  finds free of any `write`/`admin` category. No local-assertion pass.
+- **FAILS CLOSED on any uninspectable/unattested token.** An opaque PAT with no exposed granted-set and no
+  read-only-minter provenance is a FAIL, not a pass — the detector never certifies safety it cannot prove.
+  This is what closes the "a finite probe set can't cover every write scope" gap.
+- **Treats the empirical denial probe as ADVISORY ONLY.** As an extra alarm (not the gate), `doctor` sends a
+  `PATCH /repos/{owner}/{repo}` with an **empty `{}` body** — proven non-mutating against a live disposable
+  repo (an empty object leaves every field, incl. `updated_at`, unchanged). The observed signal: a
+  write-capable token ⇒ **200** (accepted, "writable"); a read-only / no-access token ⇒ **403/404**
+  ("denied"); anything else (e.g. a 400 from a malformed body) ⇒ inconclusive. (The empty-`{}` form is the
+  load-bearing detail: a *no-body* PATCH returns 400, and a body with a settable `-f` field could mutate.) A
+  "writable" is a loud signal that can turn a PASS into a FAIL; a "denied" never *upgrades* an unattested
+  token to PASS — provenance is the only thing that grants PASS. `x-accepted-github-permissions` / rate-limit
+  hints are not used as proof (they describe endpoint requirements, not granted scope).
+
+**Per credential SOURCE.** `doctor` probes `GH_TOKEN`, `GITHUB_TOKEN`, and the stored `gh auth` credential
+**independently** — isolating the others for each check (a per-source `GH_CONFIG_DIR` + cleared env) — so
+it proves *no* reachable source is write-capable, not just whichever one `gh` resolves first. It invokes
+the real `gh` directly (the `WF_GH_INTERNAL` marker) so the ergonomic guard can never mask a write-capable
+source and falsely certify safety.
+
+**Ambient `git push` surface — a one-directional FAIL-only alarm (asymmetric).** A separate probe runs
+`git push --dry-run` to GitHub URLs with all credential prompts disabled, the credential resolved read-only
+via `git credential fill` and replayed through an isolated config (so the probe never mutates the credential
+store or runs hooks). It is **asymmetric by design**: an *accepted* dry-run ⇒ a hard FAIL (an ambient
+credential can demonstrably push); *every other outcome* (auth-rejected, authz-denied, transport failure,
+timeout) is **advisory only and never certifies read-only**. The reason is categorical: faithfully proving
+the negative — "a real push would be rejected" — from a synthetic, non-mutating environment is structurally
+leaky (credential helpers, host-vs-path scoping, `url.insteadOf`, `http.extraHeader`, SSH config, …), so the
+git-push surface only ever *adds* a FAIL, never grants a PASS. The categorical read-only PASS rests solely
+on API **provenance**. This makes the synthetic-environment false-PASS class structurally impossible.
+
+**Non-mutating by construction.** No probe uses a guessed/provisioned resource id (targets are
+self-discovered from what the token can already GET); the contents probe never carries a real `sha` +
+content (so it cannot create a commit); the git probe is `--dry-run` only. The detector is safe to run
+routinely against the live repo even when the ambient token *is* write-capable.
+
+**A strict, machine-consumable verdict (the routine-check surface).** A reporter that exits 0 on a
+read-only FAIL is useless to CI / the instance rollout. So the read-only check has its own
+machine-consumable status: `wf.sh doctor <author> [target] --readonly` runs ONLY the read-only-ambient
+section and **exits non-zero** when any probed source/surface is not authoritatively read-only (FAIL or
+FAIL-CLOSED). That is the form rollout and CI invoke. Plain `wf.sh doctor` keeps printing the read-only
+section alongside the identity readiness as a labeled reporter; to avoid two exit-code semantics it does
+**not** silently mix the read-only verdict into the identity-readiness exit code — the strict `--readonly`
+form is the single, explicit gate.
+
+**Seam contract documented where it's consumed (no second stale contract).** This child consumes
+`WF_READONLY_TOKEN_CMD` / `WF_READONLY_TOKEN_INFO_CMD`, so it documents them in the canonical wf.sh header
+env block, the ship-change `SKILL.md` Auth note, and the `RUNBOOK.md` doctor note — and updates the
+existing "export `GH_TOKEN`" / "repo: contents + pull_requests" advertisements that would otherwise read
+as a contradicting contract. The *full* codification across `AGENTS.md` is child #3; this child lands only
+the minimal canonical statement needed so the surfaces it touches don't advertise a write-capable ambient
+token as the norm.
+
+**Advisory-probe mutation-freedom proven against a live disposable repo.** Per the parent acceptance, the
+advisory 403/422 denial probe is proven non-mutating on both branches with disposable-repo evidence for
+both token types (a read-only token ⇒ 403, a write-capable token ⇒ 422, and the disposable repo's
+issues/PRs/contents are unchanged after the probe). That evidence is captured on the PR; the fake-`gh`/`git`
+smoke is the committed regression guard, not the proof of external API behavior.
+
+**Smoke (`.aar-ci`).** Three fixtures — an authoritatively-read-only token (PASS), a write-capable token
+(FAIL), and an uninspectable/unattested token (FAIL CLOSED, not PASS) — exercised across the API and Git
+surfaces with a fake `gh`/`git` on PATH (no network), asserting `doctor`'s verdict per source and per
+surface and that no fixture path performs a mutation. Registered in `.aar-ci/checks.sh` next to the
+existing wf.sh smokes (runs when wf.sh or the new smoke changes).
+
+## Alternatives considered
+
+- **Enumerate every write endpoint and probe each.** Rejected as the gate: a finite probe set can never
+  cover every fine-grained write scope, so an uncovered scope false-passes. Provenance is categorical;
+  probing is at best an advisory alarm (kept as exactly that).
+- **Trust a local assertion ("the instance says this token is read-only").** Rejected — a misconfigured
+  install would assert wrongly and the detector would certify the very footgun it exists to catch. PASS
+  requires a machine-verifiable granted-permissions set tied to the emitted token.
+- **Probe only the source `gh` resolves first.** Rejected — leaves a write-capable `GITHUB_TOKEN` or
+  stored `gh auth` credential undetected behind a read-only `GH_TOKEN`. Per-source isolation is required.
+- **Let the detector actually attempt a write and roll it back.** Rejected — a safety check cannot have a
+  window where a write-capable token lands a real mutation before the verdict. Mutation-freedom is a hard
+  property, verified in the smoke.
+
+## Blast radius
+
+- **Product (this repo):** a new read-only-ambient section + strict `--readonly` mode in `wf.sh doctor` +
+  helper functions; a new `.aar-ci` smoke (`readonly_ambient_smoke.sh`) registered in `checks.sh`; the
+  `WF_READONLY_TOKEN_CMD` / `WF_READONLY_TOKEN_INFO_CMD` seam *consumption* in `doctor` (the seam's full
+  canonical contract across `AGENTS.md` is child #3; this child consumes the seam and documents it in the
+  wf.sh header env block, the `SKILL.md` Auth note, and the `RUNBOOK.md` doctor note); and the
+  `aar-engineering` plugin version bump required for a `wf.sh` behavior change.
+- **No change to the engineer-token path, the guard wrapper, or the merge gate.** `doctor` stays a
+  read-only reporter; the new section adds no new write capability.
+- **Instance:** none in this child. The instance rollout (demoting the ambient token + wiring
+  `WF_READONLY_TOKEN_CMD`) is a separate non-product task gated on this detector being available.
+- **Failure mode if mis-rolled-out:** the detector reports FAIL/CLOSED loudly — that *is* the intended
+  signal that the instance hasn't demoted its ambient credential yet.
+
+## Rollout + rollback
+
+- **Additive.** The new `doctor` section reports; it does not gate any existing command. An install that
+  has not wired `WF_READONLY_TOKEN_CMD` and uses an opaque ambient token simply sees the read-only section
+  report FAIL-CLOSED, while the existing engineer-identity READY/BLOCKED verdict is unchanged. (The
+  read-only verdict is reported alongside but does not flip the existing identity-readiness exit code in
+  this child — keeping the detector purely a reporter; wiring it into a gate is a later instance step.)
+- **Rollback:** revert the squash commit; `doctor` returns to identity-only reporting and the smoke is
+  removed. No data migration, no GPU/API cost.

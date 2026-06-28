@@ -76,8 +76,11 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
 ## The lifecycle (the agent drives; `wf.sh` is the mechanical glue)
 
 You do the JUDGMENT steps (write the design doc, implement, triage findings) BETWEEN these subcommands.
-Ambient `gh` may be authenticated for convenience — `gh auth login`, or export `GH_TOKEN` — but protected
-workflow writes use the configured `WF_ENGINEER_TOKEN_CMD_*` / `WF_ENGINEER_GIT_AUTHOR_*` seams by default.
+The ambient agent `gh` credential MUST be **read-only** (`gh auth login` / `GH_TOKEN` for READ access only);
+all writes go through the configured `WF_ENGINEER_TOKEN_CMD_*` / `WF_ENGINEER_GIT_AUTHOR_*` seams. An instance
+provides its read-only ambient token via `WF_READONLY_TOKEN_CMD` (+ `WF_READONLY_TOKEN_INFO_CMD` for the
+machine-verifiable permissions), and `wf.sh doctor <author> [repo] --readonly` confirms the ambient credential
+is authoritatively read-only across the API + git-push surfaces (it FAILS CLOSED on an unattested token).
 `wf.sh` sources no env file itself; source the instance engineer env or run `wf.sh doctor <author>` before the
 workflow if unsure. `wf.sh` is `scripts/wf.sh` in this skill.
 
@@ -243,7 +246,10 @@ GitHub is the durable coordination record, but it should read like a handoff to 
   reviewer as the merge gate; such a change is exercised only after it lands); (3) the installed plugin
   (Claude plugin cache / Claude/Codex skill installs) for a repo-less invocation or a repo with no
   verify-claims in-tree. The base-ref copy is cached under the repo's git-common-dir keyed by the base commit.
-- **gh** — Issues, draft PR, PR comments, merge (authenticate `gh`: `gh auth login`, or export `GH_TOKEN`).
+- **gh** — Issues, draft PR, PR comments, merge. The ambient `gh` credential (`gh auth login` / `GH_TOKEN`)
+  must be **read-only**; writes flow through the engineer token path, and `wf.sh doctor … --readonly` confirms
+  the ambient credential is authoritatively read-only (API + git-push, per-source, non-mutating; fails closed
+  on an unattested token).
   An optional **`gh` write-guard** (`scripts/gh-guard.sh`, installed via `wf.sh install-gh-guard` / removed
   via `wf.sh uninstall-gh-guard`) sits ahead of `gh` on PATH and redirects a *bare* `gh` write to the
   engineer path with a directed message — an **ergonomic redirect, not the security boundary** (the

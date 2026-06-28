@@ -238,6 +238,18 @@ if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-c
   fi
 fi
 
+# read-only-ambient detector smoke (#166): runs when wf.sh OR the smoke itself changed (so an edit to the
+# smoke is also exercised — #166 code-review F3).
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/aar-engineering/skills/ship-change/scripts/(wf\.sh|readonly_ambient_smoke\.sh)$'; then
+  RO_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/readonly_ambient_smoke.sh"
+  if [ -f "$RO_SMOKE" ]; then
+    echo "[checks] read-only-ambient detector smoke" >&2
+    bash "$RO_SMOKE" >&2 && ok "readonly_ambient smoke" || err "read-only-ambient detector smoke FAILED"
+  else
+    err "wf.sh/readonly smoke changed but readonly_ambient_smoke.sh missing — cannot verify the read-only-ambient detector (#166)"
+  fi
+fi
+
 # gh write-guard behavior smoke (#165): runs when the guard wrapper, the static check, or wf.sh changed.
 if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/aar-engineering/skills/ship-change/scripts/(gh-guard\.sh|gh_guard_static_check\.sh|gh_guard_smoke\.sh|wf\.sh)$'; then
   GG_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/gh_guard_smoke.sh"

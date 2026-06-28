@@ -7,6 +7,10 @@ unset GH_TOKEN
 unset WF_ENGINEER_TOKEN_CMD_CLAUDE WF_ENGINEER_TOKEN_CMD_CODEX WF_REVIEWER_TOKEN_CMD
 unset WF_ENGINEER_GIT_AUTHOR_CLAUDE WF_ENGINEER_GIT_AUTHOR_CODEX
 unset WF_ALLOW_AMBIENT_IDENTITY AUDIT_VERIFIER_CMD
+unset WF_READONLY_TOKEN_CMD WF_READONLY_TOKEN_INFO_CMD
+# this smoke is hermetic (no network); plain `doctor` now runs the #166 read-only section, whose advisory API
+# probe + git-push probe are LIVE network calls — skip them here so the identity smoke stays offline + fast.
+export WF_DOCTOR_SKIP_LIVE_PROBES=1
 WF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wf.sh
 [ -f "$WF" ] || { echo "FAIL: wf.sh not found next to smoke" >&2; exit 1; }
 
