@@ -1108,6 +1108,24 @@ is_github_remote_url(){
   [ "$h" = github.com ] || [ "$h" = ssh.github.com ]
 }
 
+# github_repo_slug <github-url> — extract the bare `owner/repo` from a (already GitHub-validated) remote URL of
+# any form (https://github.com/o/r[.git], git@github.com:o/r[.git], ssh://git@github.com/o/r[.git]). Prints the
+# slug or empty. Used to synthesize the canonical probe URLs when the caller's repo value is URL-shaped (#166 r18e).
+github_repo_slug(){
+  local u=$1 path
+  case "$u" in
+    *://*) path=${u#*://}; path=${path%%\?*}; path=${path%%#*}; path=${path#*/} ;;  # after authority
+    *:*)   path=${u#*:} ;;                                                          # scp-style host:path
+    *)     path=$u ;;
+  esac
+  path=${path%.git}; path=${path#/}
+  # keep only the FIRST two path segments (owner/repo); reject anything that isn't exactly owner/repo.
+  case "$path" in
+    */*/*) path="${path%%/*}/$(x=${path#*/}; printf '%s' "${x%%/*}")" ;;
+  esac
+  is_clean_repo_slug "$path" && printf '%s' "$path"
+}
+
 # is_clean_repo_slug <s> — true ONLY for a bare `owner/repo` (exactly one slash; no scheme/userinfo/host/port/
 # whitespace), so a URL-shaped target (which can carry a userinfo token) is NEVER embedded into a
 # `gh api repos/<slug>` path (#166 F1 r17b). Allows the GitHub-name charset plus '.'/'-'/'_'.
@@ -1404,11 +1422,28 @@ readonly_probe_git_push(){
   # ONLY synthesize from a CLEAN owner/repo (one slash, no scheme/userinfo/host/colon) — a `repo` that is
   # actually a full URL (e.g. when a worktree has a non-GitHub origin) must NOT be embedded in a synthesized URL
   # (it could carry a userinfo token, #166 code-review F1 r13).
-  case "$repo" in
-    *@*|*:*|*//*|*' '*) : ;;                       # not a bare owner/repo (has userinfo/scheme/port) -> skip
-    */*/*) : ;;                                     # more than one slash -> not owner/repo
-    */*) urls+=("https://github.com/$repo.git") ; urls+=("git@github.com:$repo.git") ;;
-  esac
+  # Determine the owner/repo SLUG to synthesize the canonical HTTPS+SSH probes from. Prefer the passed-in
+  # `$repo` when it's already a clean owner/repo; otherwise — when it's URL-shaped (e.g. gh_repo returned a URL
+  # for a worktree origin) — DERIVE a clean slug from the FIRST allowlisted GitHub origin URL's path, so the
+  # OTHER canonical surface (e.g. SSH when the origin is HTTPS) is still probed (#166 code-review F1 r18e).
+  local slug=""
+  if is_clean_repo_slug "$repo"; then
+    slug=$repo
+  elif [ "${#urls[@]}" -gt 0 ]; then
+    slug=$(github_repo_slug "${urls[0]}")
+  fi
+  if [ -n "$slug" ] && is_clean_repo_slug "$slug"; then
+    urls+=("https://github.com/$slug.git"); urls+=("git@github.com:$slug.git")
+  fi
+  # de-dup so the same canonical URL isn't probed twice (origin may equal a synthesized form).
+  if [ "${#urls[@]}" -gt 0 ]; then
+    local -a uniq=(); local seen
+    for u in "${urls[@]}"; do
+      seen=0; for s in "${uniq[@]:-}"; do [ "$s" = "$u" ] && { seen=1; break; }; done
+      [ "$seen" = 0 ] && uniq+=("$u")
+    done
+    urls=("${uniq[@]}")
+  fi
   if [ "${#urls[@]}" = 0 ]; then echo "    ambient git push: no GitHub remote to probe (advisory; provenance is the gate)"; return 1; fi
   for u in "${urls[@]}"; do
     readonly_probe_one_push_url "$u" "$wt"

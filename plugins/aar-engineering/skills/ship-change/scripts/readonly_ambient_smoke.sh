@@ -549,6 +549,20 @@ else
   fail "F3 r18c: doctor_token still prints a raw (possibly tokenized) repo value"
 fi
 
+# F1 r18e: a worktree with an HTTPS GitHub origin must STILL probe the synthesized SSH surface — so an ambient
+# SSH key that accepts FAILs even when the (rejecting) origin is HTTPS. The origin's gh_repo can be URL-shaped;
+# the slug is derived from the origin URL so both canonical surfaces are synthesized.
+WT18e="$TMP/wt-https-origin"; mkdir -p "$WT18e"
+"$REAL_GIT" -C "$WT18e" init -q
+"$REAL_GIT" -C "$WT18e" remote add origin "https://github.com/o/r.git"
+: > "$MUTLOG"
+RO_TARGET="$WT18e" RO_GIT_SSH=accepted run_strict "RO_aaa" "" "" denied rejected
+if [ $? -eq 0 ]; then
+  fail "F1 r18e: HTTPS-origin worktree must still probe the synthesized SSH surface (SSH-accept -> FAIL)"
+else
+  echo "$RO_OUT" | grep -q 'ambient git push: FAIL' && pass "F1 r18e: HTTPS-origin worktree also probes synthesized SSH surface (SSH-accept -> FAIL)" || fail "F1 r18e: synthesized SSH surface not probed for an HTTPS-origin worktree"
+fi
+
 # F1 r18 (behavioral): an ENV-INJECTED credential helper (GIT_CONFIG_COUNT/KEY/VALUE) must be neutralized by
 # the probe's full isolation (GIT_CONFIG_COUNT=0 + helper reset + shim) — a real `git push --dry-run` under
 # that env must NOT invoke the env helper's store/erase. Mirror the r9 approach against a non-resolving host.
