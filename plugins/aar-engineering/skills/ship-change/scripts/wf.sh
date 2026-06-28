@@ -509,6 +509,73 @@ fd_seed(){  # fd_seed <cache> <rev>
   done < "$rev"
 }
 fd_high_list(){ jq -r '.findings[]|select(.severity=="HIGH")|"\(.id) HIGH"' "$1" 2>/dev/null; }
+# Non-convergence backstop (#137): bound the MERGE-GATE review loop. The gate's final-SHA review re-runs every
+# `finish` and the merge is hard-blocked (enforce_admins ON), so a PR that keeps producing fresh, validly-
+# dispositioned HIGHs round after round (PR #192: 7 CHANGES_REQUESTED rounds) has no human-judgment exit and
+# burns scarce cross-family review credits. After N such BLOCKING ROUNDS the gate stops saying "fix and re-run"
+# and says "this PR is under-scoped — re-split it" (still BLOCKS; never auto-merges). A round = one completed
+# merge-gate reviewer pass that STILL PRODUCED A BLOCKING HIGH (a clean review merges, so it is not a
+# non-convergence round and never increments — this keeps `round` an honest count of "rounds with a residual
+# HIGH", per the field's contract). fd_bump_round increments `round` IDEMPOTENTLY, keyed on a fingerprint of
+# <reviewed-HEAD-sha>:<sorted residual-HIGH ids>: a new commit (new SHA) or a changed HIGH set => new
+# fingerprint => +1; a bare identical `finish` retry (same SHA, same HIGHs) reproduces the recorded fingerprint
+# => no increment. Keyed on SHA (not HIGH-ids alone) so a recurring SAME blocker across genuinely new commits
+# still counts — that is exactly the #192 under-scoped signature. It also records `last_reviewed_sha` so the
+# pre-review short-circuit can tell "nothing committed since the last counted round" (a bare retry) from "a new
+# fix to give one more look". Args: <cache> <reviewed-sha> <high-ids-file> <had-high:0|1>. Echoes the resulting
+# round number. Back-compat: absent `round` reads as 0.
+fd_bump_round(){  # fd_bump_round <cache> <reviewed-sha> <high-ids-file> <had-high:0|1>
+  local cache=$1 sha=$2 hifile=$3 had_high=${4:-0} fp prev cur
+  [ -s "$cache" ] || printf '{"altitude":"implementation","findings":[]}\n' > "$cache"
+  cur=$(jq -r '.round // 0' "$cache" 2>/dev/null); case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
+  # A clean review (no residual HIGH) is NOT a non-convergence round — never increments; leave state untouched.
+  if [ "$had_high" != 1 ]; then printf '%s\n' "$cur"; return 0; fi
+  # fingerprint = reviewed SHA + the sorted residual-HIGH id set (one id per line in <high-ids-file>)
+  fp=$(printf '%s:%s' "$sha" "$(awk 'NF' "$hifile" 2>/dev/null | sort -u | tr '\n' ',')" | md5sum | cut -c1-16)
+  prev=$(jq -r '.last_review_fingerprint // ""' "$cache" 2>/dev/null)
+  if [ "$fp" != "$prev" ]; then
+    cur=$((cur + 1))
+    # The cache write must SUCCEED before we report the advance — otherwise fd_bump_round would echo an
+    # incremented round while the cache still holds the old value, fd_save would repost stale JSON, and the
+    # next finish would undercount. On a write failure, leave the cache untouched and signal failure (rc 1,
+    # no echo) so the caller fails closed rather than trusting a phantom increment.
+    if jq --argjson r "$cur" --arg fp "$fp" --arg sha "$sha" \
+        '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
+        && mv "$cache.tmp" "$cache"; then :; else
+      rm -f "$cache.tmp" 2>/dev/null || true
+      return 1
+    fi
+  fi
+  printf '%s\n' "$cur"
+}
+fd_round(){ jq -r '(.round // 0)' "$1" 2>/dev/null | grep -E '^[0-9]+$' || echo 0; }   # current round; absent => 0
+fd_last_reviewed_sha(){ jq -r '(.last_reviewed_sha // "")' "$1" 2>/dev/null || echo ""; }  # SHA of the last counted round
+# Validate the `round` field BEFORE trusting it as the load-bearing backstop counter. Absent / null => fine
+# (back-compat 0). A PRESENT value that is not a non-negative INTEGER JSON NUMBER (a corrupt or hand-edited
+# disposition save — including a numeric STRING like "3", a float, or a negative) is corruption: rc 2 so finish
+# fails closed instead of silently resetting the counter (which fd_round would otherwise do). Validates the JSON
+# TYPE in jq, not the rendered string, so `"3"` does not sneak through. rc 2 also on unreadable/invalid JSON.
+fd_round_valid(){  # fd_round_valid <cache>  -> rc 0 ok (absent/null/non-neg-integer), rc 2 otherwise
+  local v
+  v=$(jq -r 'if (has("round")|not) or .round==null then "OK"
+             elif (.round|type)=="number" and (.round|floor)==.round and .round>=0 then "OK"
+             else "BAD" end' "$1" 2>/dev/null) || return 2
+  [ "$v" = OK ] && return 0 || return 2
+}
+# Post the non-convergence backstop PR comment ONCE (#137): a hidden marker makes it idempotent across repeated
+# tripped `finish` runs — if a backstop comment already exists on the PR, skip re-posting. Best-effort (the
+# terminal BLOCK at the call site is the gate, not this comment). Args: <atok> <repo> <pr> <rounds> <detail>.
+NCV_COMMENT_MARKER='<!-- wf:nonconvergence-backstop -->'
+ncv_backstop_comment(){  # ncv_backstop_comment <atok> <repo> <pr> <rounds> <detail>
+  local atok=$1 repo=$2 pr=$3 rounds=$4 detail=$5 existing
+  existing=$(gh_author "$atok" -R "$repo" pr view "$pr" --json comments \
+    --jq '.comments[].body' 2>/dev/null | grep -F "$NCV_COMMENT_MARKER" || true)
+  [ -z "$existing" ] || return 0   # already posted once — don't duplicate
+  printf '%s\nNon-convergence backstop tripped: %s merge-gate review rounds with a blocking HIGH %s.\n\nEvery round has been a legitimate, validly-dispositioned finding, yet a fresh HIGH keeps appearing — the signature of an **under-scoped** PR (the lesson from PR #132/#192), not a single fixable defect. The recommendation now changes from "fix and re-run" to **re-split this change into smaller `ready`/`needs-design` children** and ship them separately, rather than continuing to spend cross-family review credits on a loop that the merge gate itself cannot exit.\n\nThis is advisory guidance attached to the block; the merge stays blocked (no auto-merge). If you judge this a genuine multi-round false-positive on a cohesive change, raise `WF_NONCONVERGENCE_ROUNDS` for the next `finish` run.\n' \
+    "$NCV_COMMENT_MARKER" "$rounds" "$detail" \
+    | gh_author "$atok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
+    || note "WARN: could not post the non-convergence backstop PR comment (non-fatal; terminal BLOCK stands)"
+}
 # TRUSTED findings list (reviewer-derived, not author-editable) from a review output file: "<fid> HIGH" per
 # HIGH finding, ids computed the same way fd_seed does. Used as the gate's findings list so deleting/downgrading
 # a prior disposition entry can't bypass the deterministic backstop (the deleted id has no entry -> BLOCK).
@@ -585,8 +652,101 @@ fd_load(){  # fd_load <wt> <repo> <pr> <tok> -> echoes cache path (canonical PR 
   fi
   printf '%s\n' "$cache"
 }
-fd_save(){  # fd_save <wt> <repo> <pr> <tok> — post the cache as a new canonical comment; RETURNS the gh rc.
-  local wt=$1 repo=$2 pr=$3 tok=$4 cache; cache=$(fd_cache "$wt")
+# fd_merge_canonical_round (#137): the MONOTONIC-counter guard, factored out of fd_save so it is unit-testable
+# without GitHub. The non-convergence `round` is reviewer-owned and monotonic — an author-facing `fdispo save`
+# of a hand-edited cache (which carries only finding dispositions) must NEVER lower or delete it, or the author
+# could reset the backstop and keep spending reviews past the threshold. Given the CANONICAL comment body (as
+# read from GitHub) and the local <cache>, if canonical's round is at least the cache's, adopt canonical's round
+# + its matching fingerprint + last_reviewed_sha into the cache (so the about-to-post save can't regress it OR
+# drop its metadata). The comparison is `>=`, not `>`: on EQUAL rounds an author `fdispo save` whose cache lacks
+# (or staled) last_reviewed_sha would otherwise publish a same-round comment WITHOUT the SHA, and a later bare
+# retry would miss the pre-review short-circuit. The only writer of round/sha is fd_bump_round (finish), which
+# always STRICTLY increments — so on equal rounds canonical is always at least as authoritative, and finish's
+# own advancing save still wins (its local round is strictly greater => this branch is skipped => local wins).
+# Args: <cache> <canonical-comment-body>. RETURNS nonzero when fd_save must abort: rc 2 if a PRESENT canonical
+# body is unparseable OR its round is malformed (would otherwise be coerced to 0 and reset the counter), or rc 1
+# if a required adoption (canonical >= local) cannot be written. A no-op returns 0: a genuinely-empty body (no
+# canonical comment yet), a lower canonical round, or an absent canonical round (back-compat).
+fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
+  local cache=$1 cbody=$2 cjson cround lround fp sha
+  [ -n "$cbody" ] || return 0   # genuinely NO canonical comment yet (empty body) -> legit no-op
+  # A canonical comment EXISTS — it MUST parse. A present-but-unparseable body is corruption: rc 2 so fd_save
+  # aborts (matches fd_clamp_to_canonical). This is the single fail-closed point both the author save AND the
+  # finish/allow_advance save flow through, so finish is protected too.
+  cjson=$(printf '%s' "$cbody" | sed -n '/```json/,/```/p' | sed '1d;$d' \
+    | jq -c '{r:(.round // 0), fp:(.last_review_fingerprint // ""), sha:(.last_reviewed_sha // "")}' 2>/dev/null) || return 2
+  [ -n "$cjson" ] || return 2
+  # The canonical comment's `round` is also the load-bearing counter — a PRESENT-but-malformed canonical value
+  # must NOT be silently coerced to 0 (that would let a corrupt canonical comment be overwritten/reset). Tell a
+  # legitimate ABSENT round (back-compat 0) from a present-but-bad one via the jq->0 input, and fail closed (rc 2)
+  # on the latter so fd_save aborts. (`.r` came from `.round // 0`, so 0 here = absent OR a literal 0 — both fine.)
+  local cround_raw; cround_raw=$(printf '%s' "$cbody" | sed -n '/```json/,/```/p' | sed '1d;$d' \
+    | jq -r 'if (has("round")|not) or .round==null then "OK0"
+             elif (.round|type)=="number" and (.round|floor)==.round and .round>=0 then (.round|tostring)
+             else "BAD" end' 2>/dev/null)
+  [ "$cround_raw" = BAD ] && return 2
+  cround=$(printf '%s' "$cjson" | jq -r '.r' 2>/dev/null); case "$cround" in ''|*[!0-9]*) cround=0 ;; esac
+  lround=$(jq -r '(.round // 0)' "$cache" 2>/dev/null); case "$lround" in ''|*[!0-9]*) lround=0 ;; esac
+  if [ "$cround" -ge "$lround" ] 2>/dev/null && [ "$cround" -gt 0 ] 2>/dev/null; then
+    fp=$(printf '%s' "$cjson" | jq -r '.fp'); sha=$(printf '%s' "$cjson" | jq -r '.sha')
+    # The adoption is REQUIRED (canonical is at least as advanced) — if we can't write it, signal failure so
+    # fd_save aborts rather than publish the stale lower local round (which would regress the monotonic counter).
+    if jq --argjson r "$cround" --arg fp "$fp" --arg sha "$sha" \
+        '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
+        && mv "$cache.tmp" "$cache"; then :; else
+      rm -f "$cache.tmp" 2>/dev/null || true
+      return 1
+    fi
+  fi
+  return 0
+}
+# fd_clamp_to_canonical (#137): the OTHER half of monotonicity. The round counter is REVIEWER-OWNED — only the
+# finish path (fd_bump_round, after a completed merge-gate review) may ADVANCE it. An author-facing `fdispo save`
+# of a hand-edited cache must not be able to publish a `round` ABOVE the canonical value (which would advance, or
+# attach bogus fingerprint/sha to, the counter without a merge review). So on a non-finish save, if the local
+# round exceeds canonical, clamp the local round + fingerprint + sha DOWN to canonical's before posting. (Combined
+# with fd_merge_canonical_round's adopt-when-canonical-is-higher, a non-finish save can only ever publish exactly
+# the canonical round — it can change findings, never the counter.) Args: <cache> <canonical-body>. rc 2 if a
+# present canonical body is unparseable/malformed (fail closed); rc 1 if a required clamp write failed; rc 0 on a
+# successful clamp or a no-op (local <= canonical, incl. a legitimately-empty no-canonical-yet body).
+fd_clamp_to_canonical(){  # fd_clamp_to_canonical <cache> <canonical-body>
+  local cache=$1 cbody=$2 cjson cround lround fp sha
+  cround=0
+  if [ -n "$cbody" ]; then
+    # A canonical comment EXISTS — it MUST parse. An unparseable/malformed canonical body is corruption: rc 2 so
+    # fd_save aborts rather than clamp to a phantom 0 and publish a reset counter. (Empty body = genuinely no
+    # canonical comment yet -> cround stays 0, a legitimate first-save clamp.)
+    cjson=$(printf '%s' "$cbody" | sed -n '/```json/,/```/p' | sed '1d;$d' \
+      | jq -c '{r:(.round // 0), fp:(.last_review_fingerprint // ""), sha:(.last_reviewed_sha // "")}' 2>/dev/null) || return 2
+    [ -n "$cjson" ] || return 2
+    cround=$(printf '%s' "$cjson" | jq -r '.r' 2>/dev/null); case "$cround" in ''|*[!0-9]*) return 2 ;; esac
+  fi
+  lround=$(jq -r '(.round // 0)' "$cache" 2>/dev/null); case "$lround" in ''|*[!0-9]*) lround=0 ;; esac
+  if [ "$lround" -gt "$cround" ] 2>/dev/null; then
+    fp=""; sha=""
+    if [ -n "${cjson:-}" ]; then fp=$(printf '%s' "$cjson" | jq -r '.fp'); sha=$(printf '%s' "$cjson" | jq -r '.sha'); fi
+    if jq --argjson r "$cround" --arg fp "$fp" --arg sha "$sha" \
+        '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
+        && mv "$cache.tmp" "$cache"; then :; else rm -f "$cache.tmp" 2>/dev/null || true; return 1; fi
+  fi
+  return 0
+}
+# fd_save posts the local cache as the new canonical comment, after guarding the monotonic counter. The canonical
+# read is REQUIRED, not best-effort: if it FAILS (GitHub error) we fail closed (rc 3, no post) rather than risk
+# regressing `round`. A clean read that finds NO canonical comment yet (empty body) is a legitimate first save. The
+# local round is validated at save time (rc 4 on malformed). The round is REVIEWER-OWNED: by default (allow_advance
+# unset/0 — the author `fdispo save` path) a local round ABOVE canonical is CLAMPED down, so only the finish path
+# (allow_advance=1, right after fd_bump_round) may advance it. RETURNS: gh post rc on a real post; 3 read failed;
+# 4 malformed local round; 5 a required canonical adoption couldn't be written; 6 a required author-clamp couldn't
+# be written.
+fd_save(){  # fd_save <wt> <repo> <pr> <tok> [allow_advance:0|1]
+  local wt=$1 repo=$2 pr=$3 tok=$4 allow_advance=${5:-0} cache cbody rrc=0; cache=$(fd_cache "$wt")
+  fd_round_valid "$cache" || return 4   # never publish a malformed round (back-compat absent/null still ok)
+  cbody=$(gh_author "$tok" -R "$repo" pr view "$pr" --json comments \
+    --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null) || rrc=$?
+  [ "$rrc" = 0 ] || return 3   # canonical read failed -> cannot guarantee monotonicity -> fail closed, do NOT post
+  fd_merge_canonical_round "$cache" "$cbody" || return 5   # canonical >= local: required adoption couldn't be written
+  [ "$allow_advance" = 1 ] || fd_clamp_to_canonical "$cache" "$cbody" || return 6  # author save: local can't out-advance canonical
   printf '%s\n\n## Finding dispositions — disposition-aware merge gate (canonical, latest)\n\n```json\n%s\n```\n' \
     "$FD_MARKER" "$(cat "$cache")" | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1
 }
@@ -1671,6 +1831,22 @@ Split into one design PR per doc."
   case "$FDRC" in
     2) die "disposition-state lookup failed (GitHub error) — failing closed; re-run finish" ;;
     0) FD=$(fd_load "$WT" "$REPO" "$PR" "$ATOK") || die "canonical disposition state on PR #$PR is corrupt (invalid JSON) — fix the disposition comment and re-run finish"
+       # A present-but-malformed `round` is corruption of the load-bearing backstop counter — fail closed rather
+       # than let fd_round silently reset it to 0 (which would defeat the backstop). Absent/null is fine (=> 0).
+       fd_round_valid "$FD" || die "canonical disposition state on PR #$PR has a malformed \`round\` (must be a non-negative integer) — the non-convergence backstop counter is corrupt; fix the disposition comment and re-run finish."
+       # 1d. Non-convergence backstop — PRE-REVIEW short-circuit (#137). This MUST run before any verifier-backed
+       #      work below (the mandatory #140 fresh-eyes sweep AND the merge review), so a bare retry past threshold
+       #      spends NO review credit at all — the whole point of the backstop. If the PR is already at the round
+       #      threshold AND nothing has been committed since the last counted blocking round (HEAD ==
+       #      last_reviewed_sha = a bare retry of the same loop), refuse to spend another review and emit the
+       #      under-scoped block now. A NEW commit since then (HEAD moved = a genuine fix attempt) falls through
+       #      and is allowed one more review. Env-overridable: raise WF_NONCONVERGENCE_ROUNDS to review the same SHA.
+       NCV_N=${WF_NONCONVERGENCE_ROUNDS:-4}; case "$NCV_N" in ''|*[!0-9]*) NCV_N=4 ;; esac
+       NCV_PRIOR=$(fd_round "$FD"); NCV_PRIOR_SHA=$(fd_last_reviewed_sha "$FD")
+       if [ "${NCV_PRIOR:-0}" -ge "$NCV_N" ] 2>/dev/null && [ -n "$NCV_PRIOR_SHA" ] && [ "$NCV_PRIOR_SHA" = "$LOCAL_SHA" ]; then
+         ncv_backstop_comment "$ATOK" "$REPO" "$PR" "$NCV_PRIOR" "(unchanged since last round)"
+         die "non-convergence backstop: already $NCV_PRIOR merge-gate rounds with a blocking HIGH (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) and nothing committed since the last review — NOT spending another review. This PR appears UNDER-SCOPED; re-split it into smaller ready/needs-design children. Commit a genuine fix to get one more review, or raise WF_NONCONVERGENCE_ROUNDS to override."
+       fi
        # #140 fresh-eyes companion: BEFORE the gate/merge-review, run ONE un-anchored stateless sweep over the
        #      same target and post it. Its wf_fresh_<branch> artifact is auto-handed to the disposition-aware
        #      merge review (run_review) for SEMANTIC adjudication. Candidate-only — it never feeds the
@@ -1723,12 +1899,51 @@ Split into one design PR per doc."
   fi
   # 2c. record the final review's findings into the disposition state for the NEXT round (non-gating — the
   #     structural gate above and the model verdict below are the gates; this only keeps the canonical record current).
+  #     ALSO advance the non-convergence round counter (#137 backstop) IDEMPOTENTLY here — this is the one place a
+  #     completed merge-gate reviewer pass is incorporated, so it is the credit-accurate unit to count.
+  NCV_ROUND=0
   if [ -n "$FD" ]; then
     FK=code; [ "$DESIGN_MODE" = 1 ] && FK=scaffold
     REVF="${TMPDIR:-/tmp}/wf_${FK}_$(wt_branch "$WT" | tr '/' '_').md"
-    if [ -f "$REVF" ]; then fd_seed "$FD" "$REVF"; fd_save "$WT" "$REPO" "$PR" "$ATOK" || note "WARN: could not update canonical disposition comment (cosmetic — gates already evaluated)"; fi
+    if [ -f "$REVF" ]; then
+      fd_seed "$FD" "$REVF"
+      # Fingerprint = reviewed SHA + this review's residual-HIGH id set. A new commit (new SHA) or a changed
+      # HIGH set => new fingerprint => round +1; a bare identical re-run reproduces it => no increment.
+      NCV_HI="${TMPDIR:-/tmp}/wf_ncv_high_${BR//\//_}.txt"
+      fd_review_high_list "$REVF" | awk '{print $1}' > "$NCV_HI"
+      # had_high=1 only when THIS merge review left a blocking HIGH — a clean review is not a non-convergence
+      # round and must not increment the counter (keeps `round` an honest "rounds with a residual HIGH").
+      NCV_HADHI=0; [ "$REVIEW_HIGH" != 0 ] && NCV_HADHI=1
+      NCV_BEFORE=$(fd_round "$FD")
+      NCV_ROUND=$(fd_bump_round "$FD" "$LOCAL_SHA" "$NCV_HI" "$NCV_HADHI") \
+        || die "could not persist the non-convergence round counter to the local disposition cache (write failed) — failing closed so the backstop never undercounts. Re-run finish."
+      # fd_save persists the disposition state (incl. round / last_reviewed_sha) to the canonical PR comment.
+      # If the round counter actually ADVANCED this pass, that state is load-bearing for the next finish (the
+      # pre-review short-circuit + the trip both read round/last_reviewed_sha from the comment) — a lost save
+      # would UNDERCOUNT and silently defeat the backstop. So fail CLOSED on a save failure that drops a real
+      # increment; a non-advancing save (clean review / idempotent retry) stays a cosmetic WARN.
+      # allow_advance=1: THIS is the one legitimate round-advancing save (right after fd_bump_round). Every other
+      # fd_save (the author-facing fdispo paths) defaults to 0 and is clamped to canonical, so the counter is
+      # reviewer-owned — only finish can advance it.
+      if fd_save "$WT" "$REPO" "$PR" "$ATOK" 1; then :; else
+        if [ "${NCV_ROUND:-0}" != "${NCV_BEFORE:-0}" ]; then
+          die "could not persist the advanced non-convergence round ($NCV_BEFORE -> $NCV_ROUND) to the canonical PR comment (GitHub write failed) — failing closed so the next finish does not undercount. Re-run finish."
+        fi
+        note "WARN: could not update canonical disposition comment (cosmetic — round unchanged; gates already evaluated)"
+      fi
+    fi
   fi
-  [ "$REVIEW_HIGH" = 0 ] || die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
+  if [ "$REVIEW_HIGH" != 0 ]; then
+    # Non-convergence backstop (#137): after N merge-gate rounds STILL producing a blocking HIGH, the loop is
+    # the under-scoped signature, not a fixable finding — change the guidance to "re-split", still BLOCK.
+    NCV_N=${WF_NONCONVERGENCE_ROUNDS:-4}
+    case "$NCV_N" in ''|*[!0-9]*) NCV_N=4 ;; esac
+    if [ -n "$FD" ] && [ "${NCV_ROUND:-0}" -ge "$NCV_N" ] 2>/dev/null; then
+      ncv_backstop_comment "$ATOK" "$REPO" "$PR" "$NCV_ROUND" "(still $REVIEW_HIGH blocking HIGH)"
+      die "non-convergence backstop: $REVIEW_HIGH HIGH after $NCV_ROUND merge-gate rounds (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) — this PR appears UNDER-SCOPED. Re-split it into smaller ready/needs-design children rather than iterating further. (Raise WF_NONCONVERGENCE_ROUNDS to override for a genuine false-positive loop.)"
+    fi
+    die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
+  fi
   # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced). On enforced
   #    repos this succeeds only when the required opposite-family approval is present on this SHA.
   note "gate clean (no HIGH) + checks passed -> marking ready + merging PR #$PR @ $LOCAL_SHA"

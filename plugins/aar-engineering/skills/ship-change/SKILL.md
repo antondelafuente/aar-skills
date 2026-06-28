@@ -203,6 +203,17 @@ review semantically adjudicates them (surfaces any genuinely-new/pre-existing ho
 the **residual merge-review findings** are what you disposition. The sweep just guarantees the stateful gate
 never trusts a pre-existing hole past.
 
+**Non-convergence backstop (#137) — automatic.** The disposition-aware `finish` counts merge-gate review
+rounds that *still left a blocking HIGH* (one per fingerprint-distinct blocking merge review; a clean review
+merges and does not count, and a bare identical re-run does not re-count). If a PR is still blocked after
+`WF_NONCONVERGENCE_ROUNDS` rounds (default **4**), the gate stops saying "fix and re-run" and instead reports
+the PR as **under-scoped** — the signature (every round a fresh, validly-dispositioned HIGH) means the right
+move is to **re-split into smaller `ready`/`needs-design` children**, not to keep spending review credits on a
+loop the gate itself cannot exit. Once at threshold, a bare re-run with nothing newly committed is **blocked
+before** spending another review (a new fix commit still earns one more review); the recommendation posts once
+(marker-guarded). It **still BLOCKS** (never auto-merges) — it only changes the guidance. If a run is a
+genuine multi-round false-positive on a cohesive change, raise `WF_NONCONVERGENCE_ROUNDS` for that `finish`.
+
 ## GitHub reader surface
 
 GitHub is the durable coordination record, but it should read like a handoff to a human who opened the PR cold.

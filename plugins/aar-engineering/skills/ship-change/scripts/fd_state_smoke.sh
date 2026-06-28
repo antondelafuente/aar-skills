@@ -66,5 +66,129 @@ rl=$(fd_review_high_list "$TMP/rev.md")
 exp_id=$(fd_fid "empty input crashes merge_records")
 printf '%s\n' "$rl" | grep -qx "$exp_id HIGH" && ok review-high-matches-seed-id || no "review-high-matches-seed-id (want $exp_id)"
 
+# fd_bump_round / fd_round / fd_last_reviewed_sha: non-convergence backstop counter (#137). A round counts ONLY
+# when the review left a blocking HIGH (4th arg had_high=1); idempotent on identical <sha + HIGH set>;
+# increments on a new SHA OR a changed HIGH set; back-compat (absent round => 0). Also records last_reviewed_sha.
+rc="$TMP/round.json"; : > "$rc"
+hi1="$TMP/hi1.txt"; printf 'aaaaaaaaaaaa\nbbbbbbbbbbbb\n' > "$hi1"
+[ "$(fd_round "$rc")" = 0 ] && ok round-absent-zero || no "round-absent-zero ($(fd_round "$rc"))"
+r=$(fd_bump_round "$rc" "sha1111" "$hi1" 1); [ "$r" = 1 ] && ok round-first-bump || no "round-first-bump ($r)"
+[ "$(fd_round "$rc")" = 1 ] && ok round-persisted || no "round-persisted ($(fd_round "$rc"))"
+[ "$(fd_last_reviewed_sha "$rc")" = "sha1111" ] && ok round-records-sha || no "round-records-sha ($(fd_last_reviewed_sha "$rc"))"
+r=$(fd_bump_round "$rc" "sha1111" "$hi1" 1); [ "$r" = 1 ] && ok round-idempotent-same-sha-same-high || no "round-idempotent ($r)"
+# A CLEAN review (had_high=0) is NOT a non-convergence round -> never increments, leaves state untouched.
+r=$(fd_bump_round "$rc" "sha9999" "$hi1" 0); [ "$r" = 1 ] && ok round-clean-no-bump || no "round-clean-no-bump ($r)"
+[ "$(fd_last_reviewed_sha "$rc")" = "sha1111" ] && ok round-clean-keeps-sha || no "round-clean-keeps-sha ($(fd_last_reviewed_sha "$rc"))"
+# same SHA, but HIGH set changed -> new fingerprint -> increment.
+hi2="$TMP/hi2.txt"; printf 'aaaaaaaaaaaa\ncccccccccccc\n' > "$hi2"
+r=$(fd_bump_round "$rc" "sha1111" "$hi2" 1); [ "$r" = 2 ] && ok round-bump-on-changed-high || no "round-changed-high ($r)"
+# NEW commit (new SHA), SAME surviving HIGH set -> still increments (the #192 under-scoped signature).
+r=$(fd_bump_round "$rc" "sha2222" "$hi2" 1); [ "$r" = 3 ] && ok round-bump-on-new-sha-same-high || no "round-new-sha ($r)"
+[ "$(fd_last_reviewed_sha "$rc")" = "sha2222" ] && ok round-updates-sha || no "round-updates-sha ($(fd_last_reviewed_sha "$rc"))"
+# HIGH-id ORDER must not matter (sorted in the fingerprint): reorder hi2 -> same fingerprint as last -> no bump.
+hi2r="$TMP/hi2r.txt"; printf 'cccccccccccc\naaaaaaaaaaaa\n' > "$hi2r"
+r=$(fd_bump_round "$rc" "sha2222" "$hi2r" 1); [ "$r" = 3 ] && ok round-order-insensitive || no "round-order ($r)"
+# fd_round fails safe on a malformed round value (safe-read; the gating check is fd_round_valid below).
+echo '{"round":"notanumber"}' > "$TMP/bad.json"
+[ "$(fd_round "$TMP/bad.json")" = 0 ] && ok round-malformed-zero || no "round-malformed-zero ($(fd_round "$TMP/bad.json"))"
+
+# fd_round_valid: absent/null/integer => rc 0 (ok); PRESENT non-integer => rc 2 (corruption, finish fails closed).
+echo '{"findings":[]}' > "$TMP/v_absent.json"
+fd_round_valid "$TMP/v_absent.json" && ok roundvalid-absent-ok || no "roundvalid-absent-ok"
+echo '{"round":null}' > "$TMP/v_null.json"
+fd_round_valid "$TMP/v_null.json" && ok roundvalid-null-ok || no "roundvalid-null-ok"
+echo '{"round":3}' > "$TMP/v_int.json"
+fd_round_valid "$TMP/v_int.json" && ok roundvalid-int-ok || no "roundvalid-int-ok"
+fd_round_valid "$TMP/bad.json"; [ "$?" = 2 ] && ok roundvalid-string-rc2 || no "roundvalid-string-rc2"
+echo '{"round":2.5}' > "$TMP/v_float.json"
+fd_round_valid "$TMP/v_float.json"; [ "$?" = 2 ] && ok roundvalid-float-rc2 || no "roundvalid-float-rc2"
+# A NUMERIC STRING must NOT sneak through (type-checked, not rendered-string-checked).
+echo '{"round":"3"}' > "$TMP/v_numstr.json"
+fd_round_valid "$TMP/v_numstr.json"; [ "$?" = 2 ] && ok roundvalid-numeric-string-rc2 || no "roundvalid-numeric-string-rc2"
+# A negative integer is not a valid round either.
+echo '{"round":-1}' > "$TMP/v_neg.json"
+fd_round_valid "$TMP/v_neg.json"; [ "$?" = 2 ] && ok roundvalid-negative-rc2 || no "roundvalid-negative-rc2"
+# Zero is a valid round.
+echo '{"round":0}' > "$TMP/v_zero.json"
+fd_round_valid "$TMP/v_zero.json" && ok roundvalid-zero-ok || no "roundvalid-zero-ok"
+
+# fd_bump_round returns rc 1 (no echo) when the cache write fails — caller fails closed, never trusts a
+# phantom increment. Simulate by making the cache dir unwritable so the jq+mv cannot land.
+udir="$TMP/unwritable"; mkdir -p "$udir"; echo '{"round":4,"last_review_fingerprint":"x"}' > "$udir/c.json"; chmod 555 "$udir"
+hi_bw="$TMP/hi_bw.txt"; printf 'zzzzzzzzzzzz\n' > "$hi_bw"
+if out=$(fd_bump_round "$udir/c.json" "shaNEW" "$hi_bw" 1 2>/dev/null); then no "bump-rc1-on-write-fail (echoed $out, rc 0)"; else ok bump-rc1-on-write-fail; fi
+chmod 755 "$udir"
+
+# fd_merge_canonical_round: the MONOTONIC-counter guard (#137). An author save must never lower/delete `round`.
+# Build a canonical comment body the way fd_save posts it (a ```json fenced block).
+canon_body(){ printf '<!-- m -->\n\n```json\n%s\n```\n' "$1"; }
+# canonical AHEAD of local -> adopt canonical round + its fp/sha into the cache (prevents regression).
+mc="$TMP/mc.json"; echo '{"round":1,"findings":[]}' > "$mc"
+fd_merge_canonical_round "$mc" "$(canon_body '{"round":5,"last_review_fingerprint":"FP5","last_reviewed_sha":"SHA5"}')"
+[ "$(fd_round "$mc")" = 5 ] && ok merge-adopts-higher-canonical || no "merge-adopts-higher-canonical ($(fd_round "$mc"))"
+[ "$(fd_last_reviewed_sha "$mc")" = "SHA5" ] && ok merge-adopts-canonical-sha || no "merge-adopts-canonical-sha ($(fd_last_reviewed_sha "$mc"))"
+# local AHEAD of canonical (finish's advancing save) -> keep local, do NOT regress.
+mc2="$TMP/mc2.json"; echo '{"round":6,"last_reviewed_sha":"SHALOCAL","findings":[]}' > "$mc2"
+fd_merge_canonical_round "$mc2" "$(canon_body '{"round":5,"last_reviewed_sha":"SHA5"}')"
+[ "$(fd_round "$mc2")" = 6 ] && ok merge-keeps-higher-local || no "merge-keeps-higher-local ($(fd_round "$mc2"))"
+[ "$(fd_last_reviewed_sha "$mc2")" = "SHALOCAL" ] && ok merge-keeps-local-sha || no "merge-keeps-local-sha ($(fd_last_reviewed_sha "$mc2"))"
+# author save that DROPPED the round (cache has no round) but canonical has one -> canonical wins (no reset).
+mc3="$TMP/mc3.json"; echo '{"findings":[{"id":"x","severity":"HIGH","status":"fixed"}]}' > "$mc3"
+fd_merge_canonical_round "$mc3" "$(canon_body '{"round":3,"last_reviewed_sha":"SHA3"}')"
+[ "$(fd_round "$mc3")" = 3 ] && ok merge-restores-dropped-round || no "merge-restores-dropped-round ($(fd_round "$mc3"))"
+[ "$(jq -r '.findings[0].id' "$mc3")" = "x" ] && ok merge-preserves-findings || no "merge-preserves-findings"
+# EQUAL rounds: an author save whose cache dropped last_reviewed_sha must NOT publish a same-round comment
+# without the SHA — canonical metadata is preserved on `>=` (else a later bare retry misses the short-circuit).
+mc5="$TMP/mc5.json"; echo '{"round":4,"findings":[{"id":"y","severity":"MED","status":"refuted"}]}' > "$mc5"
+fd_merge_canonical_round "$mc5" "$(canon_body '{"round":4,"last_review_fingerprint":"FPEQ","last_reviewed_sha":"SHAEQ"}')"
+[ "$(fd_round "$mc5")" = 4 ] && ok merge-equal-keeps-round || no "merge-equal-keeps-round ($(fd_round "$mc5"))"
+[ "$(fd_last_reviewed_sha "$mc5")" = "SHAEQ" ] && ok merge-equal-restores-sha || no "merge-equal-restores-sha ($(fd_last_reviewed_sha "$mc5"))"
+[ "$(jq -r '.findings[0].id' "$mc5")" = "y" ] && ok merge-equal-preserves-findings || no "merge-equal-preserves-findings"
+# both rounds zero (the normal no-backstop save) -> no-op, no spurious empty metadata written.
+mc0="$TMP/mc0.json"; echo '{"findings":[]}' > "$mc0"
+fd_merge_canonical_round "$mc0" "$(canon_body '{"round":0}')"
+[ "$(jq 'has("last_reviewed_sha")' "$mc0")" = false ] && ok merge-zero-no-spurious-meta || no "merge-zero-no-spurious-meta"
+# a REQUIRED adoption (canonical >= local) whose cache write FAILS -> rc nonzero (so fd_save aborts before
+# posting the stale lower round). Simulate with an unwritable cache dir.
+mdir="$TMP/m_unwritable"; mkdir -p "$mdir"; echo '{"round":1,"findings":[]}' > "$mdir/c.json"; chmod 555 "$mdir"
+if fd_merge_canonical_round "$mdir/c.json" "$(canon_body '{"round":9,"last_reviewed_sha":"SHA9"}')" 2>/dev/null; then no "merge-required-write-fail-rc"; else ok merge-required-write-fail-rc; fi
+chmod 755 "$mdir"
+# a NO-OP (lower canonical) returns 0 even though no write happens.
+mok="$TMP/mok.json"; echo '{"round":5,"findings":[]}' > "$mok"
+fd_merge_canonical_round "$mok" "$(canon_body '{"round":2}')" && ok merge-noop-rc0 || no "merge-noop-rc0"
+# a present-but-MALFORMED canonical round must fail closed (rc nonzero), NOT coerce to 0 and reset the counter.
+mbad="$TMP/mbad.json"; echo '{"round":3,"findings":[]}' > "$mbad"
+fd_merge_canonical_round "$mbad" "$(canon_body '{"round":"notnum"}')" 2>/dev/null && no "merge-malformed-canonical-rc" || ok merge-malformed-canonical-rc
+fd_merge_canonical_round "$mbad" "$(canon_body '{"round":-2}')" 2>/dev/null && no "merge-negative-canonical-rc" || ok merge-negative-canonical-rc
+# absent canonical round (back-compat) is a clean no-op (rc 0), local untouched.
+fd_merge_canonical_round "$mbad" "$(canon_body '{"findings":[]}')" && ok merge-absent-canonical-rc0 || no "merge-absent-canonical-rc0"
+[ "$(fd_round "$mbad")" = 3 ] && ok merge-absent-canonical-keeps-local || no "merge-absent-canonical-keeps-local ($(fd_round "$mbad"))"
+# empty body (no canonical yet) -> clean no-op (rc 0), local untouched.
+mc4="$TMP/mc4.json"; echo '{"round":2,"findings":[]}' > "$mc4"
+fd_merge_canonical_round "$mc4" "" && ok merge-empty-canonical-rc0 || no "merge-empty-canonical-rc0"
+[ "$(fd_round "$mc4")" = 2 ] && ok merge-empty-canonical-noop || no "merge-empty-canonical-noop ($(fd_round "$mc4"))"
+# PRESENT but unparseable body -> corruption, fail closed (rc nonzero), local untouched (matches the clamp half).
+fd_merge_canonical_round "$mc4" "no json fence here" 2>/dev/null && no "merge-unparseable-canonical-rc" || ok merge-unparseable-canonical-rc
+[ "$(fd_round "$mc4")" = 2 ] && ok merge-unparseable-keeps-local || no "merge-unparseable-keeps-local ($(fd_round "$mc4"))"
+
+# fd_clamp_to_canonical: the round is reviewer-owned — an author save can't publish a round ABOVE canonical.
+# local > canonical -> clamp DOWN to canonical (round + fp/sha), preserving findings.
+cl="$TMP/cl.json"; echo '{"round":9,"last_reviewed_sha":"BOGUS","findings":[{"id":"z","severity":"LOW","status":"fixed"}]}' > "$cl"
+fd_clamp_to_canonical "$cl" "$(canon_body '{"round":3,"last_reviewed_sha":"SHA3"}')" && ok clamp-rc0 || no "clamp-rc0"
+[ "$(fd_round "$cl")" = 3 ] && ok clamp-lowers-round || no "clamp-lowers-round ($(fd_round "$cl"))"
+[ "$(fd_last_reviewed_sha "$cl")" = "SHA3" ] && ok clamp-adopts-canonical-sha || no "clamp-adopts-canonical-sha ($(fd_last_reviewed_sha "$cl"))"
+[ "$(jq -r '.findings[0].id' "$cl")" = "z" ] && ok clamp-preserves-findings || no "clamp-preserves-findings"
+# local <= canonical -> no-op (merge half handles raising; clamp leaves it).
+cl2="$TMP/cl2.json"; echo '{"round":2,"findings":[]}' > "$cl2"
+fd_clamp_to_canonical "$cl2" "$(canon_body '{"round":5}')"; [ "$(fd_round "$cl2")" = 2 ] && ok clamp-noop-when-not-above || no "clamp-noop-when-not-above ($(fd_round "$cl2"))"
+# no canonical comment at all (empty body) -> legit first save: an author can't publish ANY round (clamp to 0).
+cl3="$TMP/cl3.json"; echo '{"round":4,"findings":[]}' > "$cl3"
+fd_clamp_to_canonical "$cl3" "" && ok clamp-empty-rc0 || no "clamp-empty-rc0"
+[ "$(fd_round "$cl3")" = 0 ] && ok clamp-to-zero-no-canonical || no "clamp-to-zero-no-canonical ($(fd_round "$cl3"))"
+# canonical comment PRESENT but unparseable -> corruption, fail closed (rc nonzero), local untouched (no reset).
+cl4="$TMP/cl4.json"; echo '{"round":4,"findings":[]}' > "$cl4"
+fd_clamp_to_canonical "$cl4" "garbage with no json fence" 2>/dev/null && no "clamp-unparseable-canonical-rc" || ok clamp-unparseable-canonical-rc
+[ "$(fd_round "$cl4")" = 4 ] && ok clamp-unparseable-keeps-local || no "clamp-unparseable-keeps-local ($(fd_round "$cl4"))"
+
 if [ "$fails" -eq 0 ]; then echo "fd_state_smoke: ALL PASS"; else echo "fd_state_smoke: FAILURES"; fi
 exit "$fails"
