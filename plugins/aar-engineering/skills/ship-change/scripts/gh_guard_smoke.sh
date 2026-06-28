@@ -214,6 +214,24 @@ if printf '%s' "$PUSH_OUT_U" | grep -q 'ENGINEER_TOKEN'; then fail "-u push PERS
 CURBR=$(git -C "$GITTEST/work" rev-parse --abbrev-ref HEAD)
 if printf '%s' "$PUSH_OUT_U" | grep -q "branch.${CURBR}.remote=origin"; then pass "-u push sets upstream to the NAMED origin remote (not a URL)"; else fail "-u push did not set upstream to named origin: $PUSH_OUT_U"; fi
 
+echo "[smoke] git_push_author only treats real github.com as a github remote (review F2)"
+# a look-alike host (suffix github.com) must NOT be rewritten to a tokenized github.com URL. Point origin at
+# a local bare repo via an https://evilgithub.com/... url + insteadOf; the non-github branch pushes as-is.
+( cd "$GITTEST/work"
+  git remote set-url origin https://evilgithub.com/o/r.git
+) >/dev/null 2>&1
+EVIL_OUT=$(PATH="$GBIN:$PATH" GIT_TERMINAL_PROMPT=0 bash -c '
+  set -uo pipefail
+  WT="'"$GITTEST/work"'"
+  # if the code WRONGLY rewrote to github.com, this insteadOf would catch the tokenized github url; since it
+  # should NOT, we instead redirect the evilgithub url to the local bare repo.
+  git -C "$WT" config url."'"$GITTEST"'/remote.git".insteadOf "https://evilgithub.com/o/r.git"
+  eval "$(sed -n "/^real_gh()/,/^}/p; /^git_push_author()/,/^}/p" "'"$WF"'")"
+  git_push_author ENGINEER_TOKEN "$WT" -q origin HEAD:refs/heads/pushed_evil 2>&1
+  git -C "'"$GITTEST"'/remote.git" rev-parse --verify -q refs/heads/pushed_evil >/dev/null && echo PUSH_LANDED_EVIL
+' 2>&1)
+if printf '%s' "$EVIL_OUT" | grep -q PUSH_LANDED_EVIL; then pass "look-alike host (suffix github.com) is NOT rewritten to github.com (F2)"; else fail "look-alike host push failed (should push as-is): $EVIL_OUT"; fi
+
 echo "[smoke] install-gh-guard refuses to clobber a non-guard gh (review F2)"
 IBIN="$TMP/installbin"; mkdir -p "$IBIN"
 # a pre-existing NON-guard gh in the install dir (e.g. a real binary the operator placed there)

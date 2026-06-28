@@ -382,6 +382,13 @@ author_token_optional(){
 # `gh`/`GH_TOKEN=… gh` call in this file so a future call site cannot silently regress the bypass.
 real_gh(){ WF_GH_INTERNAL=1 gh "$@"; }
 
+# guard_symlink_matches <link> <guard-target> — true ONLY if <link> canonicalizes to the SAME real path as
+# <guard-target>. FAILS CLOSED (returns false) if either canonicalization yields empty (e.g. `readlink -f`
+# missing/failing), so install/uninstall never treat an unknown gh symlink as "ours" and clobber it (#165
+# review). Tries `readlink -f`, then `realpath`, then a plain `readlink` one-hop as a last resort.
+canon_path(){ local p; p=$(readlink -f "$1" 2>/dev/null) || p=""; [ -n "$p" ] || p=$(realpath "$1" 2>/dev/null) || p=""; [ -n "$p" ] || p=$(readlink "$1" 2>/dev/null) || p=""; printf '%s' "$p"; }
+guard_symlink_matches(){ local a b; a=$(canon_path "$1"); b=$(canon_path "$2"); [ -n "$a" ] && [ -n "$b" ] && [ "$a" = "$b" ]; }
+
 gh_author(){  # gh_author <author-token-or-empty> <gh args...>
   local tok=$1; shift
   if [ -n "$tok" ]; then GH_TOKEN="$tok" real_gh "$@"; else real_gh "$@"; fi
@@ -401,7 +408,7 @@ git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args..
   local remote_url owner_repo push_url
   remote_url=$(git -C "$wt" remote get-url --push origin 2>/dev/null) || die "git_push_author: no origin remote in $wt"
   case "$remote_url" in
-    https://*github.com/*|git@github.com:*|ssh://git@github.com/*|ssh://github.com/*)
+    https://github.com/*|https://*@github.com/*|git@github.com:*|ssh://git@github.com/*|ssh://github.com/*)
       # A real GitHub remote (HTTPS, scp-style SSH, or ssh:// SSH): FORCE the engineer credential. Askpass
       # alone is bypassable by a stored owner HTTPS helper or an SSH remote/key, so we NORMALIZE any of these
       # forms to an explicit tokenized HTTPS URL AND clear credential helpers for THIS push
@@ -1105,7 +1112,7 @@ install-gh-guard)  # wf.sh install-gh-guard [bindir] [--force] — put the gh wr
   # Refuse to clobber an EXISTING $BIND/gh that isn't already this guard's symlink (it could be a real gh
   # binary or a different tool the operator put there) — mirror uninstall's safety. --force overrides (#165 review F2).
   if [ -e "$BIND/gh" ] || [ -L "$BIND/gh" ]; then
-    if [ -L "$BIND/gh" ] && [ "$(readlink -f "$BIND/gh" 2>/dev/null)" = "$(readlink -f "$GUARD" 2>/dev/null)" ]; then
+    if [ -L "$BIND/gh" ] && guard_symlink_matches "$BIND/gh" "$GUARD"; then
       : # already our guard symlink — idempotent re-install is fine
     elif [ "$FORCE" = 1 ]; then
       note "WARN: --force overwriting existing $BIND/gh (was: $(readlink -f "$BIND/gh" 2>/dev/null || echo "$BIND/gh"))"
@@ -1131,7 +1138,7 @@ install-gh-guard)  # wf.sh install-gh-guard [bindir] [--force] — put the gh wr
 uninstall-gh-guard)  # wf.sh uninstall-gh-guard [bindir] — remove the gh write-guard wrapper (#165)
   BIND=${1:-$HOME/.local/bin}
   GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gh-guard.sh"
-  if [ -L "$BIND/gh" ] && [ "$(readlink -f "$BIND/gh" 2>/dev/null)" = "$(readlink -f "$GUARD" 2>/dev/null)" ]; then
+  if [ -L "$BIND/gh" ] && guard_symlink_matches "$BIND/gh" "$GUARD"; then
     rm -f "$BIND/gh" && note "removed gh write-guard symlink $BIND/gh"
   elif [ -e "$BIND/gh" ]; then
     die "$BIND/gh exists but is not this guard's symlink — refusing to remove it (remove it by hand if intended)"
