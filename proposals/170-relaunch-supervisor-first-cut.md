@@ -1,0 +1,47 @@
+# Proposal: model-free relaunch supervisor — the substrate-neutral decision contract (#170)
+
+> The canonical design doc (ADR + PR description). Reviewed by `--scaffold` before build. Lands on main.
+
+## Problem
+
+An autonomous research run can die mid-flight — a crash, an API blip long enough to kill the session, a usage-policy block that ends the thread — while a GPU pod is still attached and billing. The fix the parent design (#54, `proposals/54-crash-resilience-supervisor.md`) settled on is a **model-free relaunch supervisor**: a dumb loop on the always-on box that makes zero model calls (so it survives a total API outage) and relaunches a dead session so the run resumes. Child 1 (#168, already merged) shipped the *agent's* half of that contract — the run-supervision record (`run_supervision_record.sh`: `create/update/stop/close/is-desired-active`), the standing-handoff discipline, and the checkpoint-to-disk requirement. What is still missing is the **supervisor's half written down as a product contract**: which failure signatures it acts on, how it decides between resuming the same session and launching a fresh successor, and — just as important — what it must *not* do (resurrect a deliberate `/quit`, restart healthy-but-quiet work). Without that contract in the product, every instance that wires a supervisor re-derives the decision logic from scratch and can get the dangerous parts wrong.
+
+This child is the **reliable first cut** of that supervisor contract: the two unambiguous, false-positive-free failure signatures (a process *exit* the in-pane crash loop can't catch, and an agent-written *needs-relaunch* marker). It deliberately **excludes silent-wedge detection** — catching an agent that is alive-but-hung — because a reliable model-free "the agent is healthily inside a long model turn" signal does not yet exist, and a wrong probe restarts healthy work. That harder half is the separate `needs-design` child (#54 child 5), not this one.
+
+## Approach
+
+Ship a single product **reference document** — `plugins/experiment-lifecycle/skills/run-experiment/references/RELAUNCH_SUPERVISOR.md` — that states the supervisor's decision logic in **substrate-neutral terms**, plus a one-paragraph link from `run-experiment`'s `SKILL.md` so the contract is discoverable from the skill. This is the right home and the right form for three reasons the parent design already fixed: (1) executor liveness is the `experiment-lifecycle` layer's domain (pod *deletion* is `gpu-job`'s); (2) the concrete command mapping (`--continue`, `relaunch-session.sh`, the systemd unit, session names, RunPod key) is **instance**, NOT this repo, per the #54 blast radius and the releasability rule — the product names the *operations*, the instance names the *commands*; and (3) it pairs with the agent-side contract child 1 already wrote into the same skill, so the two halves sit together (the agent's obligations in `SKILL.md` "The resume contract"; the supervisor's matching behavior in this reference).
+
+The reference pins down, as a product contract:
+
+- **Supervise desired-state, not "any missing session."** The supervisor acts only on a run that is **desired-active with no deliberate-stop marker and not closed** — exactly the `run_supervision_record.sh is-desired-active <run-id>` predicate child 1 ships (exit 0 = relaunch-eligible; a missing/stopped/closed/corrupt record is exit 1 = leave alone, fail-closed). A clean `/quit`, a manual kill, or a finished run is therefore a **no-op**. This is the load-bearing safety property: it is what stops the supervisor from resurrecting a run the human or the agent deliberately ended.
+- **Two reliable failure signatures (this first cut).** (a) A **process exit / crash** the in-pane respawn loop can't itself catch — the whole tmux session/pane gone, or the box-level wrapper dead — for a registered, non-stopped run. (b) An **agent-written *needs-relaunch* marker**: a small, positive, model-free on-disk signal that recovery is wanted (the policy-block / can't-resume-in-place case; a `StopFailure`-style hook from #54 child 4 may drop it). The reference fixes the marker's *contract* (a per-run file under a defined root, naming the bound `handoff_path`) so child 4's notifier and any instance hook write the same shape.
+- **The substrate-neutral decision tree.** Both signatures feed one decision: `resume_same_session()` **preferred** (resume in place — the instance maps this to `--continue`, the path the in-pane loop owns), else `launch_successor(handoff_path)` (a fresh successor pointed at the standing handoff) when same-session resume is impossible (corrupted session JSONL, policy block). The **`handoff_path` is bound explicitly** — read from the run-supervision record (or carried in the needs-relaunch marker) — never assumed to be `<workdir>/TEMP.md`, so the artifact dir and the launcher's workdir need not coincide.
+- **Single-writer lock + idempotence + crash-storm cap.** The supervisor holds a single-writer kill/resume lock so it never double-relaunches or races the in-pane respawn loop; the relaunch is idempotent (a second pass over a run already being relaunched is a no-op); and it keeps the in-pane loop's existing crash-storm cap (a tight relaunch loop can't spin forever).
+- **Explicitly NOT silent-wedge detection.** The reference states plainly that an alive-but-hung agent (no exit, no marker) is **out of scope** for this cut and routed to the `needs-design` follow-up, so a future reader doesn't mistake "no wedge handling" for a bug to patch with a risky heuristic.
+
+The deliverable is intentionally **docs/contract, not instance wiring**: the product gains the decision contract; the box's systemd unit / bash loop / command mapping ship in the consuming instance with a same-day pointer back to this reference, per the AGENTS.md pointer rule. The reference is inert without an instance supervisor consuming it, so it carries zero rollout risk on its own.
+
+## Alternatives considered
+
+- **Ship the instance supervisor (the systemd unit / bash loop) in this PR.** Rejected: that is instance machinery, explicitly out of `automated-researcher` per the #54 blast radius ("Instance (NOT this repo)"). Putting box-specific session names, `--continue`, `relaunch-session.sh`, and the RunPod key into the product would be an instance→product leak and break releasability. The product owns the *contract*; the instance owns the *commands*.
+- **Fold the supervisor contract into `SKILL.md` prose instead of a reference doc.** Rejected as the *primary* home: the decision tree, the two signatures, the marker contract, and the wedge-exclusion are a self-contained spec better kept as a referenced document (the established `references/` convention in this repo — verify-claims, ship-change, feedback-loop all use it) so it reads as one contract rather than diffusing into the executor runbook. A short `SKILL.md` link keeps it discoverable.
+- **Build a heuristic silent-wedge probe now (transcript-mtime + child-process).** Rejected per #54: the in-pane process exposes no foreground-tool/status interface, so mtime/child heuristics can't yet distinguish a long healthy model turn from a true hang. A wrong probe restarts healthy quiet work — strictly worse than the gap it closes. Routed to its own `needs-design` pass.
+- **Invent a new desired-state record for the supervisor.** Rejected: child 1 already ships `run_supervision_record.sh` with exactly the `is-desired-active` predicate and `handoff_path`/`lease_pod_ids` fields this contract needs. The supervisor *consumes* that record; it does not define a parallel one.
+
+## Blast radius
+
+**Product (this repo), docs-only:**
+- **New:** `plugins/experiment-lifecycle/skills/run-experiment/references/RELAUNCH_SUPERVISOR.md` — the substrate-neutral supervisor decision contract.
+- **Edit:** `plugins/experiment-lifecycle/skills/run-experiment/SKILL.md` — a one-paragraph link to the reference from the existing "resume contract" section (the agent-side and supervisor-side halves now point at each other).
+- **Bump:** `plugins/experiment-lifecycle/.claude-plugin/plugin.json` version (0.3.1 → 0.3.2) + a `CHANGELOG.md` entry (required by `.aar-ci/checks.sh` for any non-manifest change in the plugin).
+
+No code, no script behavior change — so the fake-HOME behavior smoke surface is unchanged; the deterministic checks (JSON/version-bump/changelog) are the relevant gate.
+
+**Instance (NOT this repo):** the systemd unit / `setsid` bash supervisor loop, the concrete `resume_same_session` → `--continue` and `launch_successor` → `relaunch-session.sh <name> <dir> handoff` mapping, session names, paths, the RunPod key, and the dry-run rollout window. These ship in the consuming instance with a same-day pointer back to this reference.
+
+No change to the SWE pipeline (`aar-engineering`) or to `gpu-job`.
+
+## Rollout + rollback
+
+This PR is docs-only and inert until an instance wires a supervisor against the contract, so it carries no standalone runtime risk. The *instance* supervisor (separate, not in this repo) follows the #54 rollout: the relaunch loop keeps the in-pane crash-storm cap so it can't spin, and the desired-state gate (`is-desired-active`) means it never touches a run that wasn't registered or was deliberately stopped. Rollback of this PR is the standard one-commit revert; reverting removes the reference + the link with no runtime effect. The `needs-design` silent-wedge child (#54 child 5) extends this contract later without changing the first-cut signatures.
