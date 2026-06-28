@@ -56,6 +56,16 @@ if guard issue list >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: issue list' "$FA
 if ! guard issue create -t x -b y >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "bare 'issue create' blocked"; else fail "bare 'issue create' should be blocked"; fi
 : > "$FAKE_GH_LOG"
 if ! guard pr comment 1 -b hi >/dev/null 2>&1; then pass "bare 'pr comment' blocked"; else fail "bare 'pr comment' should be blocked"; fi
+# 2b. the -R owner/repo form must NOT bypass the guard (review F1: -R's value was mis-read as the subcommand)
+: > "$FAKE_GH_LOG"
+if ! guard -R o/r pr comment 1 -b hi >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh -R o/r pr comment' blocked (no -R bypass)"; else fail "'gh -R o/r pr comment' must be blocked"; fi
+: > "$FAKE_GH_LOG"
+if ! guard --repo o/r issue create -t x >/dev/null 2>&1; then pass "'gh --repo o/r issue create' blocked (no --repo bypass)"; else fail "'gh --repo o/r issue create' must be blocked"; fi
+# 2c. but a -R READ still passes
+: > "$FAKE_GH_LOG"
+if guard -R o/r pr view 1 >/dev/null 2>&1 && grep -q 'pr view 1' "$FAKE_GH_LOG"; then pass "'gh -R o/r pr view' passes (read)"; else fail "'gh -R o/r pr view' should pass"; fi
+# 2d. the blocked message must NOT echo the raw argv (review F3: bodies/tokens must not leak)
+if ! guard pr comment 1 -b 'SECRET_BODY_TEXT' 2>&1 | grep -q 'SECRET_BODY_TEXT'; then pass "blocked message does not leak the raw argv"; else fail "blocked message leaked the raw argv (F3)"; fi
 : > "$FAKE_GH_LOG"
 if ! guard pr merge 1 --squash >/dev/null 2>&1; then pass "bare 'pr merge' blocked"; else fail "bare 'pr merge' should be blocked"; fi
 : > "$FAKE_GH_LOG"
@@ -152,6 +162,19 @@ PUSH_OUT=$(PATH="$GBIN:$PATH" GIT_TERMINAL_PROMPT=0 bash -c '
   git -C "'"$GITTEST"'/remote.git" rev-parse --verify -q refs/heads/pushed >/dev/null && echo PUSH_LANDED
 ' 2>&1)
 if printf '%s' "$PUSH_OUT" | grep -q PUSH_LANDED; then pass "git_push_author push landed via the forced tokenized engineer URL"; else fail "git_push_author forced-credential push failed: $PUSH_OUT"; fi
+
+# an SSH-form github remote (review F2) must ALSO normalize to the tokenized HTTPS push, not fall back to
+# ambient SSH. Same insteadOf trick redirects the normalized URL to the local bare repo.
+( cd "$GITTEST/work"; git remote set-url origin ssh://git@github.com/o/r.git ) >/dev/null 2>&1
+PUSH_OUT_SSH=$(PATH="$GBIN:$PATH" GIT_TERMINAL_PROMPT=0 bash -c '
+  set -uo pipefail
+  WT="'"$GITTEST/work"'"
+  git -C "$WT" config url."'"$GITTEST"'/remote.git".insteadOf "https://x-access-token:ENGINEER_TOKEN@github.com/o/r.git"
+  eval "$(sed -n "/^real_gh()/,/^}/p; /^git_push_author()/,/^}/p" "'"$WF"'")"
+  git_push_author ENGINEER_TOKEN "$WT" -q origin HEAD:refs/heads/pushed_ssh 2>&1
+  git -C "'"$GITTEST"'/remote.git" rev-parse --verify -q refs/heads/pushed_ssh >/dev/null && echo PUSH_LANDED_SSH
+' 2>&1)
+if printf '%s' "$PUSH_OUT_SSH" | grep -q PUSH_LANDED_SSH; then pass "git_push_author normalizes an ssh:// github remote to the tokenized push (F2)"; else fail "ssh:// github remote push failed: $PUSH_OUT_SSH"; fi
 
 echo "[smoke] static check: passes on real wf.sh, fails on a planted unmarked call"
 if bash "$STATIC" "$ROOT" >/dev/null 2>&1; then pass "static check passes on the real wf.sh"; else fail "static check should pass on the real wf.sh"; fi

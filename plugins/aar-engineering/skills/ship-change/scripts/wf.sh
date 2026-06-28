@@ -401,12 +401,13 @@ git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args..
   local remote_url owner_repo push_url
   remote_url=$(git -C "$wt" remote get-url --push origin 2>/dev/null) || die "git_push_author: no origin remote in $wt"
   case "$remote_url" in
-    https://*github.com/*|git@github.com:*)
-      # A real GitHub remote: FORCE the engineer credential. Askpass alone is bypassable by a stored owner
-      # HTTPS helper or an SSH remote, so rewrite to an explicit tokenized HTTPS URL AND clear credential
-      # helpers for THIS push (-c credential.helper=) so no ambient owner credential (stored helper or SSH
-      # key) can win. Callers pass the remote name `origin`; swap the first literal `origin` for the URL.
-      owner_repo=$(printf '%s' "$remote_url" | sed -E 's#(git@github\.com:|https://[^/]*github\.com/)##; s#\.git$##')
+    https://*github.com/*|git@github.com:*|ssh://git@github.com/*|ssh://github.com/*)
+      # A real GitHub remote (HTTPS, scp-style SSH, or ssh:// SSH): FORCE the engineer credential. Askpass
+      # alone is bypassable by a stored owner HTTPS helper or an SSH remote/key, so we NORMALIZE any of these
+      # forms to an explicit tokenized HTTPS URL AND clear credential helpers for THIS push
+      # (-c credential.helper=) so no ambient owner credential (stored helper or SSH key) can win. Callers
+      # pass the remote name `origin`; swap the first literal `origin` for the URL.
+      owner_repo=$(printf '%s' "$remote_url" | sed -E 's#(git@github\.com:|ssh://git@github\.com/|ssh://github\.com/|https://[^/]*github\.com/)##; s#\.git$##')
       case "$owner_repo" in
         */*) push_url="https://x-access-token:${tok}@github.com/${owner_repo}.git" ;;
         *)   die "git_push_author: could not derive owner/repo from origin url '$remote_url'" ;;

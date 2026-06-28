@@ -25,9 +25,11 @@
 set -euo pipefail
 
 guard_die(){
-  # directed, non-zero. Goes to stderr so it never pollutes a caller capturing stdout.
+  # $1 = the classified command SHAPE (e.g. "issue create") — NEVER the raw argv, which can carry issue/
+  # comment bodies, headers, or tokens we must not echo into terminal logs (#165 review F3).
+  local shape=${1:-write}
   cat >&2 <<EOF
-BLOCKED (gh write-guard): refusing a GitHub WRITE via bare \`gh $*\`.
+BLOCKED (gh write-guard): refusing a GitHub WRITE — \`gh $shape\`.
 GitHub writes go through the engineer identity path:
   wf.sh issue <claude|codex> create|comment|close|label|dispose …   (Issues / maintainer verbs)
   wf.sh open|comment|...|finish <worktree> <family>                  (the ship-change lifecycle)
@@ -62,19 +64,46 @@ exec_real_gh(){
 # --- bypasses: pass straight through to the real gh ------------------------------------------------------
 if [ "${WF_GH_INTERNAL:-0}" = 1 ]; then exec_real_gh "$@"; fi
 if [ "${WF_GH_ALLOW_OWNER_WRITE:-0}" = 1 ]; then
-  echo "[gh-guard] WF_GH_ALLOW_OWNER_WRITE=1 — owner-maintenance override; redirect suppressed for: gh $*" >&2
+  # NOTE: do not echo the raw argv (it can carry bodies/tokens, #165 review F3) — name only the override.
+  echo "[gh-guard] WF_GH_ALLOW_OWNER_WRITE=1 — owner-maintenance override; redirect suppressed for this gh call" >&2
   exec_real_gh "$@"
 fi
 
-# --- classify the subcommand ------------------------------------------------------------------------------
-# Find the first non-flag token (the subcommand). gh's top-level flags before the subcommand are rare, but
-# --version/--help are reads; treat a leading flag-only invocation as a read.
-sub=""; rest=()
-for a in "$@"; do
-  if [ -z "$sub" ] && [ "${a#-}" = "$a" ]; then sub=$a; continue; fi
-  rest+=("$a")
-done
-[ -n "$sub" ] && [ ${#rest[@]} -eq 0 ] && rest=()   # nounset guard when only a subcommand was given
+# next_word: from the args array starting at index $1, return the first token that is a positional WORD —
+# skipping flags AND the VALUE of a value-taking flag (-R/--repo o/r would otherwise be mis-read as the
+# subcommand, bypassing the guard — #165 review F1). Value-taking top-level/subcommand flags we must step
+# over: -R/--repo, -H/--hostname, --jq, -t/--template, -F/-f/--field/--raw-field, -X/--method, --input,
+# --cache. We err toward skipping a value for any KNOWN value-flag; bare `--foo=val` carries its own value.
+declare -a ARGV=("$@")
+is_value_flag(){
+  case "$1" in
+    -R|--repo|-H|--hostname|--jq|-q|-t|--template|-F|-f|--field|--raw-field|-X|--method|--input|--cache) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+NEXT_WORD=""; NEXT_WORD_IDX=-1
+next_word(){  # next_word <start-index> -> sets NEXT_WORD to the first positional word at/after start ("" if
+              # none) and NEXT_WORD_IDX to its index (or -1). Sets GLOBALS (not stdout) so the index survives
+              # — a `$(...)` command-substitution call would run in a subshell and lose the index.
+  local i=$1 n=${#ARGV[@]} tok
+  NEXT_WORD=""; NEXT_WORD_IDX=-1
+  while [ "$i" -lt "$n" ]; do
+    tok=${ARGV[$i]}
+    if [ "${tok#-}" != "$tok" ]; then
+      # a flag. If it's a known value-taking flag in separate-arg form (no '='), also skip its value.
+      if is_value_flag "$tok"; then i=$((i+2)); continue; fi
+      i=$((i+1)); continue
+    fi
+    NEXT_WORD=$tok; NEXT_WORD_IDX=$i; return 0
+  done
+  return 0
+}
+
+# the SUBCOMMAND (issue|pr|api|auth|…), skipping any leading top-level flags + their values.
+next_word 0; sub=$NEXT_WORD; sub_idx=$NEXT_WORD_IDX
+# the VERB after the subcommand (also flag/value-skipping) for the families we classify.
+verb=""
+if [ "$sub_idx" -ge 0 ]; then next_word $((sub_idx+1)); verb=$NEXT_WORD; fi
 
 case "$sub" in
   # ---- always-read top-levels ----
@@ -87,34 +116,27 @@ case "$sub" in
 
   # ---- the read-vs-write families we DO classify ----
   issue|pr)
-    verb=""
-    for a in "${rest[@]}"; do
-      if [ "${a#-}" = "$a" ]; then verb=$a; break; fi
-    done
     case "$verb" in
       view|list|status|diff|checks|""|develop) exec_real_gh "$@" ;;   # reads (develop is a no-op lister here)
-      *) guard_die "$@" ;;                                            # create/comment/edit/close/merge/review/delete/reopen/… = writes
+      *) guard_die "$sub $verb" ;;                                    # create/comment/edit/close/merge/review/delete/reopen/… = writes
     esac
     ;;
 
   auth)
-    verb=""
-    for a in "${rest[@]}"; do
-      if [ "${a#-}" = "$a" ]; then verb=$a; break; fi
-    done
     case "$verb" in
       # non-mutating helper forms the workflow needs (git push credential helper, status, token printing)
       git-credential|status|token) exec_real_gh "$@" ;;
       # login/refresh/setup-git/logout MUTATE the stored credential -> reopen the stored-cred hole -> block
-      *) guard_die "$@" ;;
+      *) guard_die "auth $verb" ;;
     esac
     ;;
 
   api)
     # default-DENY: a `gh api` is a read ONLY when it is clearly a GET with no body. Block on any non-GET
-    # method, any body-implying field flag, --input, or a GraphQL mutation.
+    # method, any body-implying field flag, --input, or a GraphQL mutation. Scan ALL args (a flag's value
+    # that happens to look like another flag is harmless to re-scan; we only OR in write signals).
     method="GET"; has_body=0; is_graphql=0; want_method=0
-    for a in "${rest[@]}"; do
+    for a in "$@"; do
       if [ "$want_method" = 1 ]; then method=$a; want_method=0; continue; fi
       case "$a" in
         -X|--method) want_method=1 ;;
@@ -130,17 +152,17 @@ case "$sub" in
     # graphql AND carries a body, inspect the args for the literal `mutation` keyword.
     mut=0
     if [ "$is_graphql" = 1 ] && [ "$has_body" = 1 ]; then
-      for a in "${rest[@]}"; do case "$a" in *mutation*) mut=1;; esac; done
+      for a in "$@"; do case "$a" in *mutation*) mut=1;; esac; done
     fi
     mu=$(printf '%s' "$method" | tr '[:lower:]' '[:upper:]')
     case "$mu" in
       GET|HEAD)
         # a body on a GET/HEAD api call still implies gh upgrades it to POST -> treat as write.
-        if [ "$has_body" = 1 ] && [ "$is_graphql" = 0 ]; then guard_die "$@"; fi
-        if [ "$mut" = 1 ]; then guard_die "$@"; fi
+        if [ "$has_body" = 1 ] && [ "$is_graphql" = 0 ]; then guard_die "api (write: body on GET)"; fi
+        if [ "$mut" = 1 ]; then guard_die "api graphql (mutation)"; fi
         exec_real_gh "$@"
         ;;
-      *) guard_die "$@" ;;   # POST/PATCH/PUT/DELETE/… = write
+      *) guard_die "api -X $mu" ;;   # POST/PATCH/PUT/DELETE/… = write
     esac
     ;;
 
