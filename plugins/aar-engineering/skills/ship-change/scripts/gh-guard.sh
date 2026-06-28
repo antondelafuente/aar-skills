@@ -105,16 +105,43 @@ next_word 0; sub=$NEXT_WORD; sub_idx=$NEXT_WORD_IDX
 verb=""
 if [ "$sub_idx" -ge 0 ]; then next_word $((sub_idx+1)); verb=$NEXT_WORD; fi
 
+# safe_verb: the verb token to DISPLAY in a blocked message — ONLY a recognized gh verb name, never a
+# user-supplied flag value (an unlisted value-taking flag's value can land in $verb and could carry a
+# body/token) — #165 review F3. Anything not on the known-verb allowlist shows as a generic "write".
+case "$verb" in
+  create|comment|edit|close|reopen|delete|merge|review|ready|lock|unlock|pin|unpin|transfer|develop|\
+  login|refresh|setup-git|logout|set|remove|rm|rename|archive|unarchive|fork|sync|upload|enable|disable|\
+  add|clear|import|restore|deploy|cancel|rerun|view|list|status|diff|checks|checkout|co)
+    safe_verb=$verb ;;
+  *) safe_verb=write ;;
+esac
+# the set of obviously-MUTATING verbs across the mixed read/write families (repo/release/secret/…). Used to
+# redirect the common destructive forms while still passing the family's reads through. The capability layer
+# remains the security boundary; this just makes the ergonomic guard cover more than issue/pr/api (#165 review).
+is_mutating_verb(){
+  case "$1" in
+    create|delete|remove|rm|edit|set|rename|archive|unarchive|fork|sync|transfer|\
+    upload|enable|disable|add|clear|import|restore|deploy|cancel|rerun|lock|unlock|pin|unpin) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 case "$sub" in
-  # ---- always-read top-levels ----
-  ""|help|version|--version|--help|status|search|browse|alias|completion|config|extension|label|gist|release|run|workflow|cache|ruleset|secret|variable|environment|codespace|org|repo)
-    # NOTE: several of these (repo/release/run/secret/…) HAVE write subcommands; we deliberately do NOT try to
-    # cover every nested write here — the capability layer is the security boundary. The guard targets the
-    # high-frequency reflex writes (issue/pr/api). Pass these through.
+  # ---- always-read top-levels (no writing subcommands, or purely local) ----
+  ""|help|version|--version|--help|status|search|browse|completion|alias|config)
     exec_real_gh "$@"
     ;;
 
-  # ---- the read-vs-write families we DO classify ----
+  # ---- mixed read/write families: pass reads, redirect obvious mutating verbs (#165 review HIGH) ----
+  repo|release|secret|variable|ruleset|workflow|run|cache|gist|label|environment|codespace|org|extension)
+    # `run` has no plain create but `gh run rerun|cancel|delete` mutate; `workflow run|enable|disable` mutate;
+    # `gh repo create|delete|edit|rename|archive|fork|sync`, `gh release create|delete|edit|upload`,
+    # `gh secret set|delete`, etc. are caught by is_mutating_verb. Reads (view/list/download/clone) pass.
+    if is_mutating_verb "$verb"; then guard_die "$sub $safe_verb"; fi
+    exec_real_gh "$@"
+    ;;
+
+  # ---- the read-vs-write families we classify by an explicit READ allowlist ----
   issue|pr)
     case "$verb" in
       view|list|status|diff|checks) exec_real_gh "$@" ;;            # plain reads
@@ -125,7 +152,7 @@ case "$sub" in
         for a in "$@"; do case "$a" in --list|-l) exec_real_gh "$@" ;; esac; done
         guard_die "$sub develop"
         ;;
-      *) guard_die "$sub $verb" ;;                                  # create/comment/edit/close/merge/review/delete/reopen/… = writes
+      *) guard_die "$sub $safe_verb" ;;                            # create/comment/edit/close/merge/review/delete/reopen/… = writes
     esac
     ;;
 
@@ -134,7 +161,7 @@ case "$sub" in
       # non-mutating helper forms the workflow needs (git push credential helper, status, token printing)
       git-credential|status|token) exec_real_gh "$@" ;;
       # login/refresh/setup-git/logout MUTATE the stored credential -> reopen the stored-cred hole -> block
-      *) guard_die "auth $verb" ;;
+      *) guard_die "auth $safe_verb" ;;
     esac
     ;;
 

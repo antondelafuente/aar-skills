@@ -32,7 +32,12 @@ The **guard wrapper** (`scripts/gh-guard.sh`, shipped in the ship-change skill's
 shim placed ahead of the real `gh` on PATH. It classifies the `gh` subcommand: reads (`view/list/status`,
 `api` GETs, etc.) pass straight through to the real `gh`; a mutating subcommand (`issue/pr create`,
 `*comment`, `pr review/merge`, `issue edit/close/delete`, `api -X POST/PATCH/PUT/DELETE`) is blocked with the
-directed message "GitHub writes go through `wf.sh issue|comment <family>`". It blocks the
+directed message "GitHub writes go through `wf.sh issue|comment <family>`". The mixed read/write top-level
+families (`repo`, `release`, `secret`, `variable`, `ruleset`, `workflow`, `run`, …) pass their reads through
+but redirect the obvious mutating verbs (`create`/`delete`/`edit`/`set`/`rename`/`archive`/`upload`/`enable`/
+`disable`/`rerun`/`cancel`/…). A flag/value-skipping tokenizer finds the real subcommand+verb so the
+common `gh -R owner/repo …` form is classified, not bypassed; the blocked message names only the recognized
+verb shape (e.g. `gh issue create`), never the raw argv or a user flag value. It blocks the
 **credential-mutating** `gh auth` forms (`login`/`refresh`/`setup-git`/`logout`) — they would re-open the
 stored-credential hole the capability layer closes — while **whitelisting only** the non-mutating helper
 forms the workflow needs (`gh auth git-credential`, `gh auth status`, `gh auth token`). Two bypasses let the

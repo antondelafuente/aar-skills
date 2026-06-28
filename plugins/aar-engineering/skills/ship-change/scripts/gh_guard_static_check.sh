@@ -45,10 +45,17 @@ while IFS= read -r line; do
   # drop full-line comments and trailing comments (cheap; good enough — a `#gh` inside a string is rare and
   # would only cause a FALSE POSITIVE that the author resolves by marking, never a false negative).
   code=${line%%#*}
-  # blank out the CONTENTS of quoted strings so a `gh …` mentioned inside an echo/note/error message (not an
-  # actual invocation) is not flagged. Replace "..." and '...' bodies with empty quotes. (A gh invocation is
-  # never wrapped whole inside one quoted string, so this never hides a real call.)
-  code=$(printf '%s\n' "$code" | sed -E "s/\"[^\"]*\"//g; s/'[^']*'//g")
+  # A `gh` inside a command substitution — `out="$(gh api …)"` / `` `gh …` `` — is a REAL call and must
+  # survive (#165 review F2). So FIRST turn the command-substitution DELIMITERS into spaces (command
+  # boundaries), surfacing the inner `gh` into the surrounding context: `$(` -> space, matching `)` -> space,
+  # backtick -> space. (A bare `$VAR` is left alone — only `$(` opens a substitution.)
+  code=$(printf '%s\n' "$code" | sed -E 's/[$]\(/ \x01/g; s/`/ \x01/g')
+  # Now blank the CONTENTS of quoted MESSAGE strings so a `gh …` in an echo/note/error text isn't flagged.
+  # A span that contained a substitution carries the \x01 sentinel and is EXEMPT from blanking (its `gh` is a
+  # real call, not message text); a plain message span (incl. one with bare $VARs) is blanked.
+  code=$(printf '%s\n' "$code" | sed -E "s/\"[^\"\x01]*\"//g; s/'[^'\x01]*'//g")
+  # drop the now-meaningless quote chars + the sentinel so the inner `gh` sits at a clean token boundary.
+  code=$(printf '%s\n' "$code" | sed -E 's/[\x01")]/ /g')
   # normalize: collapse to detect a `gh` invocation token. Match `gh ` preceded by a command boundary.
   # Boundaries: start-of-line (optional leading ws), `|`, `(`, `&`, `;`, `=` (env-prefix), `{`, backtick.
   # Use grep -P for the lookbehind-ish boundary via a character class group.

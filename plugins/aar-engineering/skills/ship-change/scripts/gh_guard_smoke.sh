@@ -86,6 +86,19 @@ if ! guard pr merge 1 --squash >/dev/null 2>&1; then pass "bare 'pr merge' block
 : > "$FAKE_GH_LOG"
 if ! guard issue close 1 >/dev/null 2>&1; then pass "bare 'issue close' blocked"; else fail "bare 'issue close' should be blocked"; fi
 
+# 2g. mixed read/write families: mutating verbs redirected, reads pass (review HIGH)
+for w in "repo delete o/r" "repo create x" "release delete v1" "secret set FOO" "variable set BAR" "repo edit o/r"; do
+  : > "$FAKE_GH_LOG"
+  if ! guard $w >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $w' blocked (mutating)"; else fail "'gh $w' should be blocked"; fi
+done
+for r in "repo view o/r" "repo list" "release view v1" "release download v1" "secret list"; do
+  : > "$FAKE_GH_LOG"
+  if guard $r >/dev/null 2>&1 && grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $r' passes (read)"; else fail "'gh $r' should pass"; fi
+done
+# 2h. a value-taking flag's VALUE must not be echoed as the verb shape on block (review F3)
+LEAK2=$(guard issue --foo 'SECRET_FLAG_VALUE' create -b x 2>&1 || true)
+if ! printf '%s' "$LEAK2" | grep -q 'SECRET_FLAG_VALUE'; then pass "blocked shape does not echo an unlisted flag value"; else fail "blocked shape leaked a flag value (F3)"; fi
+
 # 3. credential-mutating gh auth blocked; whitelisted forms pass
 : > "$FAKE_GH_LOG"
 if ! guard auth login >/dev/null 2>&1; then pass "'gh auth login' blocked"; else fail "'gh auth login' should be blocked"; fi
@@ -269,6 +282,12 @@ if bash "$STATIC" "$ROOT" >/dev/null 2>&1; then pass "static check passes on the
 PLANT="$TMP/plantroot/plugins/aar-engineering/skills/ship-change/scripts"
 mkdir -p "$PLANT"; cp "$WF" "$PLANT/wf.sh"; printf '\ngh pr merge 999 --squash\n' >> "$PLANT/wf.sh"
 if ! bash "$STATIC" "$TMP/plantroot" >/dev/null 2>&1; then pass "static check FAILS on a planted unmarked gh call"; else fail "static check should fail on a planted unmarked gh call"; fi
+# planted unmarked call INSIDE a double-quoted command substitution (review F2) + a non-allowlisted subcommand
+for inj in 'out="$(gh api repos/o/r)"' 'x=`gh pr list`' 'gh secret set FOO'; do
+  PR2="$TMP/plant2/plugins/aar-engineering/skills/ship-change/scripts"; rm -rf "$TMP/plant2"; mkdir -p "$PR2"
+  cp "$WF" "$PR2/wf.sh"; printf '\n%s\n' "$inj" >> "$PR2/wf.sh"
+  if ! bash "$STATIC" "$TMP/plant2" >/dev/null 2>&1; then pass "static check catches: $inj"; else fail "static check MISSED: $inj"; fi
+done
 
 echo
 if [ "$fails" -eq 0 ]; then echo "[smoke] gh write-guard: ALL PASS"; exit 0; else echo "[smoke] gh write-guard: $fails FAILURE(S)" >&2; exit 1; fi
