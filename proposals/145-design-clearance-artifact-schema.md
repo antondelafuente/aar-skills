@@ -187,7 +187,7 @@ and the surviving responses are `justified`/`deferred`, never `fixed`.
 | `approval.event_kind` | enum `pr_comment` \| `non_approve_review` | yes | Which **non-merge-satisfying** surface carries the clearance signal, so the executor fetches the right one. Never a GitHub `APPROVED` review (#130 decision 2). |
 | `approval.event_ref` | string (URL) | yes | Human pointer to the clearance event. Pointer only — never a payload (#130 record-sensitivity). |
 | `approval.event_id` | string | yes | The GitHub node-id of the clearance comment/review the executor **re-fetches** to verify; not trusted from the JSON. |
-| `approval.actor` | string | yes | The GitHub login that authored the clearance event. Must be an **authorized approver** (instance-profile policy, #153) — the executor checks the fetched event's author equals this and is authorized; a designer cannot self-clear by writing a string. |
+| `approval.actor` | string | yes | The GitHub login that authored the clearance event. Must be an **authorized approver** per the authorized-approver list **frozen in `START.md`** (#153's frozen-snapshot executor contract — never the live profile) — the executor checks the fetched event's author equals this and is in the frozen list; a designer cannot self-clear by writing a string. |
 | `approval.cleared_sha` | 40-hex SHA | yes | The commit the clearance event names (carried in the comment marker / review SHA). Must equal `brief_commit`. |
 | `brief_commit` | 40-hex SHA | yes | The commit carrying the cleared brief — the **final** audited brief (the binding target, #130 decision 2). |
 | `brief_files` | string[] | yes | The brief files present at `brief_commit`; `["DESIGN.md","START.md","CHECKLIST.md"]` (#130), **plus every `data_audit_manifest*.md` (≥1 required on the GitHub path — one per dataset)** — each manifest's `#design` block is drift-checked, its generated values are not (see "Data-audit manifest"). Listed so the verifier can assert presence. Drift-coverage differs per file — see `brief_blobs`. |
@@ -333,7 +333,9 @@ behavior (back-compat, as with the checklist).
   `design-experiment` *records* it: it writes `CLEARANCE.json` with `decision:"cleared"`, the `approval` block
   fetched from the clearance event (`event_kind`, `event_id`, `actor`, `cleared_sha`), the arbitrated finding
   responses, `brief_commit` = the cleared SHA, and the `brief_blobs` digests; commits it; and only then hands
-  off to the executor. A `decision:"blocked"` verdict is written instead when the authority declines to clear —
+  off to the executor. (The **authorized-approver list** is snapshotted into `START.md` at design time — like
+  #153's other resolved profile values — so the executor authorizes `approval.actor` from the frozen,
+  drift-checked brief, never the live profile.) A `decision:"blocked"` verdict is written instead when the authority declines to clear —
   a terminal record, no executor handoff (the precise blocked-state semantics are owned by #130's terminal-states
   child; this schema only reserves the enum value so the file shape is forward-compatible).
 - **Consumer = `run-experiment`** (the executor side). Step 0, before any compute/API spend: read
@@ -380,8 +382,10 @@ identity and content:
    **re-fetches** the event named by `approval.event_id`/`event_kind` (via the shared helper, #150) and
    requires: it exists and is the declared kind; it is **not** a GitHub `APPROVED` review (a clearance event
    must be structurally non-merge-satisfying — #130 decision 2); its author equals `approval.actor`; `actor` is
-   an **authorized approver** per the instance-profile policy (#153); the repo+PR identity in its marker matches
-   this experiment; the SHA it names equals `approval.cleared_sha == brief_commit`; **and the digest it attests
+   an **authorized approver** per the **authorized-approver list snapshotted in the frozen `START.md`** (read
+   from the frozen record, never the live profile — #153's executor contract; see below); the repo+PR identity
+   in its marker matches this experiment; the SHA it names equals `approval.cleared_sha == brief_commit`; **and
+   the digest it attests
    equals `sha256` of the on-disk `attested_clearance` subdocument** (the exact field set defined above —
    document minus `/cleared_at` and `/approval` — serialized JCS/RFC 8785). A missing event, an APPROVE-typed
    event, an unauthorized actor, a wrong repo/PR, a SHA mismatch, or a digest mismatch → BLOCK. Producer and
@@ -408,11 +412,18 @@ generic "not cleared."
 ### What this does NOT own (seams to siblings)
 
 - **Who may approve / the authorized-approver policy** — `approval.approver_role` is a field so a future
-  delegated-approver policy is a value change, not a schema change; *which* actors count as authorized is
-  **instance config**, whose home is the instance profile (#153 — which already carries `[github.identity]` /
-  `[github.protection]` and explicitly anticipates this design-clearance record). This schema requires the
-  executor to check `actor` against that policy and names the profile as its home, but it does not define the
-  policy; #153 (or its consumer) adds the authorized-approver field there.
+  delegated-approver policy is a value change, not a schema change. *Which* actors count as authorized is
+  **instance config** that originates in the instance profile (#153 — which carries `[github.identity]` /
+  `[github.protection]` and explicitly anticipates this design-clearance record). **But the executor must read
+  it from the frozen record, not the live profile** (#153's executor contract: `run-experiment` reads ONLY the
+  frozen `START.md` snapshot). So the resolved authorized-approver list is **snapshotted into `START.md`** at
+  design time — exactly like #153's other resolved profile values — and the executor checks `approval.actor`
+  against *that frozen list*. Because `START.md` is a pinned, drift-checked brief file (rule 4) inside the
+  attested subdocument, the snapshotted list is itself tamper-evident: a designer cannot widen the approver set
+  after clearance without tripping the brief-integrity check. This schema requires the check against the frozen
+  list and names `START.md` as its home; #153 (or its consumer) adds the source field to the profile. (This is
+  the round-9 coherence fix: the prior "check against the live profile (#153)" wording contradicted #153's
+  frozen-snapshot executor contract.)
 - **Fetching/verifying the GitHub clearance event** — the read is performed via the shared GitHub-lifecycle
   helper (#150). This schema names what to fetch (`event_id`/`event_kind`) and the proceed condition (including
   the "must not be APPROVE", repo/PR-identity, and `CLEARANCE.json`-digest checks); the helper owns the GitHub
@@ -530,11 +541,17 @@ Doc-only design PR: lands the schema on `main` via the `--scaffold` gate, then s
    existing audit `FINDING:`/`SUMMARY:` output (id generation + a parser smoke), or a small `verify-claims`
    emit-JSON mode. The `findings_record`/`findings_sha256` rules depend on it, so it lands before (or with) the
    consumer child.
-0b. **Prerequisite: one clearance helper owns the canonicalization** — the JCS serialization, block extraction
-   (`#gates`/`#design`), digesting, and the proceed-rule validation live in **a single product implementation**
-   that both `design-experiment` (write) and `run-experiment` (verify) call — never two copies that could drift
-   and disagree on a byte (the same single-owner discipline `run_supervision_record.sh` follows). The shipped
-   producer/consumer test vector pins its output.
+0b. **Prerequisite: one clearance helper owns the canonicalization, with an install-resolvable home** — the JCS
+   serialization, block extraction (`#gates`/`#design`), digesting, and the proceed-rule validation must be **one
+   implementation** both `design-experiment` (write) and `run-experiment` (verify) call, never two copies that
+   drift and disagree on a byte. But `design-experiment` and `run-experiment` are **independently-installed
+   skills with no shared module home** (the exact gap #153 flagged). The packaging seam, chosen here: this
+   canonicalization belongs in the **shared GitHub-lifecycle helper (#150)** — already the neutral runtime home
+   both flows consume for the clearance-event fetch/verify, and the natural owner of the digest/marker contract.
+   If #150's host is not yet settled when this lands, the fallback is **#153's established precedent**:
+   byte-identical per-skill copies guarded by a deterministic drift check (the same pattern #153 uses for its
+   shared logic). Either way a shipped producer/consumer **test vector** pins the canonical output so the two
+   call sites are proven byte-identical. (This is `blocked-by` #150 for the preferred home.)
 1. **`design-experiment`: write `CLEARANCE.json` at clearance** — the producer step: after the authorized
    non-merge-satisfying clearance event exists against the final brief commit, record the `approval` block,
    finding responses, `brief_commit`, and `brief_blobs`; commit + a writer-side schema assert. **Includes the
@@ -553,9 +570,10 @@ Doc-only design PR: lands the schema on `main` via the `--scaffold` gate, then s
    local-handoff run with no `experiments/<exp>/` is untouched.
 
 Both implementation children are filed **`blocked-by`**: the GitHub-lifecycle helper (#150, for the
-clearance-event fetch/verify primitive + the resolved commit/branch identity), the instance-profile interface
-(#153, for *where* `experiments/<exp>/` lives and the authorized-approver policy), the structured-audit-output
-prerequisite (step 0), **and #130's record-sensitivity / visibility contract** (for what finding-evidence
+clearance-event fetch/verify primitive, the resolved commit/branch identity, and the canonicalization-helper
+home — see 0b), the instance-profile interface (#153, for *where* `experiments/<exp>/` lives and the
+authorized-approver source field the profile snapshots into `START.md`), the structured-audit-output
+prerequisite (step 0a), **and #130's record-sensitivity / visibility contract** (for what finding-evidence
 content may be committed vs redacted vs pointer-only — the umbrella makes this a hard blocker for committed
 audit-derived evidence). They are filed at design-merge so the dependency graph is explicit, and become
 actionable when those parents land.
