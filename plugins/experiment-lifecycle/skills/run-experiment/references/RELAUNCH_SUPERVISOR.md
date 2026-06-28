@@ -118,12 +118,13 @@ atomic-write + monotonic-state + fail-closed semantics (so no consumer re-derive
 
 | operation | who calls it | meaning |
 |---|---|---|
-| `create <run-id> [--handoff P] [--session-handle H]` | agent, at run start | mark desired-active; bind handoff + session handle |
-| `update <run-id> [--handoff P] [--lease-pod ID]… [--session-handle H]` | agent, at checkpoints | refresh handoff / link pods / rebind handle |
+| `start <run-id> [--handoff P] [--session-handle H]` (`create` compatibility name) | agent, at run start | mark desired-active; bind handoff + session handle |
+| `checkpoint <run-id> [--handoff P] [--lease-pod ID]… [--session-handle H]` (`update` compatibility name) | agent, at checkpoints | refresh handoff / link pods / rebind handle |
 | `request-relaunch <run-id> [--handoff P] [--reason T]` | agent or a `StopFailure`-style hook | positive "recover me" signal (fail-closed on a terminal/missing record). **Requires a bound `handoff_path`** — pass `--handoff P` to bind it atomically, or it must already be on the record — since this is the can't-resume-in-place signal whose fallback (`launch_successor`) needs the handoff to point the fresh successor at. Fails closed if no handoff is bound after the request. |
 | `is-desired-active <run-id>` | **supervisor** | exit 0 = relaunch-eligible; else 1 (fail-closed) |
 | `is-relaunch-requested <run-id>` | **supervisor** | exit 0 = an active run asked to be recovered; else 1 (fail-closed) |
 | `session-handle <run-id>` | **supervisor** | print the opaque instance handle (exit 1 if unset) |
+| `status <run-id>` | agent/checklist | compact read-only evidence summary (fail-closed on missing/corrupt record) |
 | `clear-relaunch <run-id>` | **supervisor** | clear the request after acting (idempotent) |
 | `stop <run-id>` | a deliberate `/quit`/kill | terminal: never relaunch (also clears any pending request) |
 | `close <run-id>` | the close finalizer | terminal: run finished (also clears any pending request) |

@@ -117,18 +117,20 @@ Three obligations, maintained continuously (not at close):
   written through one product helper (atomic, fail-closed), not prose:
 
   > **Claude Code / this instance:** the helper is `run_supervision_record.sh` in this skill's `scripts/`
-  > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start: `create <run-id>
+  > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start: `start <run-id>
   > --handoff <TEMP.md path> --session-handle <opaque>` (marks the run **desired-active** and records the opaque,
   > instance-owned handle that binds this run-id to your session — a tmux name / systemd unit / pid-file path; the
-  > product never interprets it). At each checkpoint: `update <run-id> --handoff <path> --lease-pod <id>…` (refresh
-  > the handoff + link the pod ids the run holds — these link to `gpu-job`'s pod leases by id). If you hit a case you
-  > can't resume in place (a usage-policy block, a corrupted session): `request-relaunch <run-id> [--handoff
-  > <path>] [--reason …]` — a positive "recover me" signal the supervisor acts on (it is auto-cleared if you later
-  > `stop`/`close`). This needs a **bound `handoff_path`** (the successor fallback points the fresh successor at
-  > it): if you bound one at `create`/`update` it's already there, else pass `--handoff <path>` to bind it
-  > atomically — `request-relaunch` fails closed if no handoff is bound. The
-  > supervisor branches on `is-desired-active` / `is-relaunch-requested` / `session-handle`. The concrete relaunch
-  > commands + the supervisor wiring are instance, not this helper.
+  > product never interprets it). At each checkpoint: `checkpoint <run-id> --handoff <path> --lease-pod <id>…`
+  > (refresh the handoff + link the pod ids the run holds — these link to `gpu-job`'s pod leases by id). Use
+  > `status <run-id>` as compact checklist evidence. If you hit a case you can't resume in place (a usage-policy
+  > block, a corrupted session): `request-relaunch <run-id> [--handoff <path>] [--reason …]` — a positive
+  > "recover me" signal the supervisor acts on (it is auto-cleared if you later `stop`/`close`). This needs a
+  > **bound `handoff_path`** (the successor fallback points the fresh successor at it): if you bound one at
+  > `start`/`checkpoint` it's already there, else pass `--handoff <path>` to bind it atomically —
+  > `request-relaunch` fails closed if no handoff is bound. The supervisor branches on `is-desired-active` /
+  > `is-relaunch-requested` / `session-handle`. The concrete relaunch commands + the supervisor wiring are
+  > instance, not this helper. (`start`/`checkpoint` are the executor-facing aliases for the lower-level
+  > `create`/`update` API used in supervisor references.)
 
   See **`references/RELAUNCH_SUPERVISOR.md`** for the supervisor's side of this contract — the substrate-neutral
   decision tree (`resume_same_session` else `launch_successor(handoff_path)`), the desired-state gating, and what

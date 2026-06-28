@@ -49,8 +49,8 @@ callers already use them, but the docs/templates should teach the run-lifecycle 
 `RELAUNCH_SUPERVISOR.md` reference should mention the aliases in the record API table so the two surfaces do
 not drift.
 
-Update `run-experiment`, `START_TEMPLATE.md`, and `CHECKLIST_TEMPLATE.md` to name the wrapper as the preferred
-interface. The docs should still state the invariant (run state and pod backstops are armed), but the evidence
+Update `run-experiment`, `START_TEMPLATE.md`, and `CHECKLIST_TEMPLATE.md` to name the lifecycle aliases as the
+preferred executor interface. The docs should still state the invariant (run state and pod backstops are armed), but the evidence
 line becomes `run_supervision_record.sh status <run-id>` instead of a paragraph of internal implementation
 details.
 
@@ -64,7 +64,7 @@ details.
 - **Only edit prose.** Rejected. More instructions would worsen the problem. The fix needs an executable
   interface.
 - **Have `run_state.sh` call `gpu-job`'s `pod_lease.sh`.** Rejected after scaffold review. Cross-plugin helper
-  discovery is not defined, and deletion policy belongs to `gpu-job`. The wrapper may link pod ids into
+  discovery is not defined, and deletion policy belongs to `gpu-job`. The run-supervision helper may link pod ids into
   run-supervision, but pod lease creation/refresh remains the `gpu-job` interface.
 - **Add a separate `run_state.sh` facade.** Rejected after scaffold review. It would create a second live
   interface over the same record and increase the vocabulary a debugger has to map. The right canonical home is
@@ -87,5 +87,5 @@ Roll out by extending `run_supervision_record_smoke.sh` with temporary run-super
 and leave the existing `create`/`update`/`show`/`close`/`stop` behavior unchanged. The existing gpu-job smokes
 remain the pod-lease coverage.
 
-Rollback is a normal revert of this PR. Because the underlying helpers remain unchanged, reverting only removes
-the facade and restores the previous explicit protocol.
+Rollback is a normal revert of this PR. Because the original helper commands remain unchanged, reverting only
+removes the aliases/status surface and restores the previous explicit protocol.

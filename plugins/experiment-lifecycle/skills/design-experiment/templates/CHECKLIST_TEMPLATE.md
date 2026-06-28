@@ -34,11 +34,12 @@
       (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + box-side idle-teardown watchdog).  ev:
 - ☐ [BLOCK] Resume contract armed (so a model-free supervisor can relaunch a dead run): standing successor
       handoff (`TEMP.md`) current; run-supervision record written and **desired-active** with a session handle
-      bound (`run_supervision_record.sh create <run-id> --handoff <TEMP.md> --session-handle <opaque>`) — the
+      bound (`run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque>`) — the
       `<opaque>` handle RESOLVED to a concrete instance value by the dispatch/launcher (a tmux name, systemd
       unit, pid-file path), NOT left as the literal placeholder, so the supervisor can find this run's session;
-      and EACH live pod registered for reaping — satisfied by a `gpu-job` pod lease once that lands, OR
-      (transitional) by the per-pod idle-teardown `watchdog.sh` scoped to the pod id.                ev:
+      live pod ids checkpointed (`run_supervision_record.sh checkpoint <run-id> --handoff <TEMP.md> --lease-pod <id>`)
+      and EACH live pod registered for reaping via the `gpu-job` pod lease or the instance's scoped idle-teardown
+      watchdog.                                                                                ev: run_supervision_record.sh status <run-id>
 - ☐ Read the consuming instance's feedback/gotcha guidance, or the `FEEDBACK_INSTANCE_GUIDANCE`
       target when using feedback-loop (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample
@@ -52,7 +53,7 @@
       durably in charge, so the desired-active clear is the POST-AUDIT finalizer. Then run that finalizer —
       `run_supervision_record.sh close <run-id>` (finished) or `stop <run-id>` (deliberate /quit, never
       relaunch) — AFTER the close audit, so a finished run can't be resurrected and an early clear can't
-      orphan a still-billing pod.                                                                 ev:
+      orphan a still-billing pod.                                                                 ev: run_supervision_record.sh status <run-id>
 - ☐ Retro filed via feedback-loop's file-feedback when installed/configured; otherwise recorded
       through the consuming instance's feedback guidance.                                         ev:
 

@@ -49,8 +49,8 @@
 #   lock, so a crash mid-write never leaves a half-written record.
 #
 # USAGE:
-#   run_supervision_record.sh create <run-id> [--handoff PATH] [--session-handle H]
-#   run_supervision_record.sh update <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H]
+#   run_supervision_record.sh create|start <run-id> [--handoff PATH] [--session-handle H]
+#   run_supervision_record.sh update|checkpoint <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H]
 #   run_supervision_record.sh stop   <run-id>
 #   run_supervision_record.sh close  <run-id>
 #   run_supervision_record.sh request-relaunch <run-id> [--handoff PATH] [--reason TEXT]
@@ -58,6 +58,7 @@
 #   run_supervision_record.sh is-desired-active     <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh is-relaunch-requested <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh session-handle        <run-id>  # print opaque handle (exit 1 if unset)
+#   run_supervision_record.sh status <run-id>               # compact checklist evidence
 #   run_supervision_record.sh show   <run-id>                # print the JSON (debug)
 #
 # Record root is instance-overridable: ${AAR_RUN_SUPERVISION_DIR:-$HOME/.config/run-supervision}.
@@ -447,24 +448,57 @@ cmd_show(){
   cat "$file"
 }
 
+cmd_status(){
+  local id=$1; local file; file=$(record_path "$id")
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    active|stopped|closed) : ;;
+    absent)  die "status: no record for '$id'";;
+    invalid) die "status: run '$id' has a malformed record on disk — refusing to summarize (inspect $file)";;
+    *)       die "status: unexpected record state '$state' for '$id'";;
+  esac
+  python3 - "$file" "$state" <<'PY'
+import json
+import sys
+
+path, state = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    rec = json.load(f)
+pods = rec.get("lease_pod_ids") or []
+print(f"record={path}")
+print(f"run_id={rec.get('run_id')}")
+print(f"state={state}")
+print(f"desired_active={str(bool(rec.get('desired_active'))).lower()}")
+print(f"handoff_path={rec.get('handoff_path') or ''}")
+print(f"session_handle={rec.get('session_handle') or ''}")
+print(f"lease_pod_ids={','.join(str(p) for p in pods)}")
+print(f"relaunch_requested={str(bool(rec.get('relaunch_requested'))).lower()}")
+reason = rec.get("relaunch_reason")
+if reason:
+    print(f"relaunch_reason={reason}")
+PY
+}
+
 main(){
   local sub=${1:-}; shift || true
   local id=${1:-}
   case "$sub" in
-    create|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|show)
+    create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|status|show)
       validate_id "$id"; shift;;
-    "") die "usage: run_supervision_record.sh <create|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|show> <run-id> [...]";;
+    "") die "usage: run_supervision_record.sh <create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|status|show> <run-id> [...]";;
     *) die "unknown subcommand '$sub'";;
   esac
   # commands that take NO further args must reject surplus tokens — a malformed wrapper call must fail
   # closed, especially before a terminal mutation, not silently stop/close a run.
   case "$sub" in
-    stop|close|clear-relaunch|show|is-desired-active|is-relaunch-requested|session-handle)
+    stop|close|clear-relaunch|status|show|is-desired-active|is-relaunch-requested|session-handle)
       [ $# -eq 0 ] || die "$sub: unexpected extra argument(s): $*";;
   esac
   case "$sub" in
     create)                with_lock "$id" cmd_create           "$id" "$@";;
+    start)                 with_lock "$id" cmd_create           "$id" "$@";;
     update)                with_lock "$id" cmd_update           "$id" "$@";;
+    checkpoint)            with_lock "$id" cmd_update           "$id" "$@";;
     stop)                  with_lock "$id" cmd_stop             "$id";;
     close)                 with_lock "$id" cmd_close            "$id";;
     request-relaunch)      with_lock "$id" cmd_request_relaunch "$id" "$@";;
@@ -473,6 +507,7 @@ main(){
     is-desired-active)     with_lock "$id" cmd_is_desired_active     "$id";;
     is-relaunch-requested) with_lock "$id" cmd_is_relaunch_requested "$id";;
     session-handle)        with_lock "$id" cmd_session_handle        "$id";;
+    status)                with_lock "$id" cmd_status           "$id";;
     show)                  with_lock "$id" cmd_show             "$id";;
   esac
 }
