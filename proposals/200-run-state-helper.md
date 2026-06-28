@@ -52,7 +52,7 @@ helper and, when available, the `gpu-job` plugin's `pod_lease.sh` helper via the
 change provider deletion behavior, the model-free relaunch supervisor contract, or the `gpu-job` reaper.
 
 The change also updates experiment-lifecycle templates and skill prose, so generated briefs teach the smaller
-interface.
+interface. The wrapper is additive: existing lower-level helpers remain callable for debugging and migration.
 
 ## Rollout + rollback
 
