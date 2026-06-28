@@ -38,7 +38,8 @@ layer, refuses to emit), never "publish and hope."
 Plain-English shape: every record type gets a **sensitivity tier**. A tier says where that record's *body* may
 live (inline-on-GitHub vs. pointer-only) and which of its fields are **payload fields** that must be redacted
 or pointer-ized before the write. A small, instance-declared **policy** layered on top can tighten any tier
-(e.g. "treat RESULTS prose as pointer-only too") and declares whether the repo must be private. A
+(e.g. "treat RESULTS prose as pointer-only too"); whether the repo must be private reuses #153's already-merged
+`[github].private` assertion, which this gate verifies against the live repo. A
 **validator** runs at each write boundary and is the fail-closed gate. The implementation children wire the
 validator into the produce path (design-experiment / run-experiment) and the consume path (the merge gate
 re-checks before merge, so a hand-edited branch can't smuggle payload past).
@@ -109,7 +110,7 @@ content check), metric *names* (from a constrained vocabulary), decision rules, 
 are **always payload** regardless of which field they appear in — the validator's content check forces them to
 a pointer even if a schema field nominally "allows" them. Everything else — verbatim prompts, eval/grader
 bodies, raw paths — is a payload field carried as a pointer. **#155 owns turning the free-form brief into that structured form; until it lands,
-the brief is committed to the artifact store and the trail carries the pointer + the `visibility.yml` sidecar
+the brief is committed to the artifact store and the trail carries the pointer + the `visibility.toml` sidecar
 ONLY.** Even the rationale prose is pointer-only pre-#155 (Finding-3): a free-form `DESIGN.md` interleaves
 rationale with exact evals/paths/model IDs, so there is no machine-checkable boundary separating "T2 rationale"
 from config until #155's schema draws it — so nothing from the un-schematized brief is inlined except the
@@ -225,23 +226,37 @@ surface: **pointer-only** (committed to the artifact store; the trail/PR carries
 + a pointer to the full text). The post-time validator then only has to check the *rendered* output's structured
 fields + the quote ceiling — never to prove a free-text body safe.
 
-### The instance policy (declared in the instance profile, #153)
+### The instance policy (an additive `[record_visibility]` block in the #153 profile)
 
-The contract ships **safe defaults**; the instance profile (#153, the machine-discoverable execution-profile
-config) carries the per-instance overrides under a `record_visibility` block. The contract defines the schema;
-#153 owns the file's location and discovery. Fields:
+The contract ships **safe defaults**; an instance's overrides live in the **already-merged #153 instance
+profile** (`~/.config/experiment-lifecycle/aar-profile.toml`) as an **additive, optional `[record_visibility]`
+block whose fields #146 owns** — exactly the seam #153 reserved ("schemas for the artifacts the flow produces,
+*redaction rules #146*, are owned by their own sibling issues"). It is a **minor, backward-compatible** schema
+addition under #153's `schema_version` rule (a new optional block, no MAJOR bump). It is **TOML** to match the
+#153 profile format (not YAML). #153 owns discovery/snapshot/validate; #146 owns these fields' semantics, and
+`aar-profile-validate` gains a #146-provided check for them.
 
-```yaml
-record_visibility:
-  require_private_repo: <bool>        # if true, the gate fails closed unless the research repo is private
-  tier_overrides:                    # may only TIGHTEN (T2→T1→T0), never loosen; validator rejects a loosen
-    RESULTS_narrative: T1            # e.g. an instance that won't even publish result prose inline
-  brief_safe_fields_remove:          # instance may only REMOVE keys from the product allowlist (tighten);
-    - model_display_label            #   extension is NOT allowed here — see brief_safe_fields_enable
-  brief_safe_fields_enable:          # extension is restricted to a PRODUCT-OWNED enum the brief schema (#155)
-    - model_display_label            #   a RELEASED-public display label only; a raw/pre-release model_id is ALWAYS payload
-  max_quote_chars: <int>             # PR-quote ceiling; default 0 (no payload quote). >0 requires private repo.
-  redaction_marker: "[[redacted: %s]]"  # format; default as above
+```toml
+# additive optional block in the #153 aar-profile.toml; fields owned by #146
+[record_visibility]
+# NOTE: whether the repo must be private is the EXISTING required #153 field `[github].private` (a bool the
+# instance asserts and THIS gate verifies against the live repo) — NOT re-declared here. This block adds the
+# per-instance redaction policy layered on top of that assertion.
+tier_overrides = { RESULTS_narrative = "T1" }   # values are tier names; may only TIGHTEN (T2→T1→T0); loosen → BLOCK
+brief_safe_fields_remove = ["model_display_label"]  # instance may only REMOVE from the product allowlist (tighten)
+brief_safe_fields_enable = ["model_display_label"]  # extend ONLY via the product-owned schema enum (#155);
+                                                    #   a RELEASED-public label only; raw/pre-release model_id is ALWAYS payload
+max_quote_chars = 0                              # PR-quote ceiling; default 0 (no payload quote); >0 requires [github].private=true
+redaction_marker = "[[redacted: %s]]"            # format; default as shown
+
+# The mechanical-trigger inputs THIS contract owns (not #153's [github]/[recipes]): the lists the
+# `standard`-verification trigger and the artifact-index resolver check against.
+prerelease_model_ids   = ["..."]                 # model IDs whose presence forces effective sensitivity=sensitive
+private_dataset_handles = ["..."]                # dataset handle prefixes that force sensitive
+[record_visibility.artifact_index]               # the immutable handle→URI resolver (Finding-4); a typed pointer
+kind = "uri"                                     #   reuses #153's recipe-pointer shape (kind=repo|uri)
+uri  = "r2://.../artifact-index"                 #   private resolver: handle namespace, handle→URI map, private hashes
+sha256 = "<hex>"
 ```
 
 **Per-experiment visibility, merged with the instance floor (most-restrictive wins).** Sensitivity is *not*
@@ -249,16 +264,16 @@ uniform across an instance's experiments — one run may probe a pre-release mod
 is sensitive, while the next is fully public. An instance-wide policy alone is therefore the wrong granularity:
 default-public + T2 result aggregates would publish a private model's behavior. So the contract takes a
 **per-experiment declaration** in a **mandatory, always-inline visibility sidecar** —
-`experiments/<exp>/visibility.yml`, a small product-schema'd file that is **explicitly T2-safe by construction**
-(a closed enum + tier names + booleans; no free prose, no payload), merged with the instance floor by
-**most-restrictive wins** (a tier may only be tightened by the merge, never loosened; the more-private repo
-requirement wins):
+`experiments/<exp>/visibility.toml` (TOML, matching #153's format — #153 rejected YAML for the parser
+dependency), a small product-schema'd file that is **explicitly T2-safe by construction** (a closed enum + tier
+names + booleans; no free prose, no payload), merged with the instance floor by **most-restrictive wins** (a
+tier may only be tightened by the merge, never loosened; the more-private repo requirement wins):
 
-```yaml
-# experiments/<exp>/visibility.yml — mandatory, always inline, product-schema'd (closed values only)
-sensitivity: standard | sensitive   # closed enum; `sensitive` = pre-release model / private data / block-prone elicitation
-tier_overrides: { RESULTS_narrative: T1 }   # values are tier names (T0/T1/T2) only; tighten only; merged over the instance floor
-require_private_repo: true                  # bool; may raise the floor; may never lower it
+```toml
+# experiments/<exp>/visibility.toml — mandatory, always inline, product-schema'd (closed values only)
+sensitivity = "standard"                       # closed enum {standard|sensitive}; sensitive = pre-release model / private data / block-prone elicitation
+tier_overrides = { RESULTS_narrative = "T1" }  # values are tier names (T0/T1/T2) only; tighten only; merged over instance floor
+require_private_repo = true                    # bool; may raise the floor (vs #153 [github].private); may never lower it
 ```
 
 **`standard` is mechanically verified, not merely asserted (Finding-2 fix).** A self-declared `sensitivity:
@@ -268,9 +283,11 @@ trigger checks** before accepting `standard`: if the experiment references a mod
 **pre-release/private model list**, or a **private-dataset handle**, or any record carries a `sensitive`-marked
 artifact, the trigger **forces the effective sensitivity to `sensitive`** regardless of the sidecar's
 declaration (and a `standard` declaration against a fired trigger is logged). `standard` is therefore a
-*verified* state (no trigger fired), not a bare claim. The instance's pre-release model list + private-dataset
-namespace are part of the #153 profile (it already owns model/data identity); the contract owns the trigger
-*rule* (closed, mechanical, fail-closed: an unparseable model/data reference → treat as sensitive). This makes
+*verified* state (no trigger fired), not a bare claim. The trigger inputs — `prerelease_model_ids` and
+`private_dataset_handles` — live in the `[record_visibility]` block this contract owns (above), not in #153's
+`[github]`/`[recipes]` (which #153 scoped to lifecycle facts + recipe pointers); the contract owns both the
+inputs and the trigger *rule* (closed, mechanical, fail-closed: an unparseable model/data reference → treat as
+sensitive). This makes
 the gate enforce consistency against a *checked* assertion, and keeps the public-default safe without flipping
 the product floor to private-by-default (see the decision note).
 
@@ -291,17 +308,20 @@ can only *tighten* the instance floor; an experiment can never declare itself *m
 allows. This closes the "instance-wide seam is the wrong granularity" gap: the floor is the instance's, the
 ceiling is per-experiment, and the validator enforces the stricter of the two at every boundary.
 
-**`require_private_repo` and the visibility floor.** The contract does not *force* private on every instance —
-a public alignment-research repo is a legitimate, deliberate choice for non-sensitive work, and the umbrella
-already says the repo is instance config, not hardcoded. Instead the contract gives the instance a declared
-floor and the gate enforces *consistency*: if `require_private_repo: true`, the merge gate (and the PR-open
-step) fail closed unless GitHub reports the repo private; if `max_quote_chars > 0`, that also requires a
-private repo (you cannot opt into inline payload excerpts on a public trail). The default profile a fresh
-instance gets is `require_private_repo: false, max_quote_chars: 0` — public-safe because the tier defaults keep
-all payload off the trail regardless of repo visibility. **The private-repo requirement is therefore a
-defense-in-depth toggle, not the primary control; the primary control is the tier classification + redaction,
-which holds even on a public repo.** (This is the one genuine product choice and is recorded in the decision
-note below.)
+**Private-repo enforcement reuses #153's `[github].private` (the visibility floor).** The contract does not
+*force* private on every instance — a public alignment-research repo is a legitimate, deliberate choice for
+non-sensitive work, and #153 already makes the repo instance config with a **required `[github].private` bool
+the instance asserts**. This gate is the enforcer #153 named: it compares the asserted `[github].private`
+against the **live repo's actual visibility** and **fails closed on a public repo asserted private** (the exact
+enforcement #153 delegated to #146). A per-experiment `require_private_repo: true` in the sidecar, or
+`max_quote_chars > 0`, additionally requires the live repo be private (you cannot opt into inline payload
+excerpts on a public trail). A fresh instance gets `[github].private` per its own #153 profile and
+`max_quote_chars = 0` — public-safe regardless, because the tier defaults keep all payload off the trail.
+**The private-repo requirement is therefore a defense-in-depth check on the instance's own assertion, not the
+primary control; the primary control is the tier classification + redaction, which holds even on a public
+repo.** (The genuine product choice — private-by-default at the floor vs. tier-classification-with-public-allowed
+— is recorded in the decision note below; #153 chose to make `private` a per-instance assertion, and this gate
+verifies it.)
 
 ### Validation + fail-closed rules (the gate)
 
@@ -315,7 +335,7 @@ ship-change's own merge gate uses (parse an authoritative verdict; missing/garbl
    T1 payload field not pointer-ized/redacted → BLOCK. A pointer missing `handle`, a `handle` that
    looks like a raw store path (`r2://`/`s3://`/bucket path) or equals the content hash → BLOCK, an inline
    `sha256` on a sensitive/public-trail pointer → BLOCK, or a `caption` that itself contains payload → BLOCK.
-   A missing/malformed `visibility.yml` sidecar → BLOCK. A free-text summary/caption that fails the content
+   A missing/malformed `visibility.toml` sidecar → BLOCK. A free-text summary/caption that fails the content
    validator → pointer-only (or BLOCK if inlined). A `sensitivity: standard` declaration while a mechanical
    trigger fired (pre-release model ID / private-dataset handle / sensitive-marked artifact) → effective
    sensitivity forced to `sensitive`; an unparseable model/data reference → treat as `sensitive`. A tier override that *loosens* (instance or per-experiment) → BLOCK (config error). A
@@ -339,13 +359,14 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
 
 ### What this contract does NOT do (scope fence)
 
-- It does not define the artifact store, its auth, or how a `handle` resolves to a real URI — that is the
-  instance profile (#153) and the existing run-experiment artifact-store seam. **#153 must supply an immutable
-  artifact-index/resolver** (Finding-4): a handle namespace, an immutable handle→URI mapping, private hash
-  storage, resolver discovery, and tombstone/rotation behavior — without it the opaque handles are not
-  reproducibly auditable. The contract owns only the **pointer shape** (opaque `handle` on the trail; integrity
-  hash resolved privately); the index that makes a handle resolvable is #153's, and the wiring child is
-  `blocked-by` it. The contract only fixes the **pointer shape** the trail
+- It does not define the artifact store, its auth, or the store's own URI scheme — that is the existing
+  run-experiment artifact-store seam (reached via #153's typed `[recipes.artifact_store]` pointer). It **does**
+  define the **immutable artifact-index/resolver** the trail's opaque handles require (Finding-4: a handle
+  namespace, an immutable handle→URI mapping, private hash storage, resolver discovery, tombstone/rotation) —
+  owned here because it is part of the trail contract, and **declared via the `[record_visibility.artifact_index]`
+  typed pointer** in the profile (reusing #153's recipe-pointer shape). The contract fixes the **pointer shape**
+  (opaque `handle` on the trail; integrity hash resolved privately) and the index that resolves it; the store
+  behind the index is the existing seam. The contract only fixes the **pointer shape** the trail
   uses.
 - It does not implement the validator or wire it into the skills — the validator *library* is the `ready`
   child; the wiring is the `blocked-by` child (see Rollout).
@@ -388,13 +409,16 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
   review posting) consumes the produce-time + post-time validation; #157 (run-experiment push/close + merge
   gate) consumes all three boundaries. None of those may be authorized until this lands (umbrella rule); this
   doc is the thing that unblocks them.
-- **Touches #153 (instance-profile interface):** adds the `record_visibility` block to the profile schema #153
-  defines, and requires #153 to supply (a) the **pre-release/private model list + private-dataset namespace**
-  the `standard`-verification trigger checks against, and (b) the **immutable artifact-index/resolver** (handle
-  namespace, handle→URI mapping, private hash storage, resolver discovery, tombstone/rotation) that makes the
-  opaque handles resolvable and auditable. #153 owns the file location/discovery + these resolvers; this
-  contract owns the block's fields, the trigger rule, and the pointer shape. Coordinated, not contradictory —
-  #153's schema should reserve `record_visibility` for this contract.
+- **Builds on merged #153 (instance-profile interface):** #153 is now merged. This contract is the enforcer
+  #153 named for its required `[github].private` assertion ("#146 owns when a repo must be private … the gate
+  fails closed on a public repo asserted private"), and it adds an **additive, optional `[record_visibility]`
+  block** (TOML, fields #146-owned) to #153's `aar-profile.toml` — a minor, backward-compatible schema addition
+  under #153's `schema_version` rule, in exactly the seam #153 reserved for "redaction rules #146." That block
+  also carries this contract's own trigger inputs (`prerelease_model_ids`, `private_dataset_handles`) and the
+  `[record_visibility.artifact_index]` typed pointer — owned here, not asked of #153's `[github]`/`[recipes]`.
+  `aar-profile-validate` (a #153 child) gains a #146-supplied check for the block. Coordinated, not
+  contradictory: #153 declares where/who + discovery/snapshot/validate; #146 owns this block's fields, the
+  trigger rule, the pointer shape, and the `private` enforcement.
 - **Touches #150 (shared GitHub-lifecycle helper):** the post-time validator runs inside the helper's
   review/PR-body posting path, and the merge-time re-check runs in the helper's merge gate. The helper hosts
   the *enforcement call site* on the rungs it runs (--design, close, post, merge); this contract supplies the
