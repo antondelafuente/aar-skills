@@ -67,10 +67,10 @@ Two inputs per rung, with identical semantics across both scripts:
   `AUDIT_VERIFIER_CMD` (`*claude*` → claude, `*codex*` → codex, else `custom`). `verify_claim.sh` uses a
   *different* variable today (`VERIFIER_CMD`); this doc makes it apply the **same inference** to whatever
   verifier variable it reads (see decision 3 for the naming reconciliation).
-- **`AUDIT_VERIFIER_FAMILY`** (optional) — an explicit auditor-family declaration. **Authoritative when
-  set** (allowlisted to `claude|codex`): it wins over the command-string inference, so it is the right way
-  to declare a wrapper / shim verifier's family. When unset, the command falls to `*claude*`/`*codex*`
-  substring inference, and an unidentifiable command BLOCKs. See decision 5.
+- **`AUDIT_VERIFIER_FAMILY`** (optional) — an explicit auditor-family declaration for an **opaque** verifier
+  command (a wrapper / shim, allowlisted to `claude|codex`). It is trusted only when the command is *not*
+  self-identifying; if it **conflicts** with a recognizable `*claude*`/`*codex*` command it **fails closed**
+  rather than overriding it (so a stale declaration can't pass a same-family verifier). See decision 5.
 
 The two rules, applied uniformly to every model-judged rung:
 
@@ -157,10 +157,11 @@ longer prove "genuinely different family." A `custom` pass is only safe when the
 distinct third family; the inference cannot tell a genuine third-family CLI from a same-family wrapper.
 
 **Decision: an unidentifiable verifier (inferred `custom`) BLOCKs unless its family is *explicitly
-declared*.** Add an optional `AUDIT_VERIFIER_FAMILY` env var (the auditor's family). The resolution is: if `AUDIT_VERIFIER_FAMILY` is set
-(allowlisted to `claude|codex`), it is **authoritative** — use it; else if the command matches
-`*claude*`/`*codex*`, use that inference; else BLOCK with "the verifier command does not identify its family
-— set `AUDIT_VERIFIER_FAMILY`." Then the same-family check
+declared*.** Add an optional `AUDIT_VERIFIER_FAMILY` env var (the auditor's family, allowlisted to `claude|codex`). The resolution is
+conflict-safe: if the command matches `*claude*`/`*codex*`, use that inference — and if a declaration is
+*also* set and *disagrees*, **BLOCK** on the conflict; if the command is opaque, use the declaration if set,
+else BLOCK with "the verifier command does not identify its family — set `AUDIT_VERIFIER_FAMILY`." (The
+full ordering is in decision 5's contract above.) Then the same-family check
 runs on the resolved family as before: a declared family that equals the subject BLOCKs; a declared distinct
 family passes. This preserves genuine third-family / wrapper support **without** letting an opaque command
 silently claim cross-family status. The subject family (`AAR_SUBSTRATE`) must still be exactly
@@ -171,17 +172,25 @@ silently claim cross-family status. The subject family (`AAR_SUBSTRATE`) must st
 third-family registry/config is a deliberate future extension, out of scope here — until it exists, a
 declared family that is neither `claude` nor `codex` BLOCKs.
 
-**Explicit declaration is authoritative when set; substring inference is the fallback, not an override.**
-The `*claude*`/`*codex*` substring match is a known approximation — a wrapper whose *path* happens to
-contain a family token (e.g. `/opt/claude-shim/run-codex`) would mis-infer. So the resolution order makes
-the **declaration win**: if `AUDIT_VERIFIER_FAMILY` is set (allowlisted), it is authoritative and the
-substring inference is skipped entirely; only when it is *unset* does the command fall to substring
-inference, and an unidentifiable command (no token match, no declaration) BLOCKs. This means an operator
-running any opaque/wrapped verifier should *always* declare the family rather than rely on the token in the
-command string. (Tightening the substring matcher itself — anchoring it to known direct-CLI basenames so a
-misleading path token can't auto-satisfy the contract — is a worthwhile hardening of the shared matcher;
-it is folded into the decision-4 helper child as a smoke case, but the authoritative-declaration rule above
-is what closes the contract gap regardless of how sharp the fallback inference is.)
+**Explicit declaration is for *opaque* commands only — it never overrides an identifiable command, and a
+conflict fails closed.** A declaration that could override a self-identifying command would open the inverse
+hole: a *stale or wrong* `AUDIT_VERIFIER_FAMILY` (left in the shell, or copied from another run) could mark
+a genuinely **same-family** verifier as cross-family and pass — the exact failure this doc exists to
+prevent, just from the declaration side. So the resolution is conflict-safe:
+
+1. If the command matches `*claude*`/`*codex*` (identifiable) **and** `AUDIT_VERIFIER_FAMILY` is unset or
+   *agrees* → use the inferred family.
+2. If the command is identifiable **and** the declaration *disagrees* → **BLOCK** (conflict: "the verifier
+   command looks like family X but `AUDIT_VERIFIER_FAMILY=Y` — refusing to trust a declaration that
+   contradicts a recognizable command"). Never silently let the declaration win over a recognizable command.
+3. If the command is **opaque** (no token match) → the allowlisted `AUDIT_VERIFIER_FAMILY` is authoritative
+   (this is the one case it is *needed* and *trusted*); unset → BLOCK (unidentifiable, undeclared).
+
+So declarations only ever *add* information for genuinely-ambiguous commands; they can never *override* a
+recognizable one. (Separately, tightening the substring matcher — anchoring it to known direct-CLI
+basenames so a misleading *path* token like `/opt/claude-shim/run-codex` can't auto-satisfy — is folded into
+the decision-4 helper child as a smoke case; the conflict-fail-closed rule above is what closes the
+declaration-side gap regardless of how sharp the inference is.)
 
 **Scope: the `AUDIT_VERIFIER_FAMILY` declaration applies to the rungs whose family `verify-claims`
 resolves** — the four read-only/close rungs plus the `--scaffold`/`--code` resolution *inside*
@@ -192,6 +201,20 @@ ship-change verifier is always a real `claude -p …` command — so the wrapper
 there. If a future install genuinely needs a wrapper verifier for ship-change rungs, updating the `wf.sh`
 preflight to consult the shared resolver is a scoped follow-up (it rides the decision-4 drift check that
 already keeps the two matchers aligned) — not required for the four-rung guarantee this doc backs.
+
+#### 6. Each rung writes a durable cross-family marker into its audit artifact (so #150 can validate, not re-check)
+
+The #130 helper (#150) *posts and merges* already-produced audit outputs for the read-only rungs without
+re-running them. For that to be safe, a fresh reader (and the helper's merge gate) must be able to tell an
+**enforced cross-family** audit from a stale or family-blind one — but today the resolved families are only
+echoed to **stderr**, which does not survive into the committed artifact. **Decision: each rung writes a
+small machine-readable marker into (or beside) its output file** — `subject_family`, `auditor_family`, and a
+`contract_version` — as a stable header (or sidecar) on the audit artifact. This lets #150 *validate the
+marker* (right families, current contract version) without re-implementing family matching — keeping the
+enforcement canonical in `verify-claims` while giving the helper a verifiable signal. The marker also makes
+a stale/manual family-blind output (no marker, or an old contract version) detectable rather than silently
+trusted. The exact serialization (a fenced header block vs a `.family.json` sidecar) is an implementation
+detail of the helper child, but the *fields* are fixed here as the contract #150 reads.
 
 ## Alternatives considered
 
@@ -228,15 +251,19 @@ already keeps the two matchers aligned) — not required for the four-rung guara
   scripts. A sweep for callers is part of the implementation child.
 - **Contract for the #130 cluster:** this is the prerequisite the umbrella records as `blocked-by` for the
   four-rung promise. After it lands, #150 (helper), #156 (`design-experiment` PR-open), and #157
-  (`run-experiment` close) can rely on "set `AAR_SUBSTRATE` + opposite-family verifier, and the audit runner
-  fails closed otherwise" rather than re-implementing the check.
+  (`run-experiment` close) can rely on "set `AAR_SUBSTRATE` to the rung's subject + opposite-family
+  verifier, and the audit runner fails closed otherwise" rather than re-implementing the check — and #150
+  **validates the durable cross-family marker** (decision 6) on each audit artifact it posts/merges instead
+  of re-running or re-matching family itself.
 - **`wf.sh` mirror (cross-plugin):** `aar-engineering/scripts/wf.sh` keeps its narrow `is_claude_verifier_cmd`
   preflight (it must not take a runtime dependency on `verify-claims`), now guarded by a **drift check**
   against the `verify-claims` matcher (decision 4 / FINDING 3) instead of a bare comment.
 - **Smoke coverage** is part of the implementation: a fake-verifier smoke (mirroring `identity_smoke.sh`'s
   pattern) asserting, for both scripts, (a) unset `AAR_SUBSTRATE` BLOCKs on each rung, (b) same-family
-  BLOCKs, (c) cross-family passes, (d) an unidentifiable verifier with no `AUDIT_VERIFIER_FAMILY` BLOCKs and
-  one with a declared distinct family passes; plus the `wf.sh`↔`verify-claims` matcher drift check.
+  BLOCKs, (c) cross-family passes, (d) an opaque verifier with no `AUDIT_VERIFIER_FAMILY` BLOCKs and one
+  with a declared distinct family passes, (e) a declaration that **conflicts** with an identifiable command
+  BLOCKs, (f) the cross-family marker (decision 6) is written with the right fields; plus the
+  `wf.sh`↔`verify-claims` matcher drift check and `wf.sh review_audit_env` clearing `AUDIT_VERIFIER_FAMILY`.
 
 ## Decomposition (spawned `ready` issues)
 
@@ -251,24 +278,31 @@ could also be one PR; filed separately so each is a small reviewable diff, with 
 1. **`ready` — Extract the cross-family enforcement helper** (`cross_family.sh`): one sourced shell function
    `(runner_family, verifier_cmd, rung_label)` → resolved families or rung-named BLOCK, implementing rules
    (1) explicit-family exact-match and (2) different-family, the `*claude*`/`*codex*` inference, **and the
-   `AUDIT_VERIFIER_FAMILY` declaration path for an unidentifiable verifier** (decision 5). Refactor the
+   conflict-safe `AUDIT_VERIFIER_FAMILY` declaration path** (decision 5: authoritative for opaque commands,
+   fail-closed when it conflicts with an identifiable command, allowlisted to `claude|codex`). Refactor the
    existing `--scaffold`/`--code` guard in `audit_experiment.sh` onto it (one definition, no drift).
    **Behavior-changing for `--scaffold`/`--code` too:** decision 5 means a previously-passing `custom`
    (unidentifiable) verifier on those rungs now BLOCKs unless `AUDIT_VERIFIER_FAMILY` is declared — so this
    PR is treated as behavior-changing for all three already-enforced modes, with its own smoke coverage,
    doc note, and plugin version bump shipped atomically (not "no caller-visible change"). **Also expose the
-   matcher in a form `wf.sh` can assert against, and add the `wf.sh`-mirror drift check** (decision 4 /
-   FINDING 3).
-2. **`ready` (blocked-by #1) — `audit_experiment.sh`: enforce on close/`--design`/`--data`, with docs.**
-   Replace `RUNNER_FAMILY=${AAR_SUBSTRATE:-claude}` with the helper call so all modes require an explicit
-   family and fail closed on same-family / unidentifiable-verifier. Add smoke cases for the three
-   previously-defaulting modes. **In the same change**, update the `verify-claims` SKILL.md and any
-   `design-experiment`/`run-experiment` doc/checklist examples that teach these three rungs to export
-   `AAR_SUBSTRATE` (so no doc teaches a now-blocking invocation — FINDING 2).
-3. **`ready` (blocked-by #1) — `verify_claim.sh`: adopt the contract, with docs.** Read `AAR_SUBSTRATE`,
-   infer the auditor family from its verifier command via the helper, fail closed on
-   unset/typo/same-family/unidentifiable. Add smoke cases. **In the same change**, update the SKILL.md and
-   any caller examples that teach `verify_claim` to set `AAR_SUBSTRATE` (FINDING 2).
+   matcher in a form `wf.sh` can assert against, and add the `wf.sh`-mirror drift check** (decision 4).
+   **And update `wf.sh`'s `review_audit_env` to clear/set `AUDIT_VERIFIER_FAMILY`** (alongside the vars it
+   already clears) so ambient shell state cannot alter or block a ship-change review, with identity-smoke
+   coverage for it (the new authoritative env var is otherwise an uncontrolled input to every ship-change
+   review).
+2. **`ready` (blocked-by #1) — `audit_experiment.sh`: enforce on close/`--design`/`--data`, with docs +
+   marker.** Replace `RUNNER_FAMILY=${AAR_SUBSTRATE:-claude}` with the helper call so all modes require an
+   explicit family and fail closed on same-family / unidentifiable-verifier / declaration-conflict. **Write
+   the durable cross-family marker** (`subject_family`, `auditor_family`, `contract_version` — decision 6)
+   into each mode's output artifact. Add smoke cases for the three previously-defaulting modes + the marker.
+   **In the same change**, update the `verify-claims` SKILL.md and any `design-experiment`/`run-experiment`
+   doc/checklist examples that teach these three rungs to export `AAR_SUBSTRATE` (so no doc teaches a
+   now-blocking invocation — FINDING 2).
+3. **`ready` (blocked-by #1) — `verify_claim.sh`: adopt the contract, with docs + marker.** Read
+   `AAR_SUBSTRATE`, infer the auditor family from its verifier command via the helper, fail closed on
+   unset/typo/same-family/unidentifiable/conflict. **Write the same cross-family marker** (decision 6) into
+   its verdict artifact. Add smoke cases. **In the same change**, update the SKILL.md and any caller
+   examples that teach `verify_claim` to set `AAR_SUBSTRATE` (FINDING 2).
 4. **`ready` (blocked-by #2, #3) — residual caller sweep + final SKILL.md pass.** Sweep for any remaining
    in-tree invoker not already updated in #2/#3 (skill checklists, examples), confirm `wf.sh` (#134) is
    unaffected, and finalize the `verify-claims` SKILL.md statement of the uniform contract across all six
