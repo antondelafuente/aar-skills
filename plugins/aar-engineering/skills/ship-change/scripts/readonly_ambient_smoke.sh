@@ -369,6 +369,23 @@ if echo "$RO_OUT" | grep -q 'SUPERSECRETTOKEN'; then
 else
   pass "F1 r13: non-GitHub origin note does not leak the remote URL / token"
 fi
+# F1 r14: PLAIN doctor's read-only verdict ADVICE lines must also redact a credential-bearing target.
+PLAIN12=$(PATH="$BIN:$PATH" GH_TOKEN="RO_aaa" WF_DOCTOR_SKIP_LIVE_PROBES=1 WF_ALLOW_AMBIENT_IDENTITY=1 \
+  WF_READONLY_TOKEN_CMD="" WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" \
+  bash "$WF" doctor claude "$WT12" 2>&1 || true)
+if echo "$PLAIN12" | grep -q 'SUPERSECRETTOKEN'; then
+  fail "F1 r14: plain doctor verdict advice leaked the credential-bearing target"
+else
+  pass "F1 r14: plain doctor verdict advice redacts the credential-bearing target"
+fi
+# F2 r14 (structural): the HTTPS URL parse strips userinfo from the host and passes username= to credential
+# fill, so a username-qualified remote (https://user@github.com/…) is keyed on host=github.com, not user@host.
+if grep -q 'split off any `userinfo@` BEFORE taking the host' "$WF" \
+   && grep -q 'username=%s' "$WF"; then
+  pass "F2 r14: HTTPS parse strips userinfo from host + passes username to credential fill (structural)"
+else
+  fail "F2 r14: HTTPS parse does not strip userinfo / pass username"
+fi
 if echo "$RO_OUT" | grep -q 'not a GitHub remote'; then
   # assert NO push targeted the non-GitHub origin URL (the push-target is the arg right after `push` + flags);
   # a push whose remote URL is a `https://gitlab…`/non-github scheme would mean the non-GitHub origin was probed

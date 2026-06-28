@@ -1220,11 +1220,21 @@ readonly_probe_one_push_url(){
   # This both preserves detection (a real ambient credential is found by git's own correct parsing) and makes
   # store/erase impossible.
   shim="$tmp/cred-ro-shim.sh"
-  local cred_in cred_out parsed_host parsed_proto parsed_path
+  local cred_in cred_out parsed_host parsed_proto parsed_path parsed_user rest
   parsed_proto=${url%%://*}; case "$url" in *://*) : ;; *) parsed_proto=ssh ;; esac
+  parsed_user=""
   case "$url" in
-    https://*) parsed_host=${url#https://}; parsed_path=${parsed_host#*/}; parsed_host=${parsed_host%%/*}
-               [ "$parsed_path" = "$parsed_host" ] && parsed_path="" ;;
+    https://*)
+      rest=${url#https://}
+      # split off any `userinfo@` BEFORE taking the host, so a username-qualified URL
+      # (https://user@github.com/o/r) yields host=github.com + username=user, not host=user@github.com
+      # (#166 code-review F2 r14 — a mis-parsed host would mis-key credential fill and risk a false-pass).
+      case "$rest" in
+        *@*) parsed_user=${rest%%@*}; rest=${rest#*@}; parsed_user=${parsed_user%%:*} ;;  # drop any :password
+      esac
+      parsed_path=${rest#*/}; parsed_host=${rest%%/*}
+      [ "$parsed_path" = "$parsed_host" ] && parsed_path=""
+      ;;
     *) parsed_host=github.com; parsed_path="" ;;
   esac
   # `git credential fill` resolves the ambient credential using git's OWN rules (handles helpers with args,
@@ -1233,11 +1243,10 @@ readonly_probe_one_push_url(){
   # path-scoped `credential.https://host/owner/repo.helper` matches (#166 F1 r11). Prompts disabled so it can't
   # block; capture the EXIT STATUS so a TIMEOUT is treated as inconclusive, never a silent empty-cred read-only
   # (#166 F3 r11).
-  if [ -n "$parsed_path" ]; then
-    cred_in=$(printf 'protocol=%s\nhost=%s\npath=%s\n\n' "$parsed_proto" "$parsed_host" "$parsed_path")
-  else
-    cred_in=$(printf 'protocol=%s\nhost=%s\n\n' "$parsed_proto" "$parsed_host")
-  fi
+  cred_in=$(printf 'protocol=%s\nhost=%s\n' "$parsed_proto" "$parsed_host")
+  [ -n "$parsed_path" ] && cred_in=$(printf '%s\npath=%s' "$cred_in" "$parsed_path")
+  [ -n "$parsed_user" ] && cred_in=$(printf '%s\nusername=%s' "$cred_in" "$parsed_user")
+  cred_in=$(printf '%s\n\n' "$cred_in")
   cred_out=$(printf '%s' "$cred_in" | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
                timeout "$to" git "${credctx[@]}" -c credential.useHttpPath=true credential fill 2>/dev/null); fillrc=$?
   if [ "$fillrc" = 124 ] || [ "$fillrc" = 137 ]; then
@@ -1787,10 +1796,11 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report life
   # single exit-code semantics for plain doctor (identity readiness) and one explicit gate for the read-only
   # contract (#166 design-review F1).
   doctor_readonly_section "$DREPO" "$DWT" || true
+  RDREPO=$(redact_userinfo "$DREPO")   # redact userinfo in the displayed command hints too (#166 F1 r14)
   if [ "$DOCTOR_RO_FAIL" = 0 ]; then
-    echo "  read-only ambient verdict: PASS (run \`wf.sh doctor $AUTHOR $DREPO --readonly\` for the strict gate)"
+    echo "  read-only ambient verdict: PASS (run \`wf.sh doctor $AUTHOR $RDREPO --readonly\` for the strict gate)"
   else
-    echo "  read-only ambient verdict: FAIL — ambient credential is not authoritatively read-only (advisory here; \`wf.sh doctor $AUTHOR $DREPO --readonly\` is the gating form, exits non-zero)"
+    echo "  read-only ambient verdict: FAIL — ambient credential is not authoritatively read-only (advisory here; \`wf.sh doctor $AUTHOR $RDREPO --readonly\` is the gating form, exits non-zero)"
   fi
   if [ "$ready" = 1 ]; then
     echo "READY: the full ship-change workflow identity path would proceed under current configuration"
