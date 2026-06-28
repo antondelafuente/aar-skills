@@ -1,0 +1,9 @@
+pod-reaper.sh (cron) kills orphaned GPU pods so they can't bill forever unwatched:
+#!/bin/bash
+set -u; MAX_HOURS="${POD_MAX_HOURS:-8}"; KEY="$RUNPOD_TEAM_API_KEY"; now=$(date +%s)
+pods=$(curl -s https://rest.runpod.io/v1/pods -H "Authorization: Bearer $KEY" -H "User-Agent: anton-cli")
+echo "$pods" | jq -c '.[]?' | while read -r p; do
+  id=$(echo "$p" | jq -r .id); created=$(echo "$p" | jq -r .createdAt)
+  age_h=$(( (now - $(date -d "$created" +%s)) / 3600 ))
+  if [ "$age_h" -ge "$MAX_HOURS" ]; then curl -s -X DELETE "https://rest.runpod.io/v1/pods/$id" -H "Authorization: Bearer $KEY" -H "User-Agent: anton-cli"; fi
+done

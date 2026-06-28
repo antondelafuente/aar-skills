@@ -1,0 +1,10 @@
+pod-reaper.sh — same goal but with a flock, a persistent first-seen ledger instead of the pod's createdAt, retry-with-backoff on delete, and a dry-run mode:
+#!/bin/bash
+set -euo pipefail; MAX_HOURS="${POD_MAX_HOURS:-8}"; STATE="${S:-$HOME/.pod-reaper}"; DRY="${DRY:-0}"; R=3
+mkdir -p "$STATE"; exec 9>"$STATE/lock"; flock -n 9 || exit 0; [ -f "$STATE/seen.json" ] || echo '{}'>"$STATE/seen.json"
+now=$(date +%s); api(){ curl -s -H "Authorization: Bearer $RUNPOD_TEAM_API_KEY" -H "User-Agent: anton-cli" "$@"; }
+del(){ local i d=2; for i in $(seq 1 $R); do api -X DELETE "https://rest.runpod.io/v1/pods/$1" && return; sleep $d; d=$((d*2)); done; }
+L=$(cat "$STATE/seen.json"); api https://rest.runpod.io/v1/pods | jq -c '.[]?' | while read -r p; do
+  id=$(echo "$p"|jq -r .id); fs=$(echo "$L"|jq -r --arg i "$id" '.[$i]//empty'); [ -z "$fs" ] && fs=$now
+  [ $(( (now-fs)/3600 )) -ge "$MAX_HOURS" ] && { [ "$DRY" = 1 ] && echo "[dry]$id" || del "$id"; }
+done
