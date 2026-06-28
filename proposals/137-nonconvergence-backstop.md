@@ -84,12 +84,19 @@ The load-bearing decisions:
    re-split into smaller `ready`/`needs-design` children. Below the threshold, the existing "fix in the
    worktree + commit, re-run finish" block is unchanged.
 
-   **Persistence is load-bearing.** The counter lives in the canonical disposition PR comment. When a round
-   actually advances, persisting it is fail-closed: if the `fd_save` to GitHub fails on an advancing pass,
-   `finish` dies (re-run) rather than continuing with only local state — a lost save would undercount and
-   silently defeat the backstop. A non-advancing save (clean review / idempotent retry) stays a cosmetic
-   warning. Idempotence holds across a failed save because the PR comment is the source of truth: a re-run
-   reloads the last *persisted* state and re-increments from there.
+   **Persistence is load-bearing — fail-closed end to end.** The counter lives in the canonical disposition
+   PR comment. Every write that could lose or corrupt it fails closed rather than silently undercounting:
+   - `fd_bump_round`'s local cache write (`jq`+`mv`) is checked — on failure it returns non-zero and echoes
+     nothing, and `finish` dies, so a phantom "advanced" round is never reported against a stale cache.
+   - When a round actually advances, the `fd_save` to GitHub is fail-closed: if it fails on an advancing
+     pass, `finish` dies (re-run). A non-advancing save (clean review / idempotent retry) stays a cosmetic
+     warning.
+   - A *present-but-malformed* `round` in the loaded state (a corrupt or hand-edited disposition comment) is
+     treated as corruption: `finish` dies up front rather than letting the safe-reader reset it to `0` and
+     defeat the backstop. Absent / null stays back-compatible `0`.
+
+   Idempotence holds across a failed save because the PR comment is the source of truth: a re-run reloads the
+   last *persisted* state and re-increments from there.
 
 5. **Still fail-closed, still blocks.** The backstop is purely additive on the *blocking* path — it only
    ever fires *because* HIGH>0 already blocks. It cannot cause a merge; it changes the guidance attached to

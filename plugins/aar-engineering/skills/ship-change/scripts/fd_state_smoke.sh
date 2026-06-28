@@ -88,9 +88,27 @@ r=$(fd_bump_round "$rc" "sha2222" "$hi2" 1); [ "$r" = 3 ] && ok round-bump-on-ne
 # HIGH-id ORDER must not matter (sorted in the fingerprint): reorder hi2 -> same fingerprint as last -> no bump.
 hi2r="$TMP/hi2r.txt"; printf 'cccccccccccc\naaaaaaaaaaaa\n' > "$hi2r"
 r=$(fd_bump_round "$rc" "sha2222" "$hi2r" 1); [ "$r" = 3 ] && ok round-order-insensitive || no "round-order ($r)"
-# fd_round fails safe on a malformed round value.
+# fd_round fails safe on a malformed round value (safe-read; the gating check is fd_round_valid below).
 echo '{"round":"notanumber"}' > "$TMP/bad.json"
 [ "$(fd_round "$TMP/bad.json")" = 0 ] && ok round-malformed-zero || no "round-malformed-zero ($(fd_round "$TMP/bad.json"))"
+
+# fd_round_valid: absent/null/integer => rc 0 (ok); PRESENT non-integer => rc 2 (corruption, finish fails closed).
+echo '{"findings":[]}' > "$TMP/v_absent.json"
+fd_round_valid "$TMP/v_absent.json" && ok roundvalid-absent-ok || no "roundvalid-absent-ok"
+echo '{"round":null}' > "$TMP/v_null.json"
+fd_round_valid "$TMP/v_null.json" && ok roundvalid-null-ok || no "roundvalid-null-ok"
+echo '{"round":3}' > "$TMP/v_int.json"
+fd_round_valid "$TMP/v_int.json" && ok roundvalid-int-ok || no "roundvalid-int-ok"
+fd_round_valid "$TMP/bad.json"; [ "$?" = 2 ] && ok roundvalid-string-rc2 || no "roundvalid-string-rc2"
+echo '{"round":2.5}' > "$TMP/v_float.json"
+fd_round_valid "$TMP/v_float.json"; [ "$?" = 2 ] && ok roundvalid-float-rc2 || no "roundvalid-float-rc2"
+
+# fd_bump_round returns rc 1 (no echo) when the cache write fails — caller fails closed, never trusts a
+# phantom increment. Simulate by making the cache dir unwritable so the jq+mv cannot land.
+udir="$TMP/unwritable"; mkdir -p "$udir"; echo '{"round":4,"last_review_fingerprint":"x"}' > "$udir/c.json"; chmod 555 "$udir"
+hi_bw="$TMP/hi_bw.txt"; printf 'zzzzzzzzzzzz\n' > "$hi_bw"
+if out=$(fd_bump_round "$udir/c.json" "shaNEW" "$hi_bw" 1 2>/dev/null); then no "bump-rc1-on-write-fail (echoed $out, rc 0)"; else ok bump-rc1-on-write-fail; fi
+chmod 755 "$udir"
 
 if [ "$fails" -eq 0 ]; then echo "fd_state_smoke: ALL PASS"; else echo "fd_state_smoke: FAILURES"; fi
 exit "$fails"

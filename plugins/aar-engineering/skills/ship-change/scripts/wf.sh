@@ -535,14 +535,28 @@ fd_bump_round(){  # fd_bump_round <cache> <reviewed-sha> <high-ids-file> <had-hi
   prev=$(jq -r '.last_review_fingerprint // ""' "$cache" 2>/dev/null)
   if [ "$fp" != "$prev" ]; then
     cur=$((cur + 1))
-    jq --argjson r "$cur" --arg fp "$fp" --arg sha "$sha" \
-      '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
-      && mv "$cache.tmp" "$cache"
+    # The cache write must SUCCEED before we report the advance — otherwise fd_bump_round would echo an
+    # incremented round while the cache still holds the old value, fd_save would repost stale JSON, and the
+    # next finish would undercount. On a write failure, leave the cache untouched and signal failure (rc 1,
+    # no echo) so the caller fails closed rather than trusting a phantom increment.
+    if jq --argjson r "$cur" --arg fp "$fp" --arg sha "$sha" \
+        '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
+        && mv "$cache.tmp" "$cache"; then :; else
+      rm -f "$cache.tmp" 2>/dev/null || true
+      return 1
+    fi
   fi
   printf '%s\n' "$cur"
 }
 fd_round(){ jq -r '(.round // 0)' "$1" 2>/dev/null | grep -E '^[0-9]+$' || echo 0; }   # current round; absent => 0
 fd_last_reviewed_sha(){ jq -r '(.last_reviewed_sha // "")' "$1" 2>/dev/null || echo ""; }  # SHA of the last counted round
+# Validate the `round` field BEFORE trusting it as the load-bearing backstop counter. Absent / null => fine
+# (back-compat 0). A PRESENT non-integer (a corrupt or hand-edited disposition save) is corruption: rc 2 so
+# finish fails closed instead of silently resetting the counter to 0 (which fd_round would otherwise do).
+fd_round_valid(){  # fd_round_valid <cache>  -> rc 0 ok (absent/null/integer), rc 2 present-but-non-integer
+  local v; v=$(jq -r 'if has("round") and .round != null then .round else "ABSENT" end' "$1" 2>/dev/null) || return 2
+  case "$v" in ABSENT) return 0 ;; *[!0-9]*|'') return 2 ;; *) return 0 ;; esac
+}
 # Post the non-convergence backstop PR comment ONCE (#137): a hidden marker makes it idempotent across repeated
 # tripped `finish` runs — if a backstop comment already exists on the PR, skip re-posting. Best-effort (the
 # terminal BLOCK at the call site is the gate, not this comment). Args: <atok> <repo> <pr> <rounds> <detail>.
@@ -1719,6 +1733,9 @@ Split into one design PR per doc."
   case "$FDRC" in
     2) die "disposition-state lookup failed (GitHub error) — failing closed; re-run finish" ;;
     0) FD=$(fd_load "$WT" "$REPO" "$PR" "$ATOK") || die "canonical disposition state on PR #$PR is corrupt (invalid JSON) — fix the disposition comment and re-run finish"
+       # A present-but-malformed `round` is corruption of the load-bearing backstop counter — fail closed rather
+       # than let fd_round silently reset it to 0 (which would defeat the backstop). Absent/null is fine (=> 0).
+       fd_round_valid "$FD" || die "canonical disposition state on PR #$PR has a malformed \`round\` (must be a non-negative integer) — the non-convergence backstop counter is corrupt; fix the disposition comment and re-run finish."
        # 1d. Non-convergence backstop — PRE-REVIEW short-circuit (#137). This MUST run before any verifier-backed
        #      work below (the mandatory #140 fresh-eyes sweep AND the merge review), so a bare retry past threshold
        #      spends NO review credit at all — the whole point of the backstop. If the PR is already at the round
@@ -1800,7 +1817,8 @@ Split into one design PR per doc."
       # round and must not increment the counter (keeps `round` an honest "rounds with a residual HIGH").
       NCV_HADHI=0; [ "$REVIEW_HIGH" != 0 ] && NCV_HADHI=1
       NCV_BEFORE=$(fd_round "$FD")
-      NCV_ROUND=$(fd_bump_round "$FD" "$LOCAL_SHA" "$NCV_HI" "$NCV_HADHI")
+      NCV_ROUND=$(fd_bump_round "$FD" "$LOCAL_SHA" "$NCV_HI" "$NCV_HADHI") \
+        || die "could not persist the non-convergence round counter to the local disposition cache (write failed) — failing closed so the backstop never undercounts. Re-run finish."
       # fd_save persists the disposition state (incl. round / last_reviewed_sha) to the canonical PR comment.
       # If the round counter actually ADVANCED this pass, that state is load-bearing for the next finish (the
       # pre-review short-circuit + the trip both read round/last_reviewed_sha from the comment) — a lost save
