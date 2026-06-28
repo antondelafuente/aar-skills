@@ -117,8 +117,15 @@ case "$sub" in
   # ---- the read-vs-write families we DO classify ----
   issue|pr)
     case "$verb" in
-      view|list|status|diff|checks|""|develop) exec_real_gh "$@" ;;   # reads (develop is a no-op lister here)
-      *) guard_die "$sub $verb" ;;                                    # create/comment/edit/close/merge/review/delete/reopen/… = writes
+      view|list|status|diff|checks) exec_real_gh "$@" ;;            # plain reads
+      checkout|co) exec_real_gh "$@" ;;                             # `gh pr checkout` is local-only (#165 review F3)
+      "") exec_real_gh "$@" ;;                                       # `gh issue`/`gh pr` with no verb = help/list
+      develop)
+        # `gh issue develop 123` CREATES a linked branch (a write); only `--list`/`-l` is a read (#165 review F2).
+        for a in "$@"; do case "$a" in --list|-l) exec_real_gh "$@" ;; esac; done
+        guard_die "$sub develop"
+        ;;
+      *) guard_die "$sub $verb" ;;                                  # create/comment/edit/close/merge/review/delete/reopen/… = writes
     esac
     ;;
 

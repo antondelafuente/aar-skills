@@ -412,12 +412,29 @@ git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args..
         */*) push_url="https://x-access-token:${tok}@github.com/${owner_repo}.git" ;;
         *)   die "git_push_author: could not derive owner/repo from origin url '$remote_url'" ;;
       esac
-      local a args=() swapped=0
+      # Swap the literal `origin` for the tokenized URL, AND strip any -u/--set-upstream: `git push -u <url> …`
+      # would PERSIST the tokenized URL (token!) into .git/config as the branch upstream (#165 review HIGH).
+      # We push WITHOUT -u, then set the upstream to the NAMED `origin` remote separately (no URL on disk).
+      local a args=() swapped=0 want_upstream=0 upstream_branch=""
       for a in "$@"; do
-        if [ "$swapped" = 0 ] && [ "$a" = origin ]; then args+=("$push_url"); swapped=1; else args+=("$a"); fi
+        case "$a" in
+          -u|--set-upstream) want_upstream=1; continue ;;   # drop — restored as named remote below
+        esac
+        if [ "$swapped" = 0 ] && [ "$a" = origin ]; then args+=("$push_url"); swapped=1; continue; fi
+        args+=("$a")
       done
       [ "$swapped" = 1 ] || die "git_push_author: expected an 'origin' remote arg to replace with the tokenized URL"
       WF_GH_INTERNAL=1 GH_TOKEN="$tok" git -C "$wt" -c credential.helper= push "${args[@]}"
+      if [ "$want_upstream" = 1 ]; then
+        # set upstream to the NAMED origin remote (never the tokenized URL). The branch arg is the worktree's
+        # current branch; configure branch.<b>.remote=origin + .merge=refs/heads/<b> directly so nothing
+        # token-bearing is written to .git/config.
+        upstream_branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        if [ -n "$upstream_branch" ] && [ "$upstream_branch" != HEAD ]; then
+          git -C "$wt" config "branch.${upstream_branch}.remote" origin
+          git -C "$wt" config "branch.${upstream_branch}.merge" "refs/heads/${upstream_branch}"
+        fi
+      fi
       ;;
     *)
       # Non-GitHub push remote (e.g. a local file:// remote in tests, or a mirror). No tokenized-URL rewrite

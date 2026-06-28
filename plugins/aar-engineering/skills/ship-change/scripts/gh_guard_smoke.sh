@@ -64,6 +64,14 @@ if ! guard --repo o/r issue create -t x >/dev/null 2>&1; then pass "'gh --repo o
 # 2c. but a -R READ still passes
 : > "$FAKE_GH_LOG"
 if guard -R o/r pr view 1 >/dev/null 2>&1 && grep -q 'pr view 1' "$FAKE_GH_LOG"; then pass "'gh -R o/r pr view' passes (read)"; else fail "'gh -R o/r pr view' should pass"; fi
+# 2e. `gh issue develop` CREATES a branch (write) unless --list (review F2)
+: > "$FAKE_GH_LOG"
+if ! guard issue develop 123 >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh issue develop' blocked (creates a branch)"; else fail "'gh issue develop' must be blocked"; fi
+: > "$FAKE_GH_LOG"
+if guard issue develop 123 --list >/dev/null 2>&1 && grep -q 'issue develop' "$FAKE_GH_LOG"; then pass "'gh issue develop --list' passes (read)"; else fail "'gh issue develop --list' should pass"; fi
+# 2f. `gh pr checkout` is local-only -> passes (review F3)
+: > "$FAKE_GH_LOG"
+if guard pr checkout 5 >/dev/null 2>&1 && grep -q 'pr checkout 5' "$FAKE_GH_LOG"; then pass "'gh pr checkout' passes (local-only)"; else fail "'gh pr checkout' should pass"; fi
 # 2d. the blocked message must NOT echo the raw argv (review F3: bodies/tokens must not leak). Capture the
 # guard's output first (the guard exits non-zero; neutralize it with `|| true`), THEN grep the captured text
 # separately — a `guard … | grep` pipeline would be masked by pipefail/`!` and always pass (review F2).
@@ -183,6 +191,24 @@ PUSH_OUT_SSH=$(PATH="$GBIN:$PATH" GIT_TERMINAL_PROMPT=0 bash -c '
   git -C "'"$GITTEST"'/remote.git" rev-parse --verify -q refs/heads/pushed_ssh >/dev/null && echo PUSH_LANDED_SSH
 ' 2>&1)
 if printf '%s' "$PUSH_OUT_SSH" | grep -q PUSH_LANDED_SSH; then pass "git_push_author normalizes an ssh:// github remote to the tokenized push (F2)"; else fail "ssh:// github remote push failed: $PUSH_OUT_SSH"; fi
+
+# a `-u`/`--set-upstream` push must NOT persist the tokenized URL (the TOKEN) into .git/config (review HIGH).
+( cd "$GITTEST/work"; git remote set-url origin https://github.com/o/r.git ) >/dev/null 2>&1
+PUSH_OUT_U=$(PATH="$GBIN:$PATH" GIT_TERMINAL_PROMPT=0 bash -c '
+  set -uo pipefail
+  WT="'"$GITTEST/work"'"
+  git -C "$WT" config url."'"$GITTEST"'/remote.git".insteadOf "https://x-access-token:ENGINEER_TOKEN@github.com/o/r.git"
+  eval "$(sed -n "/^real_gh()/,/^}/p; /^git_push_author()/,/^}/p" "'"$WF"'")"
+  git_push_author ENGINEER_TOKEN "$WT" -q -u origin "$(git -C "$WT" rev-parse --abbrev-ref HEAD)" 2>&1
+  # dump the on-disk config so the smoke can assert the token is absent and upstream points at named origin
+  echo "---CONFIG---"
+  # exclude the test-harness insteadOf line (which intentionally carries the token to redirect the push to the
+  # local bare repo) — we only care whether git_push_author PERSISTED a token-bearing remote/upstream entry.
+  git -C "$WT" config --local --list | grep -v "^url\."
+' 2>&1)
+if printf '%s' "$PUSH_OUT_U" | grep -q 'ENGINEER_TOKEN'; then fail "-u push PERSISTED the engineer token into .git/config (HIGH): $PUSH_OUT_U"; else pass "-u push does NOT persist the token into .git/config"; fi
+CURBR=$(git -C "$GITTEST/work" rev-parse --abbrev-ref HEAD)
+if printf '%s' "$PUSH_OUT_U" | grep -q "branch.${CURBR}.remote=origin"; then pass "-u push sets upstream to the NAMED origin remote (not a URL)"; else fail "-u push did not set upstream to named origin: $PUSH_OUT_U"; fi
 
 echo "[smoke] static check: passes on real wf.sh, fails on a planted unmarked call"
 if bash "$STATIC" "$ROOT" >/dev/null 2>&1; then pass "static check passes on the real wf.sh"; else fail "static check should pass on the real wf.sh"; fi
