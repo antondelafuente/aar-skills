@@ -1,11 +1,12 @@
 #!/bin/bash
 # run-eval.sh <prompt-file> [cases.tsv] — eval a reviewer prompt vs the golden corpus (Codex), measuring tokens/review.
-SLUG=antondelafuente/automated-researcher; . ~/.aar-github-auth-env.sh
-T="$(bash -c "$WF_ENGINEER_TOKEN_CMD_CLAUDE")"; P="$(cat "$1")"; DIR=$(cd "$(dirname "$1")" && pwd)
+# type=pr cases fetch a diff from this repo (override: REVIEW_EVAL_REPO). Auth: ambient GH_TOKEN, else gh's own login.
+REPO="${REVIEW_EVAL_REPO:-antondelafuente/automated-researcher}"
+P="$(cat "$1")"; DIR=$(cd "$(dirname "$1")" && pwd)
 CASES="${2:-$DIR/cases.tsv}"; ok=0; n=0; tok=0
 printf "  %-16s %-9s %-9s %-6s %s\n" CASE GOLDEN GOT "" TOKENS
 while IFS='|' read -r id typ ref gold; do [ -z "$id" ] && continue
-  case "$typ" in pr) d=$(GH_TOKEN="$T" gh pr diff "$ref" -R "$SLUG" 2>/dev/null | head -c 55000);; syn) d=$(cat "$DIR/syn/$ref");; esac
+  case "$typ" in pr) d=$(gh pr diff "$ref" -R "$REPO" 2>/dev/null | head -c 55000);; syn) d=$(cat "$DIR/syn/$ref");; esac
   out=$(timeout 200 codex exec --sandbox read-only --skip-git-repo-check "$P
 
 --- THE CHANGE ---

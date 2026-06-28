@@ -21,9 +21,9 @@ Move it into automated-researcher under a new top-level **`tooling/review-eval/`
   kept the master corpus (`cases.tsv`), the runner, both prompts (`prompt-v1` = the shipped-spirit
   calibration; `prompt-v2` = a documented negative result), and `syn/`. Added a `README.md`.
 
-The harness is instance-coupled (it sources the box's engineer-auth env and calls `codex` locally).
-That is acceptable at the engineering-tooling layer — the same reason "~10 agents" is fine in the
-reviewer prompt (#217): this layer is the team's own tooling, not the instance-neutral product.
+The runner is **generic**: the PR-fetch repo comes from `REVIEW_EVAL_REPO` (default
+`automated-researcher`) and auth from ambient `GH_TOKEN` / `gh` login — no box-local file sourcing or
+hardcoded repo. (It calls `codex` locally, inherent to evaluating the Codex-family reviewer.)
 
 ## Alternatives considered
 
@@ -37,9 +37,11 @@ reviewer prompt (#217): this layer is the team's own tooling, not the instance-n
 ## Blast radius
 
 Additive. Introduces one new top-level dir (`tooling/`); no plugin/product behavior changes, no
-version bumps. The `.aar-ci` checks see a new bash + tsv (syntax-checked); nothing depends on it. The
-source copy in `research-lab/registry/review-eval` is removed in the same change (it was untracked
-there).
+version bumps. The `.aar-ci` checks see a new bash + tsv (syntax-checked). The source copy in
+`research-lab/registry/review-eval` was a today-created, untracked dir with no consumers; it is deleted
+as part of this rollout (after the merge lands the product copy) — no symlink/pointer is warranted since
+nothing references the old path. Discovery is via this dir's `README`; a hard discovery-gate from the
+reviewer surface would be over-engineering for a ~10-agent dev tool.
 
 ## Rollout + rollback
 

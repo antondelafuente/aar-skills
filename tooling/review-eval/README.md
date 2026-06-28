@@ -10,9 +10,11 @@ and *see the score move* against real cases, instead of guessing and shipping.
 ./run-eval.sh <prompt-file> [cases.tsv]
 ```
 
-For each case it runs the prompt as the reviewer (via `codex exec`, the deployment reviewer family),
-parses the `VERDICT: APPROVE|BLOCK`, scores it against the golden label, and reports **per-review token
-cost** (a review is ~10–90k tokens, scaling with diff size).
+Auth is ambient: set `GH_TOKEN` (or have `gh` logged in) before running; the PR-fetch repo defaults to
+`automated-researcher` (override with `REVIEW_EVAL_REPO`). For each case it runs the prompt as the
+reviewer (via `codex exec`, the deployment reviewer family), parses the `VERDICT: APPROVE|BLOCK`, scores
+it against the golden label, and reports **per-review token cost** (a review is ~10–90k tokens, scaling
+with diff size).
 
 ## Corpus (`cases.tsv`)
 
@@ -37,7 +39,6 @@ The 14 cases are deliberately balanced across the two failure modes:
 
 ## Caveats
 
-Instance-coupled by design (it sources the box's engineer-auth env and calls `codex` locally) — fine
-for the engineering-team layer. A 6-case run is noisy; widen the corpus before tuning hard. Evals
+It calls `codex` locally (the deployment reviewer family). A 6-case run is noisy; widen the corpus before tuning hard. Evals
 don't need to be perfect — the primary thing to guard is the reviewer *pushing* over-building, not a
 perfect verdict on every case.
