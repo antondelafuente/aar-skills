@@ -52,11 +52,16 @@ it proves *no* reachable source is write-capable, not just whichever one `gh` re
 the real `gh` directly (the `WF_GH_INTERNAL` marker) so the ergonomic guard can never mask a write-capable
 source and falsely certify safety.
 
-**Ambient `git push` surface.** A separate probe runs `git push --dry-run` to a disposable ref with **all
-credential prompts disabled** (`GIT_TERMINAL_PROMPT=0`, a no-op `GIT_ASKPASS`, empty `core.askPass`, SSH
-`BatchMode=yes`) and the engineer credential explicitly absent, so it exercises only the *ambient* Git
-credential. `--dry-run` performs the auth/negotiation but does not update the remote: accepted ⇒ an owner
-credential can push ⇒ FAIL; auth-rejected ⇒ ambient Git surface is read-only ⇒ PASS.
+**Ambient `git push` surface — a one-directional FAIL-only alarm (asymmetric).** A separate probe runs
+`git push --dry-run` to GitHub URLs with all credential prompts disabled, the credential resolved read-only
+via `git credential fill` and replayed through an isolated config (so the probe never mutates the credential
+store or runs hooks). It is **asymmetric by design**: an *accepted* dry-run ⇒ a hard FAIL (an ambient
+credential can demonstrably push); *every other outcome* (auth-rejected, authz-denied, transport failure,
+timeout) is **advisory only and never certifies read-only**. The reason is categorical: faithfully proving
+the negative — "a real push would be rejected" — from a synthetic, non-mutating environment is structurally
+leaky (credential helpers, host-vs-path scoping, `url.insteadOf`, `http.extraHeader`, SSH config, …), so the
+git-push surface only ever *adds* a FAIL, never grants a PASS. The categorical read-only PASS rests solely
+on API **provenance**. This makes the synthetic-environment false-PASS class structurally impossible.
 
 **Non-mutating by construction.** No probe uses a guessed/provisioned resource id (targets are
 self-discovered from what the token can already GET); the contents probe never carries a real `sha` +

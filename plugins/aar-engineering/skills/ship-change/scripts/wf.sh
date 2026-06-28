@@ -1189,18 +1189,18 @@ readonly_probe_source(){
   esac
 }
 
-# readonly_probe_one_push_url <url> — `git push --dry-run` ONE url with ALL credential prompts disabled and
-# the engineer credential explicitly absent, so only the AMBIENT credential is exercised. --dry-run performs
-# auth/negotiation but does NOT update the remote. Sets RO_PUSH_RC: 0 accepted (FAIL signal), 2 auth-rejected
-# (read-only), 3 inconclusive (non-auth error). Sets RO_PUSH_OUT to the captured output.
-RO_PUSH_RC=3; RO_PUSH_OUT=""
+# readonly_probe_one_push_url <url> [worktree] — `git push --dry-run` ONE url, non-mutating, under an isolated
+# config with a read-only credential replay. ASYMMETRIC: sets RO_PUSH_RC=0 only when the dry-run is ACCEPTED
+# (the FAIL signal); RO_PUSH_RC=1 for EVERY other outcome (rejected / transport failure / timeout / error) —
+# "not demonstrably writable", which is advisory and never a read-only PASS.
+RO_PUSH_RC=1
 readonly_probe_one_push_url(){
-  local url=$1 wt=${2:-} tmp rc fillrc to=${WF_GIT_PROBE_TIMEOUT:-20} shim
-  RO_PUSH_RC=3; RO_PUSH_OUT=""
+  local url=$1 wt=${2:-} tmp rc to=${WF_GIT_PROBE_TIMEOUT:-20} shim
+  RO_PUSH_RC=1
   # the context git uses for resolving the AMBIENT credential: the TARGET WORKTREE when supplied (so its
-  # worktree-LOCAL + path-scoped credential config is honored — #166 code-review F1 r11), else the default ctx.
+  # worktree-LOCAL credential config is honored), else the default ctx.
   local credctx=(); [ -n "$wt" ] && [ -d "$wt" ] && credctx=(-C "$wt")
-  tmp=$(mktemp -d) || { RO_PUSH_OUT="mktemp failed"; RO_PUSH_RC=3; return; }
+  tmp=$(mktemp -d) || { RO_PUSH_RC=1; return; }
   (
     git -C "$tmp" init -q 2>/dev/null
     # LOCAL commit identity so the probe commit never depends on a global git user.name/email (#166 F2), AND
@@ -1209,7 +1209,7 @@ readonly_probe_one_push_url(){
     git -C "$tmp" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
         -c user.name="wf-doctor" -c user.email="wf-doctor@local" \
         commit -q --no-verify --allow-empty -m probe 2>/dev/null
-  ) || { rm -rf "$tmp"; RO_PUSH_OUT="could not stage a probe commit"; RO_PUSH_RC=3; return; }
+  ) || { rm -rf "$tmp"; RO_PUSH_RC=1; return; }
   # MUTATION-SAFE credential layer (#166 code-review F1 r8/r9/r10). A successful auth on a `--dry-run` push
   # makes git call the credential helper's `store` (verified empirically), which MUTATES the user's credential
   # store; and git honors URL-SCOPED helpers + helpers WITH ARGUMENTS that hand-rolled shim parsing gets wrong.
@@ -1238,20 +1238,19 @@ readonly_probe_one_push_url(){
     *) parsed_host=github.com; parsed_path="" ;;
   esac
   # `git credential fill` resolves the ambient credential using git's OWN rules (handles helpers with args,
-  # url-scoped helpers, !-commands) and performs only `get` — no mutation. We run it in the TARGET WORKTREE
-  # context (credctx) so worktree-local + PATH-scoped helpers are honored, and include the URL path so a
-  # path-scoped `credential.https://host/owner/repo.helper` matches (#166 F1 r11). Prompts disabled so it can't
-  # block; capture the EXIT STATUS so a TIMEOUT is treated as inconclusive, never a silent empty-cred read-only
-  # (#166 F3 r11).
+  # url-scoped helpers, !-commands) and performs only `get` — no mutation. Run in the TARGET WORKTREE context
+  # (credctx) so worktree-local helpers are honored. We DO pass the URL path, but we DON'T force
+  # `credential.useHttpPath` — git's DEFAULT path behavior is what a real push uses, so a host-wide
+  # credential-store entry is still resolved (the asymmetric design means we only care about the ACCEPTED case;
+  # we no longer try to faithfully classify the rejected case, so the host-vs-path tension is moot — #166 r15).
+  # Prompts disabled so it can't block; a TIMEOUT just yields an empty cred -> the push will auth-reject ->
+  # advisory (no false read-only PASS is possible from this surface).
   cred_in=$(printf 'protocol=%s\nhost=%s\n' "$parsed_proto" "$parsed_host")
   [ -n "$parsed_path" ] && cred_in=$(printf '%s\npath=%s' "$cred_in" "$parsed_path")
   [ -n "$parsed_user" ] && cred_in=$(printf '%s\nusername=%s' "$cred_in" "$parsed_user")
   cred_in=$(printf '%s\n\n' "$cred_in")
   cred_out=$(printf '%s' "$cred_in" | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
-               timeout "$to" git "${credctx[@]}" -c credential.useHttpPath=true credential fill 2>/dev/null); fillrc=$?
-  if [ "$fillrc" = 124 ] || [ "$fillrc" = 137 ]; then
-    rm -rf "$tmp"; RO_PUSH_OUT="credential fill timed out after ${to}s"; RO_PUSH_RC=3; return
-  fi
+               timeout "$to" git "${credctx[@]}" credential fill 2>/dev/null || true)
   # build the static get-only replay helper (no-ops store/erase). Only meaningful for the HTTPS surface; SSH
   # auth uses the key, not this helper, and the isolated config + BatchMode handle the SSH side.
   {
@@ -1270,40 +1269,29 @@ readonly_probe_one_push_url(){
   # URL-scoped (credential.https://github.com.helper) — runs and writes the store (#166 F1 r9); then install
   # ONLY the read-only shim, which forwards `get` to the snapshotted helpers but no-ops store/erase. The repo's
   # OWN tmp config carries the shim + ssh/hooks settings via -c, which survive the global/system isolation.
-  RO_PUSH_OUT=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
+  rc=0
+  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
         GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
         timeout "$to" git -C "$tmp" -c core.askPass= -c core.hooksPath=/dev/null \
         -c "credential.helper=$shim" \
         -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
-        push --dry-run --no-verify "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" 2>&1) ; rc=$?
+        push --dry-run --no-verify "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" >/dev/null 2>&1 || rc=$?
   rm -rf "$tmp"
-  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then RO_PUSH_OUT="timed out after ${to}s: $RO_PUSH_OUT"; RO_PUSH_RC=3; return; fi
-  if [ "$rc" = 0 ]; then RO_PUSH_RC=0; return; fi
-  # PRE-AUTH TRANSPORT FAILURES are NOT a read-only proof (#166 code-review F1 r3): an unknown/!verified host
-  # key, a name-resolution / connection failure, etc. fail BEFORE the credential is ever tested, so they must
-  # read INCONCLUSIVE (strict-fail), never read-only. Check these FIRST so they win over a generic match.
-  case "$RO_PUSH_OUT" in
-    *Host\ key\ verification*|*Could\ not\ resolve\ host*|*Connection\ timed\ out*|*Connection\ refused*|*Network\ is\ unreachable*|*Name\ or\ service\ not\ known*|*Temporary\ failure\ in\ name\ resolution*|*kex_exchange*|*Connection\ reset*)
-      RO_PUSH_RC=3; return ;;
-  esac
-  case "$RO_PUSH_OUT" in
-    # genuine AUTH/AUTHZ rejections (the credential was tested and refused) -> read-only on this surface.
-    # GitHub SSH authz denials: `ERROR: Permission to owner/repo.git denied to user`, a read-only deploy key
-    # (`remote: ERROR: … deploy key … read-only`), and the write-access-denied phrasings (#166 code-review F3).
-    *[Aa]uthentication\ failed*|*[Pp]ermission\ denied*|*403*|*[Cc]ould\ not\ read\ Username*|*terminal\ prompts\ disabled*|*[Ff]atal:\ could\ not\ read\ Username*|\
-    *Permission\ to\ *\ denied\ to\ *|*Write\ access\ to\ repository\ not\ granted*|*read-only*|*does\ not\ have\ push\ permission*|*The\ requested\ URL\ returned\ error:\ 40[13]*)
-      RO_PUSH_RC=2 ;;
-    *) RO_PUSH_RC=3 ;;   # anything else -> inconclusive (strict-fail), never an unproven PASS
-  esac
+  # ASYMMETRIC: ONLY an ACCEPTED dry-run (rc 0) is meaningful -> RC=0 (the caller raises a FAIL). EVERY other
+  # outcome — auth rejection, authz denial, pre-auth transport failure, timeout, any error — is simply "not
+  # demonstrably writable" -> RC=1 (advisory; never a read-only PASS). We no longer parse rejection messages to
+  # tell auth-reject from transport failure, because the caller treats them identically and the surface can
+  # never certify read-only anyway. This removes the entire fragile message-pattern classification (#166 r15).
+  if [ "$rc" = 0 ]; then RO_PUSH_RC=0; else RO_PUSH_RC=1; fi
 }
 
-# readonly_probe_git_push <repo> [worktree-dir] — probe the AMBIENT git-push surface, non-mutating. Probes the
-# ACTUAL origin push URL of <worktree-dir> when given (so an SSH remote backed by a write-capable ambient SSH
-# key is caught, not just the HTTPS surface — #166 code-review F1), AND the synthesized HTTPS url as a baseline.
-# If ANY probed url is ACCEPTED -> FAIL (an ambient credential can push). Read-only only if EVERY url is
-# auth-rejected. Returns 0 PASS, 2 FAIL, 3 inconclusive.
+# readonly_probe_git_push <repo> [worktree-dir] — probe the AMBIENT git-push surface, non-mutating, as a
+# ONE-DIRECTIONAL ALARM. Probes the worktree's actual GitHub origin push URL (when given) AND the synthesized
+# canonical GitHub HTTPS+SSH URLs. An ACCEPTED `git push --dry-run` -> FAIL (an ambient credential can push);
+# anything else is ADVISORY ONLY (this surface NEVER certifies read-only — see the asymmetry rationale below).
+# Returns 2 FAIL (accepted), 1 advisory (not demonstrably writable). Never returns a PASS.
 readonly_probe_git_push(){
-  local repo=$1 wt=${2:-} u urls=() accepted=0 rejected=0 inconclusive=0 origin_url
+  local repo=$1 wt=${2:-} u urls=() accepted=0 rejected=0 origin_url
   # the actual origin push URL (covers SSH + a non-default push url) when a worktree dir is supplied — but ONLY
   # if it's a real GitHub remote. A non-GitHub / custom-scheme remote could invoke an arbitrary remote-helper,
   # which a GitHub-credential detector must not execute (#166 code-review F2 r12); such an origin is skipped
@@ -1333,23 +1321,26 @@ readonly_probe_git_push(){
     */*/*) : ;;                                     # more than one slash -> not owner/repo
     */*) urls+=("https://github.com/$repo.git") ; urls+=("git@github.com:$repo.git") ;;
   esac
-  if [ "${#urls[@]}" = 0 ]; then echo "    ambient git push: skipped (no probeable remote url)"; return 3; fi
+  if [ "${#urls[@]}" = 0 ]; then echo "    ambient git push: no GitHub remote to probe (advisory; provenance is the gate)"; return 1; fi
   for u in "${urls[@]}"; do
     readonly_probe_one_push_url "$u" "$wt"
     case "$RO_PUSH_RC" in
       0) accepted=$((accepted+1)) ;;
-      2) rejected=$((rejected+1)) ;;
-      *) inconclusive=$((inconclusive+1)) ;;
+      *) rejected=$((rejected+1)) ;;   # auth-rejected OR inconclusive — both are merely "not demonstrably writable"
     esac
   done
+  # ASYMMETRIC by design (#166 code-review r15, confirmed cross-family): faithfully proving "a real push would
+  # be REJECTED" from a synthetic, non-mutating env is structurally leaky (credential helpers, useHttpPath
+  # host-vs-path scoping, url.insteadOf, http.extraHeader, ssh config, …) — every attempt to make the negative
+  # faithful either inherits a side effect or diverges from a real push. So the git-push surface is a
+  # ONE-DIRECTIONAL ALARM: an ACCEPTED dry-run is a hard FAIL (ambient push auth was demonstrably accepted);
+  # ANYTHING ELSE is ADVISORY ONLY and never contributes a read-only PASS. The categorical read-only PASS rests
+  # solely on API PROVENANCE. This makes the synthetic-env false-PASS class structurally impossible (the probe
+  # can only ADD a failure signal, never remove one).
   if [ "$accepted" -gt 0 ]; then
-    echo "    ambient git push: FAIL (--dry-run was ACCEPTED on a probed remote — an ambient credential can push; --dry-run did NOT update the remote)"; return 2
+    echo "    ambient git push: FAIL (--dry-run was ACCEPTED on a probed GitHub remote — an ambient credential can push; --dry-run did NOT update the remote)"; return 2
   fi
-  if [ "$rejected" -gt 0 ] && [ "$inconclusive" = 0 ]; then
-    echo "    ambient git push: read-only (--dry-run auth-rejected on every probed remote — no ambient push credential)"; return 0
-  fi
-  # mixed/inconclusive: at least one url could not be conclusively auth-rejected -> NOT a PASS (strict).
-  echo "    ambient git push: inconclusive (a probed remote gave a non-auth result; treat as unverified — strict-fail)"; return 3
+  echo "    ambient git push: no ambient push credential was accepted (advisory — this surface only ever raises a FAIL; the read-only PASS is decided by API provenance, never by this probe)"; return 1
 }
 
 # doctor_readonly_section <repo> — print the read-only-ambient report for ALL sources + the git surface.
@@ -1403,25 +1394,17 @@ doctor_readonly_section(){
   else
     echo "    WF_READONLY_TOKEN_CMD: not configured (instance has not wired the read-only minter seam)"
   fi
-  # --- ambient git-push surface --------------------------------------------------------------------------
+  # --- ambient git-push surface (ASYMMETRIC ALARM) -----------------------------------------------------------
+  # This surface only ever ADDS a FAIL (a demonstrably-accepted push); it NEVER grants the read-only PASS (that
+  # is API provenance). So a SKIPPED git probe — no-network mode, or no target — is NOT a fail-closed condition:
+  # it just means "this advisory alarm didn't run", and the provenance gate stands on its own. (#166 r15)
   if [ "${WF_DOCTOR_SKIP_LIVE_PROBES:-0}" = 1 ]; then
-    # In STRICT mode a skipped live probe is NOT a pass (#166 code-review F1 r5): READONLY-PASS must never be
-    # emitted while the git surface went untested. The skip stays available only for the non-gating reporter.
-    if [ "$strict" = 1 ]; then
-      echo "    ambient git push: NOT-VERIFIED (WF_DOCTOR_SKIP_LIVE_PROBES=1 in strict --readonly -> fail closed; unset it to run the live probe)"; DOCTOR_RO_FAIL=1
-    else
-      echo "    ambient git push: skipped (WF_DOCTOR_SKIP_LIVE_PROBES=1 — no-network mode; non-gating reporter)"
-    fi
+    echo "    ambient git push: skipped (WF_DOCTOR_SKIP_LIVE_PROBES=1 — no-network mode; advisory alarm only)"
   elif [ -n "$repo" ] || [ -n "$wt" ]; then
     gitrc=0; readonly_probe_git_push "$repo" "$wt" || gitrc=$?
-    [ "$gitrc" = 2 ] && DOCTOR_RO_FAIL=1
-    [ "$gitrc" = 3 ] && DOCTOR_RO_FAIL=1   # strict: inconclusive is NOT a PASS
-  elif [ "$strict" = 1 ]; then
-    # strict --readonly with NO probeable target cannot prove the git surface -> fail closed (#166 code-review
-    # F1 r6); the invariant is "strict PASS only when every surface was actually verified".
-    echo "    ambient git push: NOT-VERIFIED (no repo/worktree target in strict --readonly -> fail closed; pass an owner/repo or a worktree)"; DOCTOR_RO_FAIL=1
+    [ "$gitrc" = 2 ] && DOCTOR_RO_FAIL=1   # ONLY a demonstrably-accepted push fails closed
   else
-    echo "    ambient git push: skipped (no repo target)"
+    echo "    ambient git push: skipped (no repo target; advisory alarm only)"
   fi
   if [ "$any_present" = 0 ]; then
     echo "    (no ambient API credential present in this shell — nothing to certify; that is itself read-only-by-absence on the API surface)"
@@ -1739,7 +1722,7 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report life
     echo "wf.sh doctor --readonly"
     echo "  repo: $(redact_userinfo "$DREPO")"
     if doctor_readonly_section "$DREPO" "$DWT" 1; then
-      echo "READONLY-PASS: the ambient credential is authoritatively read-only on every probed source + surface"
+      echo "READONLY-PASS: every ambient API credential source is authoritatively read-only by provenance, and no ambient push credential was demonstrably accepted"
     else
       echo "READONLY-FAIL: the ambient credential is NOT authoritatively read-only (see FAIL/FAIL-CLOSED lines above) — demote the ambient credential / wire WF_READONLY_TOKEN_CMD+WF_READONLY_TOKEN_INFO_CMD"
       exit 1

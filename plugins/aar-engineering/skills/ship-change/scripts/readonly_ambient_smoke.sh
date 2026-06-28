@@ -217,10 +217,14 @@ else
   echo "$RO_OUT" | grep -q 'ambient git push: FAIL' && pass "git-push accepted -> FAIL" || fail "git-push FAIL not reported"
 fi
 
-# fixture 7: ambient git-push rejected -> read-only on the git surface
+# fixture 7 (ASYMMETRIC): a not-accepted git push is ADVISORY ONLY — it does NOT certify read-only and does
+# NOT block the PASS (the read-only-provenance API token still PASSes). The git surface never grants a PASS.
 : > "$MUTLOG"
-run_strict "RO_aaa" "" "" denied rejected || true
-echo "$RO_OUT" | grep -q 'ambient git push: read-only' && pass "git-push rejected -> read-only" || fail "git-push read-only not reported"
+if run_strict "RO_aaa" "" "" denied rejected; then
+  echo "$RO_OUT" | grep -q 'no ambient push credential was accepted' && pass "git-push not-accepted -> advisory note, PASS unaffected (asymmetric)" || fail "git-push advisory note not reported"
+else
+  fail "git-push not-accepted must NOT block the PASS (provenance is the gate)"
+fi
 
 # fixture 8 (F1): a WORKTREE whose origin push url is SSH and ACCEPTS, while the synthesized HTTPS surface
 # REJECTS -> the detector must STILL FAIL (it probes the actual origin push url, catching the SSH-key surface
@@ -235,10 +239,13 @@ if [ $? -eq 0 ]; then
 else
   echo "$RO_OUT" | grep -q 'ambient git push: FAIL' && pass "F1: SSH origin push accepted -> FAIL (probes actual origin url)" || fail "F1: SSH-surface false-pass not caught"
 fi
-# and the same worktree with SSH REJECTED + HTTPS REJECTED -> read-only (both surfaces auth-rejected)
+# and the same worktree with SSH REJECTED + HTTPS REJECTED -> advisory (not accepted); PASS unaffected.
 : > "$MUTLOG"
-RO_TARGET="$WT" RO_GIT_SSH=rejected run_strict "RO_aaa" "" "" denied rejected || true
-echo "$RO_OUT" | grep -q 'ambient git push: read-only' && pass "F1: SSH+HTTPS both rejected -> read-only" || fail "F1: both-rejected should be read-only"
+if RO_TARGET="$WT" RO_GIT_SSH=rejected run_strict "RO_aaa" "" "" denied rejected; then
+  echo "$RO_OUT" | grep -q 'no ambient push credential was accepted' && pass "F1: SSH+HTTPS both rejected -> advisory (PASS unaffected, asymmetric)" || fail "F1: both-rejected advisory note not reported"
+else
+  fail "F1: both-rejected must NOT block the PASS"
+fi
 
 # fixture 8b (F1 r4): an owner/repo-ONLY target (no worktree) must STILL probe the canonical SSH surface — an
 # ambient SSH key that can push must FAIL even without a worktree origin. SSH accepts, HTTPS rejects -> FAIL.
@@ -250,14 +257,14 @@ else
   echo "$RO_OUT" | grep -q 'ambient git push: FAIL' && pass "F1 r4: owner/repo target probes canonical SSH url -> FAIL" || fail "F1 r4: SSH url not synthesized for owner/repo target"
 fi
 
-# fixture 9 (F1 r3): a PRE-AUTH transport failure (host key verification failed) must read INCONCLUSIVE ->
-# strict-FAIL, NOT read-only — SSH failed before the credential was ever tested.
+# fixture 9 (F1 r3, ASYMMETRIC): a PRE-AUTH transport failure (host key verification) is NOT-ACCEPTED ->
+# advisory; it never certifies read-only AND never blocks the PASS (the surface is fail-only; only an ACCEPTED
+# push matters). So a hostkey outcome leaves the PASS intact.
 : > "$MUTLOG"
-RO_TARGET="$WT" RO_GIT_SSH=hostkey run_strict "RO_aaa" "" "" denied rejected
-if [ $? -eq 0 ]; then
-  fail "host-key-verification (pre-auth) must NOT certify read-only (strict-fail)"
+if RO_TARGET="$WT" RO_GIT_SSH=hostkey run_strict "RO_aaa" "" "" denied rejected; then
+  echo "$RO_OUT" | grep -q 'no ambient push credential was accepted' && pass "F1 r3: pre-auth host-key failure -> advisory (not accepted; never certifies read-only)" || fail "F1 r3: hostkey advisory note not reported"
 else
-  echo "$RO_OUT" | grep -q 'ambient git push: inconclusive' && pass "F1 r3: pre-auth host-key failure -> inconclusive (strict-fail, not read-only)" || fail "F1 r3: pre-auth failure should be inconclusive"
+  fail "F1 r3: a pre-auth transport failure must NOT block the PASS (only an accepted push fails)"
 fi
 
 # fixture 9b (F2/422): the advisory probe classifies HTTP 422 as WRITABLE. Token whose provenance says
@@ -269,25 +276,37 @@ else
   echo "$RO_OUT" | grep -q 'advisory probe accepted a write' && pass "F2: HTTP 422 advisory classified writable (contradiction FAIL)" || fail "F2: 422 not treated as writable"
 fi
 
-# fixture 10b (F1 r6): strict --readonly with NO probeable target must fail closed on the git surface. The CLI
-# always defaults a repo target, so this branch is exercised by a structural check that the no-target strict
-# branch both emits NOT-VERIFIED and sets the fail flag (DOCTOR_RO_FAIL=1 on the same line).
-if grep -q 'no repo/worktree target in strict --readonly -> fail closed.*DOCTOR_RO_FAIL=1' "$WF"; then
-  pass "F1 r6: strict no-target branch fails closed (NOT-VERIFIED + DOCTOR_RO_FAIL=1)"
+# fixture 10b (F1 r6 -> ASYMMETRIC): a skipped/absent git-push surface does NOT fail closed — the surface only
+# ever ADDS a FAIL, so its absence leaves the provenance-decided PASS intact. With a read-only-provenance token
+# and the live probes skipped, strict --readonly still PASSes.
+: > "$MUTLOG"
+if PATH="$BIN:$PATH" GH_TOKEN="RO_aaa" WF_DOCTOR_SKIP_LIVE_PROBES=1 \
+   WF_READONLY_TOKEN_CMD="" WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" \
+   bash "$WF" doctor claude "$REPO" --readonly >/dev/null 2>&1; then
+  pass "F1 r6/asymmetric: skipped git surface does NOT fail closed (provenance decides the PASS)"
 else
-  fail "F1 r6: strict no-target fail-closed branch missing or does not set DOCTOR_RO_FAIL"
+  fail "F1 r6/asymmetric: a skipped git surface must not block a provenance-read-only PASS"
 fi
 
-# fixture 10 (F1 r5): strict --readonly with WF_DOCTOR_SKIP_LIVE_PROBES=1 must NOT emit READONLY-PASS — the
-# git surface was never tested, so strict mode fails closed (the skip is only for the non-gating reporter).
+# fixture 10 (ASYMMETRIC): strict --readonly with WF_DOCTOR_SKIP_LIVE_PROBES=1 and a read-only-provenance token
+# PASSes (the git surface is an advisory alarm; skipping it never blocks the provenance PASS).
 : > "$MUTLOG"
 RO_OUT=$(PATH="$BIN:$PATH" GH_TOKEN="RO_aaa" WF_DOCTOR_SKIP_LIVE_PROBES=1 \
   WF_READONLY_TOKEN_CMD="" WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" \
   bash "$WF" doctor claude "$REPO" --readonly 2>&1); rc=$?
 if [ "$rc" = 0 ]; then
-  fail "strict --readonly with skipped live probes must NOT pass (F1 r5)"
+  echo "$RO_OUT" | grep -q 'advisory alarm only' && pass "F1 r5/asymmetric: skip-live-probes -> git surface advisory, provenance PASS holds" || fail "F1 r5: expected advisory-alarm note in skip mode"
 else
-  echo "$RO_OUT" | grep -q 'NOT-VERIFIED' && pass "F1 r5: strict --readonly + skip-live-probes -> fail closed (NOT-VERIFIED)" || fail "F1 r5: expected NOT-VERIFIED git-push line in strict skip mode"
+  fail "F1 r5/asymmetric: skip-live-probes must not block a provenance-read-only PASS"
+fi
+# AND: a WRITE-capable token with live probes skipped still FAILs (provenance gate independent of the git surface).
+: > "$MUTLOG"
+if PATH="$BIN:$PATH" GH_TOKEN="RW_bbb" WF_DOCTOR_SKIP_LIVE_PROBES=1 \
+   WF_READONLY_TOKEN_CMD="" WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" \
+   bash "$WF" doctor claude "$REPO" --readonly >/dev/null 2>&1; then
+  fail "write-capable token must FAIL even with the git surface skipped (provenance gate)"
+else
+  pass "provenance gate stands alone: write-capable token FAILs even when the git surface is skipped"
 fi
 
 # --- MUTATION-FREEDOM: across ALL fixtures, the only write-shaped calls were the advisory PATCH probe and the
@@ -332,22 +351,16 @@ if grep -q 'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_N
 else
   fail "F1 r8/r9/r10: probe does not isolate config + use git-native credential resolution"
 fi
-# F1 r11: credential resolution runs in the TARGET WORKTREE context (credctx -C "$wt") with the URL PATH +
-# credential.useHttpPath, so worktree-local + path-scoped credential config is honored (structural).
+# F1 r11 (asymmetric): credential resolution runs in the TARGET WORKTREE context (credctx -C "$wt") so a
+# worktree-local credential helper is honored. We DON'T force credential.useHttpPath (git's default path
+# behavior is what a real push uses, so a host-wide credential-store entry is resolved too — the host-vs-path
+# tension is moot under the asymmetric design). Structural.
 if grep -q 'credctx=(-C "\$wt")' "$WF" \
-   && grep -q 'git "${credctx\[@\]}" -c credential.useHttpPath=true credential fill' "$WF" \
-   && grep -q 'path=%s' "$WF"; then
-  pass "F1 r11: credential fill runs in the worktree context with the URL path (worktree-local/path-scoped cfg honored)"
+   && grep -q 'git "${credctx\[@\]}" credential fill' "$WF" \
+   && ! grep -q 'useHttpPath=true' "$WF"; then
+  pass "F1 r11/asymmetric: credential fill runs in the worktree context, no forced useHttpPath (host-wide creds resolved)"
 else
-  fail "F1 r11: credential fill does not use the worktree context + URL path"
-fi
-# F3 r11: a TIMEOUT during the credential snapshot is treated as inconclusive (fail-closed), not a silent
-# empty-credential read-only (structural — the timeout branch returns RC=3 before building the replay helper).
-if grep -q 'credential fill timed out after' "$WF" && grep -q 'fillrc=124' "$WF" 2>/dev/null || \
-   grep -q 'fillrc" = 124' "$WF"; then
-  pass "F3 r11: credential-fill timeout -> inconclusive (fail-closed, not empty-cred read-only)"
-else
-  fail "F3 r11: credential-fill timeout is not handled as inconclusive"
+  fail "F1 r11/asymmetric: credential fill context/useHttpPath handling is wrong"
 fi
 # F1 r12 (structural): the advisory `gh api` probe is bounded by `timeout` (no unbounded hang).
 if grep -q 'timeout "$to" env GH_TOKEN="$tok" WF_GH_INTERNAL=1 gh api -X PATCH' "$WF"; then
@@ -488,13 +501,17 @@ else
   fail "F1 r10: helper-with-args not resolved by git credential fill (out=[$(printf '%s' "$R10OUT" | tr '\n' '|')] ops=[$(cat "$R10LOG")])"
 fi
 
-# --- F3: GitHub SSH authz-denial messages classify as read-only (auth-rejected), not inconclusive.
+# --- F3 (ASYMMETRIC): a GitHub SSH authz-denial is NOT-ACCEPTED -> advisory; PASS unaffected (the surface
+# never needs to classify the rejection reason — only an accepted push matters).
 WT3="$TMP/wt-authz"; mkdir -p "$WT3"
 "$REAL_GIT" -C "$WT3" init -q
 "$REAL_GIT" -C "$WT3" remote add origin "git@github.com:o/r.git"
 : > "$MUTLOG"
-RO_TARGET="$WT3" RO_GIT_SSH=authzdenied run_strict "RO_aaa" "" "" denied rejected || true
-echo "$RO_OUT" | grep -q 'ambient git push: read-only' && pass "F3: GitHub SSH 'Permission to X denied to Y' -> read-only (auth-rejected)" || fail "F3: SSH authz-denial not classified read-only"
+if RO_TARGET="$WT3" RO_GIT_SSH=authzdenied run_strict "RO_aaa" "" "" denied rejected; then
+  echo "$RO_OUT" | grep -q 'no ambient push credential was accepted' && pass "F3/asymmetric: SSH authz-denial -> advisory (not accepted), PASS unaffected" || fail "F3: authz-denial advisory note not reported"
+else
+  fail "F3/asymmetric: an authz-denied (not-accepted) push must NOT block the PASS"
+fi
 
 # --- plain doctor prints the read-only section as a labeled reporter (does not require engineer identity to PASS
 #     for the read-only verdict to print). We only assert the section + verdict line appear.
