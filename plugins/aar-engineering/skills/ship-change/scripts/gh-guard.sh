@@ -205,8 +205,9 @@ case "$sub" in
         # capability layer closes — block them like any other credential mutation (#165 review).
         next_word $((sub_idx+2)); gcop=$NEXT_WORD   # the op after `git-credential`
         case "$gcop" in
-          get) exec_real_gh "$@" ;;
-          *)   guard_die "auth git-credential $gcop" ;;   # store|erase|<missing> -> block
+          get)         exec_real_gh "$@" ;;
+          store|erase) guard_die "auth git-credential $gcop" ;;          # known mutating ops — safe to name
+          *)           guard_die "auth git-credential write" ;;          # unknown op: generic shape, never echo the raw token (#165 review)
         esac
         ;;
       # login/refresh/setup-git/logout MUTATE the stored credential -> reopen the stored-cred hole -> block

@@ -403,7 +403,10 @@ gh_author(){  # gh_author <author-token-or-empty> <gh args...>
 # to a plain push (ambient identity) for unenforced/permissive installs.
 git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args...>
   local tok=$1 wt=$2; shift 2
-  if [ -z "$tok" ]; then WF_GH_INTERNAL=1 git -C "$wt" push "$@"; return; fi
+  # No-token fallback (unenforced/permissive installs): plain push with ambient auth. We do NOT set
+  # WF_GH_INTERNAL here — a pre-push hook must not inherit the guard-bypass marker (#165 review); the guard's
+  # `auth git-credential get` allowlist already lets git's credential helper through without it.
+  if [ -z "$tok" ]; then git -C "$wt" push "$@"; return; fi
   # Derive the effective PUSH url for origin (honors an explicit `remote set-url --push`, else the fetch url).
   local remote_url owner_repo push_url
   remote_url=$(git -C "$wt" remote get-url --push origin 2>/dev/null) || die "git_push_author: no origin remote in $wt"
@@ -460,8 +463,10 @@ git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args..
       ;;
     *)
       # Non-GitHub push remote (e.g. a local file:// remote in tests, or a mirror). No tokenized-URL rewrite
-      # applies; push as given with the token in the env (and the marker so any gh credential-helper passes).
-      WF_GH_INTERNAL=1 GH_TOKEN="$tok" git -C "$wt" push "$@"
+      # applies; push as given with the token in the env. We do NOT set WF_GH_INTERNAL — a pre-push hook must
+      # not inherit the guard-bypass marker (#165 review); the guard allowlists `auth git-credential get` so
+      # git's credential helper still works without it.
+      GH_TOKEN="$tok" git -C "$wt" push "$@"
       ;;
   esac
 }
