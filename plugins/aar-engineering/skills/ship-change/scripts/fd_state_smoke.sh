@@ -110,5 +110,28 @@ hi_bw="$TMP/hi_bw.txt"; printf 'zzzzzzzzzzzz\n' > "$hi_bw"
 if out=$(fd_bump_round "$udir/c.json" "shaNEW" "$hi_bw" 1 2>/dev/null); then no "bump-rc1-on-write-fail (echoed $out, rc 0)"; else ok bump-rc1-on-write-fail; fi
 chmod 755 "$udir"
 
+# fd_merge_canonical_round: the MONOTONIC-counter guard (#137). An author save must never lower/delete `round`.
+# Build a canonical comment body the way fd_save posts it (a ```json fenced block).
+canon_body(){ printf '<!-- m -->\n\n```json\n%s\n```\n' "$1"; }
+# canonical AHEAD of local -> adopt canonical round + its fp/sha into the cache (prevents regression).
+mc="$TMP/mc.json"; echo '{"round":1,"findings":[]}' > "$mc"
+fd_merge_canonical_round "$mc" "$(canon_body '{"round":5,"last_review_fingerprint":"FP5","last_reviewed_sha":"SHA5"}')"
+[ "$(fd_round "$mc")" = 5 ] && ok merge-adopts-higher-canonical || no "merge-adopts-higher-canonical ($(fd_round "$mc"))"
+[ "$(fd_last_reviewed_sha "$mc")" = "SHA5" ] && ok merge-adopts-canonical-sha || no "merge-adopts-canonical-sha ($(fd_last_reviewed_sha "$mc"))"
+# local AHEAD of canonical (finish's advancing save) -> keep local, do NOT regress.
+mc2="$TMP/mc2.json"; echo '{"round":6,"last_reviewed_sha":"SHALOCAL","findings":[]}' > "$mc2"
+fd_merge_canonical_round "$mc2" "$(canon_body '{"round":5,"last_reviewed_sha":"SHA5"}')"
+[ "$(fd_round "$mc2")" = 6 ] && ok merge-keeps-higher-local || no "merge-keeps-higher-local ($(fd_round "$mc2"))"
+[ "$(fd_last_reviewed_sha "$mc2")" = "SHALOCAL" ] && ok merge-keeps-local-sha || no "merge-keeps-local-sha ($(fd_last_reviewed_sha "$mc2"))"
+# author save that DROPPED the round (cache has no round) but canonical has one -> canonical wins (no reset).
+mc3="$TMP/mc3.json"; echo '{"findings":[{"id":"x","severity":"HIGH","status":"fixed"}]}' > "$mc3"
+fd_merge_canonical_round "$mc3" "$(canon_body '{"round":3,"last_reviewed_sha":"SHA3"}')"
+[ "$(fd_round "$mc3")" = 3 ] && ok merge-restores-dropped-round || no "merge-restores-dropped-round ($(fd_round "$mc3"))"
+[ "$(jq -r '.findings[0].id' "$mc3")" = "x" ] && ok merge-preserves-findings || no "merge-preserves-findings"
+# no/empty/unparseable canonical -> no-op, local untouched.
+mc4="$TMP/mc4.json"; echo '{"round":2,"findings":[]}' > "$mc4"
+fd_merge_canonical_round "$mc4" ""; [ "$(fd_round "$mc4")" = 2 ] && ok merge-empty-canonical-noop || no "merge-empty-canonical-noop ($(fd_round "$mc4"))"
+fd_merge_canonical_round "$mc4" "no json fence here"; [ "$(fd_round "$mc4")" = 2 ] && ok merge-unparseable-canonical-noop || no "merge-unparseable-canonical-noop ($(fd_round "$mc4"))"
+
 if [ "$fails" -eq 0 ]; then echo "fd_state_smoke: ALL PASS"; else echo "fd_state_smoke: FAILURES"; fi
 exit "$fails"

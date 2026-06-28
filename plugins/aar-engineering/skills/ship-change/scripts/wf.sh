@@ -647,8 +647,37 @@ fd_load(){  # fd_load <wt> <repo> <pr> <tok> -> echoes cache path (canonical PR 
   fi
   printf '%s\n' "$cache"
 }
-fd_save(){  # fd_save <wt> <repo> <pr> <tok> — post the cache as a new canonical comment; RETURNS the gh rc.
-  local wt=$1 repo=$2 pr=$3 tok=$4 cache; cache=$(fd_cache "$wt")
+# fd_merge_canonical_round (#137): the MONOTONIC-counter guard, factored out of fd_save so it is unit-testable
+# without GitHub. The non-convergence `round` is reviewer-owned and monotonic — an author-facing `fdispo save`
+# of a hand-edited cache (which carries only finding dispositions) must NEVER lower or delete it, or the author
+# could reset the backstop and keep spending reviews past the threshold. Given the CANONICAL comment body (as
+# read from GitHub) and the local <cache>, if canonical's round is AHEAD of the cache's, adopt canonical's
+# round + its matching fingerprint + last_reviewed_sha into the cache (so the about-to-post save can't regress
+# it). finish's own advancing save wins naturally — its cache already holds the just-incremented, higher round.
+# Args: <cache> <canonical-comment-body>. No-op on empty/unparseable canonical (best-effort; finish's advancing
+# save is independently fail-closed and the gate re-derives findings from GitHub regardless).
+fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
+  local cache=$1 cbody=$2 cjson cround lround fp sha
+  [ -n "$cbody" ] || return 0
+  cjson=$(printf '%s' "$cbody" | sed -n '/```json/,/```/p' | sed '1d;$d' \
+    | jq -c '{r:(.round // 0), fp:(.last_review_fingerprint // ""), sha:(.last_reviewed_sha // "")}' 2>/dev/null) || return 0
+  [ -n "$cjson" ] || return 0
+  cround=$(printf '%s' "$cjson" | jq -r '.r' 2>/dev/null); case "$cround" in ''|*[!0-9]*) cround=0 ;; esac
+  lround=$(jq -r '(.round // 0)' "$cache" 2>/dev/null); case "$lround" in ''|*[!0-9]*) lround=0 ;; esac
+  if [ "$cround" -gt "$lround" ] 2>/dev/null; then
+    fp=$(printf '%s' "$cjson" | jq -r '.fp'); sha=$(printf '%s' "$cjson" | jq -r '.sha')
+    jq --argjson r "$cround" --arg fp "$fp" --arg sha "$sha" \
+      '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
+      && mv "$cache.tmp" "$cache" || { rm -f "$cache.tmp" 2>/dev/null || true; }
+  fi
+}
+# fd_save posts the local cache as the new canonical comment, after guarding the monotonic counter
+# (fd_merge_canonical_round). RETURNS the gh post rc.
+fd_save(){  # fd_save <wt> <repo> <pr> <tok>
+  local wt=$1 repo=$2 pr=$3 tok=$4 cache cbody; cache=$(fd_cache "$wt")
+  cbody=$(gh_author "$tok" -R "$repo" pr view "$pr" --json comments \
+    --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null || true)
+  fd_merge_canonical_round "$cache" "$cbody"
   printf '%s\n\n## Finding dispositions — disposition-aware merge gate (canonical, latest)\n\n```json\n%s\n```\n' \
     "$FD_MARKER" "$(cat "$cache")" | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1
 }

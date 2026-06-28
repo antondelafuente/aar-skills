@@ -94,6 +94,12 @@ The load-bearing decisions:
    - A *present-but-malformed* `round` in the loaded state (a corrupt or hand-edited disposition comment) is
      treated as corruption: `finish` dies up front rather than letting the safe-reader reset it to `0` and
      defeat the backstop. Absent / null stays back-compatible `0`.
+   - The counter is **monotonic and reviewer-owned**: every `fd_save` (including the author-facing
+     `wf.sh fdispo save`, which posts a hand-edited cache carrying only finding dispositions) first re-reads
+     the canonical `round` from the PR and carries forward `MAX(local, canonical)` with its matching
+     fingerprint + `last_reviewed_sha`. An author save can therefore never *lower or delete* the counter and
+     reset the backstop; `finish`'s own advancing save still wins (its cache already holds the higher,
+     just-incremented round).
 
    Idempotence holds across a failed save because the PR comment is the source of truth: a re-run reloads the
    last *persisted* state and re-increments from there.
