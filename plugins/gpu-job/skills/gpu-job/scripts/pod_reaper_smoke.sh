@@ -32,10 +32,13 @@ deleted(){ grep -qx "$1" "$DEL_LOG"; }    # was pod $1 deleted?
 # --- provider stubs (exported so pod_reaper.sh's seams pick them up) ---
 cat > "$TMP/list.sh"   <<EOF
 #!/bin/bash
-# emit "<pod-id> <name>" for the "live" pods of key \$1. A per-key file pods_<secret>.txt partitions
-# pods by account (realistic — a pod belongs to ONE key); else the shared pods.txt (any key).
+# emit "<pod-id> <name>" for the "live" pods of key \$1. A key listed in $TMP/listfail simulates a
+# provider list FAILURE (auth/HTTP/timeout) -> exit 1. A per-key file pods_<secret>.txt partitions pods
+# by account (realistic — a pod belongs to ONE key); else the shared pods.txt (any key).
+grep -qx "\$1" "$TMP/listfail" 2>/dev/null && exit 1
 if [ -f "$TMP/pods_\$1.txt" ]; then cat "$TMP/pods_\$1.txt"; else cat "$TMP/pods.txt" 2>/dev/null || true; fi
 EOF
+: > "$TMP/listfail"
 cat > "$TMP/del.sh"    <<EOF
 #!/bin/bash
 echo "\$2" >> "$DEL_LOG"      # record that a delete was ATTEMPTED for this pod id
@@ -120,6 +123,10 @@ PY
 XKEY=$(lease intent OTHER_KEY --expiry-min -1)   # pending intent under key_ref OTHER_KEY
 # === fixture 11: an expired lease whose DELETE is NOT ACCEPTED (non-2xx) -> NOT closed, reopened (round-4 Finding 2) ===
 DFAIL=$(mk_lease pod-dfail -1 RUNPOD_API_KEY); echo pod-dfail >> "$TMP/delfail"
+# === fixture 12: a lease under a key whose pod-LIST fails -> report-unlistable, NOT treated as zero
+#     pods (round-5 Finding 3). The key's resolved secret is registered as list-failing. ===
+FK=$(mk_lease pod-fk 120 FAILKEY)   # fresh provisional lease under key_ref FAILKEY
+echo "secret-for-FAILKEY" >> "$TMP/listfail"
 # === fixture 5: legacy contract-1 leases, keepalive future / inconclusive / past ===
 LF=$(mk_lease pod-lf -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo future       > "$TMP/keepalive_pod-lf"
 LI=$(mk_lease pod-li -1 RUNPOD_API_KEY 1 9.9.9.9:22); echo ""           > "$TMP/keepalive_pod-li"
@@ -200,6 +207,8 @@ deleted pod-dfail && ok dfail-delete-attempted || no dfail-delete-attempted
 dfail_state=$(lease show "$DFAIL" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')
 case "$dfail_state" in provisional|enriched|intent) ok dfail-not-closed-reopened ;; *) no "dfail-not-closed-reopened ($dfail_state)" ;; esac
 if lease is-reapable "$DFAIL"; then ok dfail-reapable-again; else no dfail-reapable-again; fi
+# round-5 Finding 3: a key whose pod-list fails is REPORTED unlistable, not silently zero pods
+echo "$OUT" | grep -q "report-unlistable" && ok list-failure-reported || no list-failure-reported
 
 # === locked-reap race (Finding 1): a refresh that lands before the reaper's in-lock recheck SAVES
 #     the pod. Simulate by refreshing the expired lease to a future expiry, THEN sweeping. ===

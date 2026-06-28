@@ -16,15 +16,20 @@ NONCE=${2:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
 KEY_NAME=$(grep -E "^API_KEY_ENV=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2-); KEY_NAME="${API_KEY_ENV:-${KEY_NAME:-RUNPOD_API_KEY}}"
 KEY=$(grep -E "^$KEY_NAME=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2- || eval echo "\${$KEY_NAME:?}")
-curl -s -X DELETE -H "Authorization: Bearer $KEY" -H "User-Agent: gpu-job" \
-  "https://rest.runpod.io/v1/pods/$PID" >/dev/null && echo "deleted $PID"
+# Capture the DELETE's HTTP status — a non-2xx (wrong key, auth/network error) must NOT be trusted as a
+# deletion even if a follow-up GET 404s (a wrong-key GET also 404s). round-5 Finding 1.
+del_http=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 60 \
+  -X DELETE -H "Authorization: Bearer $KEY" -H "User-Agent: gpu-job" \
+  "https://rest.runpod.io/v1/pods/$PID" 2>/dev/null) || del_http=000
+case "$del_http" in 200|201|202|204) del_ok=1; echo "deleted $PID (HTTP $del_http)";; *) del_ok=0; echo "DELETE $PID returned HTTP $del_http (not accepted)" >&2;; esac
 
-# Close the lease ONLY after verifying the pod is actually gone on the control plane. FAIL-CLOSED:
-# close only on a 404 or a parseable 200 showing NOT-RUNNING; a transient curl/HTTP/JSON failure is
-# INCONCLUSIVE and leaves the lease open for the standing reaper to retry (never closes a still-billing
-# pod on an unreadable response).
+# Close the lease ONLY after the DELETE was ACCEPTED (2xx) AND the pod is verified gone on the control
+# plane. FAIL-CLOSED: an unaccepted DELETE, or a transient curl/HTTP/JSON failure on the verify, is
+# INCONCLUSIVE and leaves the lease IMMEDIATELY reapable for the standing reaper to retry (never closes
+# a still-billing pod).
 if [ -n "$NONCE" ] && [ -f "$HERE/pod_lease.sh" ]; then
-  body=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $KEY" -H "User-Agent: gpu-job" \
+  body=$(curl -s -w '\n%{http_code}' --connect-timeout 15 --max-time 60 \
+           -H "Authorization: Bearer $KEY" -H "User-Agent: gpu-job" \
            "https://rest.runpod.io/v1/pods/$PID" 2>/dev/null) || body=""
   verdict=$(printf '%s' "$body" | python3 -c '
 import json, sys
@@ -45,13 +50,13 @@ if http in ("200", "201"):
 else:
     print("inconclusive")
 ' 2>/dev/null || echo inconclusive)
-  if [ "$verdict" = gone ]; then
-    bash "$HERE/pod_lease.sh" close "$NONCE" >/dev/null && echo "lease $NONCE closed (delete verified gone)"
+  if [ "$del_ok" = 1 ] && [ "$verdict" = gone ]; then
+    bash "$HERE/pod_lease.sh" close "$NONCE" >/dev/null && echo "lease $NONCE closed (delete accepted + verified gone)"
   else
     # Unverified delete: mark the lease IMMEDIATELY reapable so the standing reaper retries it on the
     # NEXT sweep, not hours from now when the run's expiry would have lapsed (round-4 Finding 3).
     bash "$HERE/pod_lease.sh" expire "$NONCE" >/dev/null 2>&1 || true
-    echo "WARNING: pod $PID delete NOT verified gone ($verdict) — lease $NONCE expired for the reaper to retry promptly (NOT closed)" >&2
+    echo "WARNING: pod $PID delete not confirmed (accepted=$del_ok, verify=$verdict) — lease $NONCE expired for the reaper to retry promptly (NOT closed)" >&2
   fi
 fi
 

@@ -73,13 +73,26 @@ resolve_key(){ # <key-ref>
   printf '%s' "$v"
 }
 
-list_pods(){ # <key> -> "<pod-id> <name>" lines
+# list_pods: print "<pod-id> <name>" per RUNNING pod, exit 0 on success. A non-2xx, network timeout, or
+# unparseable body is exit nonzero (round-5 Finding 3) so the caller can REPORT the key as unlistable
+# instead of silently treating it as zero live pods (which would hide unknown/half-born pods).
+list_pods(){ # <key>
   if [ -n "${GPU_JOB_LIST_PODS_CMD:-}" ]; then $GPU_JOB_LIST_PODS_CMD "$1"; return; fi
-  curl -s -H "Authorization: Bearer $1" -H "User-Agent: gpu-job" https://rest.runpod.io/v1/pods \
-    | python3 -c "import json,sys
-d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('data',d)
+  local body http
+  body=$(curl -s -w '\n%{http_code}' --connect-timeout 15 --max-time 60 \
+         -H "Authorization: Bearer $1" -H "User-Agent: gpu-job" https://rest.runpod.io/v1/pods 2>/dev/null) || return 1
+  http=$(printf '%s' "$body" | tail -1)
+  body=$(printf '%s' "$body" | sed '$d')
+  case "$http" in 200|201) : ;; *) return 1 ;; esac
+  printf '%s' "$body" | python3 -c "import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+d=d if isinstance(d,list) else d.get('data',d)
+if not isinstance(d,list): sys.exit(1)
 for p in d:
-    if p.get('desiredStatus')=='RUNNING': print(p['id'], p.get('name',''))" 2>/dev/null
+    if isinstance(p,dict) and p.get('desiredStatus')=='RUNNING': print(p['id'], p.get('name',''))"
 }
 
 # delete_pod: exit 0 ONLY on an ACCEPTED delete (2xx). A non-2xx (incl. a wrong-key 404, auth failure,
@@ -88,8 +101,9 @@ for p in d:
 delete_pod(){ # <key> <pod-id>
   if [ -n "${GPU_JOB_DELETE_POD_CMD:-}" ]; then $GPU_JOB_DELETE_POD_CMD "$1" "$2"; return; fi
   local http
-  http=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $1" \
-         -H "User-Agent: gpu-job" "https://rest.runpod.io/v1/pods/$2" 2>/dev/null) || return 1
+  http=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 60 -X DELETE \
+         -H "Authorization: Bearer $1" -H "User-Agent: gpu-job" \
+         "https://rest.runpod.io/v1/pods/$2" 2>/dev/null) || return 1
   case "$http" in 200|201|202|204) return 0 ;; *) return 1 ;; esac
 }
 
@@ -100,7 +114,8 @@ delete_pod(){ # <key> <pod-id>
 verify_gone(){ # <key> <pod-id>
   if [ -n "${GPU_JOB_VERIFY_GONE_CMD:-}" ]; then $GPU_JOB_VERIFY_GONE_CMD "$1" "$2"; return; fi
   local body http
-  body=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $1" -H "User-Agent: gpu-job" \
+  body=$(curl -s -w '\n%{http_code}' --connect-timeout 15 --max-time 60 \
+         -H "Authorization: Bearer $1" -H "User-Agent: gpu-job" \
          "https://rest.runpod.io/v1/pods/$2" 2>/dev/null) || return 2
   http=$(printf '%s' "$body" | tail -1)
   body=$(printf '%s' "$body" | sed '$d')
@@ -231,26 +246,40 @@ for nonce in "${!LEASE_POD[@]}"; do
   [ -n "$key" ] && KEY_FOR_REF["$kr"]="$key"
 done
 
-# Pre-count live pod-NAME occurrences across all resolved keys (code-review Finding 4): a name carried
-# by more than one DISTINCT live pod id is AMBIGUOUS and must be report-only, never reaped — even if it
-# matches a pending-intent nonce. Counting first means the iteration order can't let "the first of two
-# duplicate names" be deleted. We count DISTINCT pod ids per name (a pod that appears under more than
-# one key's listing — e.g. shared creds — is the SAME pod, counted once).
+# List each resolved key's live pods ONCE, capturing success/failure (round-5 Finding 3): a list call
+# that fails (auth/HTTP/timeout/unparseable) must be REPORTED as unlistable, never silently treated as
+# zero live pods (which would hide unknown / half-born pods from the sweep).
+declare -A LISTED LIST_OK
+for kr in "${!KEY_FOR_REF[@]}"; do
+  if out=$(list_pods "${KEY_FOR_REF[$kr]}"); then
+    LISTED["$kr"]="$out"; LIST_OK["$kr"]=1
+  else
+    LIST_OK["$kr"]=0
+    log "report-unlistable (provider pod-list failed for key_ref '$kr' — NOT treating as zero pods): unknown/half-born pods under this key are NOT swept this cycle"
+    reported=$((reported+1))
+  fi
+done
+
+# Pre-count live pod-NAME occurrences across all SUCCESSFULLY-listed keys (code-review Finding 4): a
+# name carried by more than one DISTINCT live pod id is AMBIGUOUS -> report-only, never reaped. Count
+# DISTINCT pod ids per name (a pod under more than one key's listing — shared creds — is one pod).
 declare -A NAME_COUNT NAME_POD_SEEN
 for kr in "${!KEY_FOR_REF[@]}"; do
+  [ "${LIST_OK[$kr]:-0}" = 1 ] || continue
   while read -r pod name; do
     [ -n "${name:-}" ] && [ -n "${pod:-}" ] || continue
     local_key="$name|$pod"
     [ -n "${NAME_POD_SEEN[$local_key]:-}" ] && continue   # same name+pod already counted
     NAME_POD_SEEN["$local_key"]=1
     NAME_COUNT["$name"]=$(( ${NAME_COUNT["$name"]:-0} + 1 ))
-  done < <(list_pods "${KEY_FOR_REF[$kr]}")
+  done <<< "${LISTED[$kr]}"
 done
 
 # 2. report-only over live pods that no lease accounts for. A pod with no lease and no UNIQUE matching
 #    pending-intent nonce is REPORTED, never deleted.
 declare -A PROCESSED_POD
 for kr in "${!KEY_FOR_REF[@]}"; do
+  [ "${LIST_OK[$kr]:-0}" = 1 ] || continue                 # an unlistable key was already reported
   key=${KEY_FOR_REF[$kr]}
   while read -r pod name; do
     [ -n "${pod:-}" ] || continue
@@ -295,7 +324,7 @@ for kr in "${!KEY_FOR_REF[@]}"; do
     else
       log "report (pending-intent match, not yet expired): pod=$pod nonce=$m"; reported=$((reported+1))
     fi
-  done < <(list_pods "$key")
+  done <<< "${LISTED[$kr]}"
 done
 
 DONE_TAG=""; [ "$DRY" = 1 ] && DONE_TAG=" (DRY-RUN — nothing deleted)"
