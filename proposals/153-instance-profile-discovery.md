@@ -45,24 +45,39 @@ declares *where* the flow operates and *who* it operates as.
 
 The load-bearing decisions:
 
-### 1. One declarative config file, discovered by a fixed rule
+### 1. One declarative config file, in the owning module's config dir, discovered by a fixed rule
 
-A single file — call it the **instance profile** — at a path resolved by a fixed, documented lookup order so
-a zero-context agent never guesses:
+A single file — the **instance profile** — owned by the experiment-lifecycle module and living under that
+module's config directory, per the AGENTS.md instance-value rule ("instance values … belong in each user's
+`~/.config/<module>/` written by the module's init"). The discovery lookup order, so a zero-context agent
+never guesses:
 
-1. `$AAR_PROFILE` (explicit env override — the manual escape hatch and the test seam);
-2. `$AAR_HOME/aar-profile.{toml,yaml,json}` if `$AAR_HOME` is set;
-3. the consuming instance's home root (this instance: `~/aar-profile.*`).
+1. `$AAR_PROFILE` (explicit env override — the manual escape hatch and the test seam, **only**);
+2. `${XDG_CONFIG_HOME:-~/.config}/experiment-lifecycle/aar-profile.{toml,json}` — the owning-module config
+   home (this instance: `~/.config/experiment-lifecycle/aar-profile.toml`).
 
 The executor resolves the **first** that exists, records *which* path resolved (into the snapshot, decision
 4), and **fails closed** if none does — never falls back to a hardcoded repo/identity. "Fails closed" here
 means: print a single `BLOCKED: no instance profile found (looked: <paths>)` line and stop before any GitHub
-mutation or compute spend — the same fail-closed disposition `wf.sh start` already takes on a stale base.
+mutation or compute spend — the same fail-closed disposition `wf.sh start` already takes on a stale base. This
+replaces the earlier `~/aar-profile.*` home-root location, which would have minted a *new* global config
+convention in conflict with the module-config rule.
 
-**Format recommendation: TOML.** It is unambiguous (no YAML indentation/`norway` foot-guns), comment-friendly
-(instances annotate their own fields), and has a stdlib parser in the runtime (Python `tomllib`). The schema
-is format-portable; the discovery rule accepts the three extensions so an instance already standardized on
-YAML/JSON is not forced to convert.
+**Init owner (the validate seam).** The profile is written and validated by the experiment-lifecycle
+module's **init/validate script** (`aar-profile-init` / `aar-profile-validate`, a `ready` child below), not
+hand-authored ad hoc. `init` scaffolds the file at the module config path from the schema with the
+instance's values; `validate` checks it against the schema (required fields present, types correct,
+`schema_version` known, identity env vars *resolve to a runnable command*, `branch_prefix` matches #129's
+`run/` convention) and is what the skills call before relying on the file. This is the "init owner" the issue
+named: the module owns its config file's creation and validation, the same pattern `~/.config/<module>/`
+already implies for the engineer Apps' keys.
+
+**Format: TOML, plus stdlib JSON.** TOML is the recommended authoring format — unambiguous (no YAML
+indentation/`norway` foot-guns), comment-friendly, stdlib-parseable (Python `tomllib`). The discovery rule
+also accepts `.json` (stdlib `json`, zero extra dependency) for an instance that prefers it; **YAML is not
+accepted** (it would add a parser dependency the design explicitly argues against). If both a `.toml` and a
+`.json` exist at the module config path, **`.toml` wins** (deterministic precedence); `validate` warns on the
+shadowed file.
 
 ### 2. The schema — exactly the fields the #130 flow must resolve
 
@@ -85,9 +100,10 @@ token_cmd_env   = "AAR_RESEARCH_TOKEN_CMD"   # env var holding a command that pr
 git_author_env  = "AAR_RESEARCH_GIT_AUTHOR"  # env var holding "Name <email>" for commit attribution
 
 [github.protection]
-# What the merge gate MAY require, declared so the close-gate (#157) reads expectations, never probes blind.
+# REMOTE branch-protection EXPECTATIONS only — declared so the close-gate (#157) reads them, never probes
+# blind. These may TIGHTEN the product's invariants for an instance; they can NEVER weaken a product invariant
+# (cross-family review is a product constant, NOT a field here — see decision 3a / FINDING 3).
 require_pr_review        = true          # branch protection requires an approving review before merge
-require_cross_family     = true          # the approving review must be opposite-family (the #130 guarantee)
 enforce_admins           = true          # protection includes administrators (no standing bypass)
 
 [recipes]
@@ -116,9 +132,10 @@ Field semantics, normative:
   identity is distinct from the scaffold-engineer identity and an instance can scope them differently.
 - **`[github.protection]`** — what the executor's close-gate (#157) should *expect* the remote to require,
   so it can pre-check readiness instead of discovering a failed merge after the run. It is a **declaration of
-  expectation**, not a configuration of GitHub; the actual protection is set out-of-band (RUNBOOK). A mismatch
-  (e.g. config says `require_cross_family` but the close review was same-family) is the close-gate's
-  fail-closed signal.
+  expectation**, not a configuration of GitHub; the actual protection is set out-of-band (RUNBOOK). It may
+  only *tighten* (an instance can require more); it can never carry a knob that *weakens* a product invariant.
+  Cross-family review is **not** a field here (decision 3a). A mismatch (the remote requires fewer reviews
+  than declared) is the close-gate's fail-closed signal.
 
 ### 3. The profile *asserts*; the gates *enforce* — no enforcement logic lives here
 
@@ -133,8 +150,19 @@ seam without implementing it:
 - `[github.protection]` expectations are read by the **close gate (#157)** and the **design-gate handoff
   (#156)** to pre-check readiness.
 - The **cross-family** requirement on the model-judged rungs is enforced by **#154** (the audit-runner
-  cross-family contract); `require_cross_family` is the declarative input that contract reads, not a second
-  home for the check.
+  cross-family contract) as a **product invariant** — see decision 3a; it is deliberately **not** a profile
+  field, so no instance config can switch it off.
+
+### 3a. Cross-family review is a product invariant, never an instance field
+
+Cross-family auditing (a change/run reviewed by the *opposite* model family) is a **validity invariant of the
+product**, not an instance preference — #130 §5 and #134 make it fail-closed for exactly this reason. So the
+profile carries **no `require_cross_family` knob**: an instance must never be able to declare its records
+"reviewed" with a same-family judgment. #154 enforces cross-family in the audit-runner contract as a product
+constant; `[github.protection]` may only assert *additional, tightening* remote requirements (more reviews,
+admin enforcement), never a setting that could weaken or disable the cross-family guarantee. (An earlier
+draft modeled `require_cross_family` as an instance-owned profile input — corrected per design-review FINDING
+3: a product invariant does not live in instance config.)
 
 This keeps the profile a *thin, inert contract* — the failure mode of a config file that also enforces is
 that enforcement drifts from declaration; here the declaration is the single source of truth and every
@@ -148,27 +176,50 @@ re-resolve them live. At clearance time, `design-experiment` writes a snapshot b
 
 ```
 ## Instance profile (snapshot — resolved at clearance, DO NOT re-resolve)
-profile_path:    ~/aar-profile.toml
+profile_path:    ~/.config/experiment-lifecycle/aar-profile.toml
 profile_sha256:  <hash of the file's bytes at resolution>
 schema_version:  1
+# --- github (decision 2) ---
 research_repo:   owner/research-lab
 base_branch:     main
 branch_prefix:   run/
 issue_repo:      owner/research-lab
 private:         true
+# --- identity: the SEAM NAMES, not secrets (decision 7) ---
+token_cmd_env:   AAR_RESEARCH_TOKEN_CMD
+git_author_env:  AAR_RESEARCH_GIT_AUTHOR
+# --- protection expectations the close-gate pre-checks (decision 2/3a) ---
+require_pr_review: true
+enforce_admins:    true
+# --- recipe pointers: repo-relative path + the ref/hash that pins the version ---
+recipe_provisioning:   recipes/provisioning.md@<git-sha>
+recipe_artifact_store: recipes/artifact-store.md@<git-sha>
+recipe_ledger:         recipes/ledger.md@<git-sha>
+recipe_teardown:       recipes/teardown.md@<git-sha>
+recipe_cost_policy:    recipes/cost-policy.md@<git-sha>
 ```
 
 Normative rules:
 
-- The executor **uses the snapshot**, never re-reads the live profile for the GitHub-lifecycle facts. The
-  live profile is read **once**, at clearance, by the designer; the executor's world is the brief (matches
-  the existing "your brief is your world" / START-template snapshot discipline).
-- `profile_sha256` is the file's content-hash at resolution. It is the drift detector: if anything later
-  needs to know whether the run used the current config, it compares the hash. (Whether a *re-clearance*
-  is forced on profile drift is **#145's** decision — the design-clearance schema owns re-clearance triggers;
-  this issue only guarantees the snapshot carries the hash that makes that decidable.)
-- The snapshot lists the resolved scalar GitHub facts (above). The `[recipes]` pointers are linked, not
-  inlined — they are already-versioned files reachable from the snapshotted `research_repo`.
+- **The snapshot carries every NON-SECRET execution field the executor uses later** — not just the scalar
+  repo facts. That includes the identity **env-var names** (`token_cmd_env` / `git_author_env` — names, never
+  the token), the protection expectations the close-gate pre-checks, and the recipe pointers each pinned to a
+  `path@<git-sha>` ref so the executor reads the exact recipe version the design cleared. (This corrects the
+  earlier draft, which snapshotted only repo/base/prefix/issue/private yet forbade re-reading the live
+  profile — design-review FINDING 1: the executor could not resolve identity/protection/recipes it was told
+  it would need. Now everything non-secret is in the brief.)
+- **The one narrow live step is secret resolution.** The executor reads the env var *named* in the snapshot
+  (`token_cmd_env`) and runs that command to **mint a fresh token at use** — the only thing resolved live,
+  because a token must never be frozen into a record (it expires, and it would be a leaked credential in the
+  trail). Everything else comes from the snapshot. So: all *config* from the frozen snapshot; only the
+  *credential* minted live, via the snapshotted seam name.
+- The executor **never re-reads the live profile** for any GitHub-lifecycle config. The live profile is read
+  **once**, at clearance, by the designer; the executor's world is the brief (matches the existing "your
+  brief is your world" / START-template snapshot discipline).
+- `profile_sha256` is the file's content-hash at resolution — the drift detector: anything later needing to
+  know whether the run used the current config compares the hash. (Whether a *re-clearance* is forced on
+  profile drift is **#145's** decision — the design-clearance schema owns re-clearance triggers; this issue
+  only guarantees the snapshot carries the hash that makes that decidable.)
 
 This extends the START template's existing "execution-profile snapshot/link" placeholder from prose into a
 typed block; the seam is unchanged in spirit (decision aligns with #130 §3 "the brief snapshots the resolved
@@ -213,7 +264,7 @@ This is the consumable surface; the cited children depend on exactly these:
 | **#157** run-experiment push/close/merge | `research_repo`, `base_branch`, `[github.identity]`, `[github.protection]` (merge-gate expectations) |
 | **#150** shared GitHub helper | `[github.identity]` seam names (mint token, attribute commit) — the helper consumes the seams, this file declares them |
 | **#146** sensitivity/visibility | `private` (the assertion its gate verifies) |
-| **#154** cross-family contract | `[github.protection].require_cross_family` (the declarative input) |
+| **#154** cross-family contract | *nothing from this file* — cross-family is a product invariant #154 owns; the profile carries no `require_cross_family` knob (decision 3a) |
 | **#155** canonical-path record layout | `research_repo` + `branch_prefix` (where `experiments/<exp>/` lives, on which branch) |
 | **#145** design-clearance schema | `profile_sha256` from the snapshot (the drift input to its re-clearance trigger) |
 
@@ -237,6 +288,15 @@ fact, declared once, here).
 - **Inline tokens / key paths in the profile.** Rejected (decision 7) — makes the file secret, defeats
   browsing it in the record, and diverges from the `wf.sh` mint-by-command pattern. Seam-by-reference keeps
   the file non-secret.
+- **Accept TOML + YAML + JSON.** Rejected (FINDING 4) — YAML adds a non-stdlib parser dependency the design
+  argues against. TOML (recommended) + stdlib JSON only, with deterministic `.toml`-wins precedence
+  (decision 1).
+- **Home-root `~/aar-profile.*` location.** Rejected (FINDING 2) — mints a new global config convention in
+  conflict with AGENTS.md's `~/.config/<module>/` rule. The profile lives under the owning module's config
+  dir, written by the module's init (decision 1).
+- **`require_cross_family` as an instance profile field.** Rejected (FINDING 3 / decision 3a) — cross-family
+  review is a product validity invariant; instance config must never be able to disable it. #154 owns it as a
+  product constant.
 - **Resolve live in the executor (no snapshot).** Rejected — breaks #130's reproducibility promise: a config
   edit between design and a later re-examination would silently change what the record claims the run used.
   Snapshot + hash makes drift detectable (decision 4).
@@ -254,9 +314,10 @@ fact, declared once, here).
   These edits are the **implementation children** spawned from this design, not part of this doc.
 - **New product artifact:** the schema definition + discovery/snapshot contract reference (a small doc the
   skills cite). Versioned with `schema_version`.
-- **Instance artifact (not product):** each consuming instance writes its own `aar-profile.*` at the
-  discoverable path. This instance writes `~/aar-profile.toml` with its `research-lab` slug, `run/` prefix,
-  and research-identity seam names — instance content, never shipped in the product.
+- **Instance artifact (not product):** each consuming instance writes its own `aar-profile.{toml,json}` at
+  the owning-module config path via the module's init. This instance writes
+  `~/.config/experiment-lifecycle/aar-profile.toml` with its `research-lab` slug, `run/` prefix, and
+  research-identity seam names — instance content, never shipped in the product.
 - **Cluster coupling:** this is a **prerequisite** that *unblocks* #156 and #157 (both list #153 in their
   `blocked-by`). It is **adjacent** to #146 (provides `private`), #154 (provides `require_cross_family`),
   #150 (declares the identity seams it consumes), #155 (provides repo+prefix), and #145 (provides the
@@ -268,12 +329,15 @@ fact, declared once, here).
 
 Doc-only design PR; lands the schema + discovery/snapshot contract on `main` via the `--scaffold` gate. Then
 the spawned `ready` children implement it: (1) the schema-definition doc + product `schema_version` constant;
-(2) the discovery+snapshot helper the skills call; (3) the `design-experiment`/`run-experiment` skill edits
-that replace the narrative seam with the typed reads; (4) this instance's `~/aar-profile.toml`. The skill
-edits (3) are `blocked-by` the discovery helper (2) and the schema doc (1); the instance profile (4) can be
-written as soon as the schema (1) lands. Staged: the discovery helper can ship and be unit-smoked (resolve a
-fixture profile, fail-closed on a missing one, refuse an unknown MAJOR) **before** any skill consumes it, so
-the contract is validated in isolation first.
+(2) the `aar-profile-init` / `aar-profile-validate` module init/validate scripts (the init owner, decision 1);
+(3) the discovery + snapshot helper the skills call (resolve by the lookup rule, build the START.md snapshot
+block, fail-closed on missing/unknown-MAJOR); (4) the `design-experiment`/`run-experiment` skill edits that
+replace the narrative seam with the typed reads + the snapshot write. The discovery helper (3) is `blocked-by`
+the schema doc (1); the skill edits (4) are `blocked-by` (2) and (3). The instance's own profile under
+`~/.config/experiment-lifecycle/` is written by `aar-profile-init` once (2) lands — instance content, not a
+product child. Staged: the init/validate + discovery helper ship and are unit-smoked (validate a fixture
+profile, fail-closed on a missing one, refuse an unknown MAJOR, mint via the seam name) **before** any skill
+consumes them, so the contract is validated in isolation first.
 
 Rollback is a normal revert of the spawned skill edits — with the narrative "per your execution profile"
 prose still present alongside the typed reads during the staged rollout, reverting the typed reads falls back
