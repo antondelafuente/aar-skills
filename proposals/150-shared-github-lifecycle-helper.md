@@ -272,21 +272,25 @@ a fresh machine is a silent install break. The contract:
   verify-claims, with the merge-authority subset re-materialized from base ref by the trusted loader/entrypoint
   (decision 2). The library's location is therefore not hardcoded to one install layout — it is discovered, with
   a fail-closed error if the dependency is absent (never a silent fallback to a missing/forked copy).
-- **The runtime-readable dependency contract is PACKAGED inside each consumer plugin; `.aar-ci` validates it
-  (round-5 FINDING 1).** A fresh-installed consumer reads from its **plugin cache dir**, not repo-root `.aar-ci`,
-  so the contract a consumer must read at runtime lives in an **installed/plugin-packaged** surface — a small
-  declared file *inside the consumer's own plugin dir* (e.g. `plugins/<consumer>/.aar-deps`, a one-line
-  `requires: aar-github-lifecycle`), which IS present in the install cache. The consumer resolves its dependency
-  by reading its *own packaged* declaration; on failure it prints the **exact companion install command** so a
-  fresh install is self-correcting. `.aar-ci` does **not** become the file consumers read — it **validates** the
-  packaged contract (a `checks.sh` assertion that each consumer's packaged `.aar-deps` is present and names the
-  helper) and the cross-plugin smoke exercises it. (If a harness later supports a native `plugin.json` dependency
-  field, that is an additive convenience; the packaged `.aar-deps` stays the canonical runtime-readable source.)
-- **Cross-plugin install smoke (a deliverable).** Today `.aar-ci/fake_home_smoke.sh` installs only the single
-  plugin under test. The extraction child extends the smoke (or adds a companion) to read each consumer's
-  **packaged** `.aar-deps` and install **each consumer together with its declared `aar-github-lifecycle`
-  dependency** in a virgin HOME, then assert the consumer can *resolve and source* the helper — the install-path
-  proof that the dependency contract holds, the same role the existing fake-HOME smoke plays for a single plugin.
+- **The runtime-readable dependency contract is PACKAGED in the installed SKILL surface; `.aar-ci` validates it
+  (round-5 FINDING 1 / round-6 FINDING 1).** A fresh-installed consumer reads from its install cache, and the
+  install shape that spans **both** Claude plugin-cache **and** Codex/Agent-Skills (skill-only) installs is the
+  **skill dir** — a skill-only install exposes only `skills/<name>/`, not the plugin root. So the declaration
+  lives **inside the consumer's installed skill surface** (e.g. `skills/<name>/.aar-deps`, a one-line `requires:
+  aar-github-lifecycle`), present in *both* install shapes. The consumer resolves its dependency by reading its
+  *own packaged* declaration (via the same source-first skill-dir discovery #69 uses); on failure it prints the
+  **exact companion install command** so a fresh install is self-correcting. `.aar-ci` does **not** become the
+  file consumers read — it **validates** the packaged contract (a `checks.sh` assertion that each consumer's
+  packaged `.aar-deps` is present and names the helper). (If a harness later supports a native `plugin.json`
+  dependency field, that is an additive convenience; the packaged skill-surface `.aar-deps` stays the canonical
+  runtime-readable source across both install shapes.)
+- **Cross-plugin install smoke, BOTH install shapes (a deliverable).** Today `.aar-ci/fake_home_smoke.sh`
+  installs only the single plugin under test. The extraction child extends the smoke (or adds a companion) to
+  read each consumer's **packaged skill-surface** `.aar-deps` and install **each consumer together with its
+  declared `aar-github-lifecycle` dependency** in a virgin HOME — covering **both** the Claude plugin-cache shape
+  **and** a skill-only/Codex symlink shape — then assert the consumer can *resolve and source* the helper in
+  each. This is the install-path proof that the dependency contract holds across the install shapes the product
+  actually supports, the same role the existing fake-HOME smoke plays for a single plugin.
 - **Codex install documentation, not a product-tree mirror (round-5 FINDING 3).** The product tree carries no
   "Codex mirror" artifact — Codex install is done per-instance by symlinking each source skill dir into the
   harness's skills directory (README). So the deliverable is **documentation**: the README's Codex-install
@@ -380,6 +384,8 @@ The boundary is: helper enforces family on what it runs; #154 enforces it on wha
 - **`experiment-lifecycle`** (`design-experiment` / `run-experiment`) gains a *new* dependency on the shared
   helper — wired by the consumer children #156 / #157, not by this extraction. This doc only fixes the contract
   they consume.
+- **AGENTS.md taxonomy:** the canonical "Two layers" / plugin split gains `aar-github-lifecycle` as shared
+  product infrastructure consumed by both the research and SWE flows (round-6 FINDING 3).
 - **Cross-family enforcement boundary (the one rule):** the helper enforces explicit-family fail-closed on the
   rungs **it runs** (`--design`, close); the **read-only** rungs (`verify_claim`, `--data`) are **#154**'s
   (audit-runner cross-family contract). The helper is not a second home for the read-only-rung check.
@@ -393,28 +399,41 @@ The boundary is: helper enforces family on what it runs; #154 enforces it on wha
 ## Rollout + rollback
 
 Doc-only design PR (this one): lands the contract on `main` via the `--scaffold` gate, then spawns the
-extraction child(ren). Staging of the *implementation*:
+extraction child(ren). Staging of the *implementation* (helper availability **before** `wf.sh` depends on it —
+round-6 FINDING 2):
 
-1. **Land the new plugin + the `wf.sh` refactor in one PR, behavior-identical.** The extracted library is
-   sourced by `wf.sh`; the merge-authority subset is materialized from the trusted base ref and reached only via
-   the installed/base launcher (decision 2 — the worktree driver is a refusing stub for merge-authority
-   commands); the marketplace/README/Codex-mirror install surface and
-   the cross-plugin smoke (decision 4) land in the same PR; the **poisoned-helper smoke, the new poisoned-driver
-   smoke, and the existing `locate_audit_smoke`** all pass; `wf.sh`'s subcommand surface and output are
-   unchanged. This PR ships through ship-change's *own* `--code` gate — i.e. the machinery refactors itself under
-   its current gate, the safest order (the new code is exercised by ship-change *before* any experiment PR
-   depends on it). Note the bootstrap subtlety the trust split makes explicit: because this PR edits
+1. **Land the helper plugin first, with `wf.sh` still self-contained.** The new `aar-github-lifecycle` plugin
+   (library + loader + base launcher + both smokes) lands and is installable — added to marketplace/README, with
+   the consumer `.aar-deps` declarations and the validator — while `wf.sh` still carries its own in-file
+   primitives and does not yet depend on the helper. This guarantees the helper is available before anything
+   requires it, so an `aar-engineering` install can never update into a stranded shipping path missing its
+   companion.
+2. **Then refactor `wf.sh` to consume the helper, atomically with the dependency declaration.** `wf.sh` switches
+   to sourcing the shared library; the merge-authority subset is materialized from the trusted base ref and
+   reached only via the installed/base launcher (decision 2 — the worktree driver is a refusing stub for
+   credential/GitHub commands); the cross-plugin smoke (decision 4, both install shapes) gates it so the refactor
+   cannot merge unless the consumer resolves its declared dependency in a virgin HOME; the **poisoned-helper
+   smoke, the poisoned-driver smoke, and the existing `locate_audit_smoke`** all pass; `wf.sh`'s subcommand
+   surface and output are unchanged. This PR ships through ship-change's *own* `--code` gate — the machinery
+   refactors itself under its current gate, the safest order. Trust-bootstrap subtlety: because this PR edits
    merge-authority code AND the driver entrypoint, its *own* merge gate runs the **base-ref** (pre-change) copy
-   of both — the new behavior is only ever exercised by ship-change runs *after* it lands, which is the intended
-   trust property, not a gap.
-2. **Only after (1) is merged and a ship-change run has exercised the shared library** do the experiment
+   of both — the new behavior is only ever exercised by ship-change runs *after* it lands, the intended trust
+   property, not a gap.
+3. **Only after (2) is merged and a ship-change run has exercised the shared library** do the experiment
    consumers (#156 / #157) wire to it. The experiment-PR path is not made default in `run-experiment` until
    it has been piloted on a single real experiment (per #130's staged rollout).
 
-**Rollback.** The extraction is one squash commit on `main` (the plugin add + the `wf.sh` refactor). Revert it
-with the standard one-command revert (RUNBOOK "One-command revert"): `wf.sh` falls back to its own in-file
-copies of the primitives (the revert restores them) and ship-change keeps working with zero data loss, because
-the refactor is behavior-preserving and no experiment PR depends on the helper until step 2. Reverting *after*
-step 2 additionally requires reverting the consumer wiring (#156/#157), so the consumers are filed `blocked-by`
-this extraction precisely to keep the dependency order — and the rollback order — linear. The standalone-plugin
-host (decision 3) is what makes the extraction a single revertible unit.
+The implementation contract also updates the **AGENTS.md plugin taxonomy** (round-6 FINDING 3): the canonical
+"Two layers" / product-vs-SWE-plugin split currently lists `gpu-job`/`verify-claims`/`experiment-lifecycle` as
+the product and `aar-engineering` as the SWE layer; `aar-github-lifecycle` is added as **shared product
+infrastructure consumed by both** the research and SWE flows, so the taxonomy reflects the new dependency
+direction rather than leaving the helper unclassified.
+
+**Rollback.** The `wf.sh` refactor (step 2) is one squash commit on `main`. Revert it with the standard
+one-command revert (RUNBOOK "One-command revert"): `wf.sh` falls back to its own in-file copies of the
+primitives (the revert restores them) and ship-change keeps working with zero data loss, because the refactor is
+behavior-preserving — and because the helper plugin landed *first* (step 1), reverting step 2 never strands the
+shipping path. The helper plugin (step 1) can stay installed harmlessly or be reverted separately. Reverting
+*after* step 3 additionally requires reverting the consumer wiring (#156/#157), so the consumers are filed
+`blocked-by` this extraction precisely to keep the dependency order — and the rollback order — linear. The
+standalone-plugin host (decision 3) is what makes each stage an independently revertible unit.
