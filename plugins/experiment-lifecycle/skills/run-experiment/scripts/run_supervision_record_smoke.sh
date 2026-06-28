@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Smoke for run_supervision_record.sh — the #54 child-1 run-supervision record. Behavior the
-# deterministic JSON/syntax checks can't catch: the monotonic state machine, fail-closed
-# is-desired-active, atomic writes, and the update-vs-stop/close race (Finding 1 from the design review).
+# Smoke for run_supervision_record.sh — the #54 child-1 run-supervision record + child-3 relaunch
+# additions. Behavior the deterministic JSON/syntax checks can't catch: the monotonic state machine,
+# fail-closed is-desired-active, atomic writes, the update-vs-stop/close race (Finding 1 from the
+# child-1 design review), and the child-3 needs-relaunch request + opaque session-handle (request/clear,
+# fail-closed is-relaunch-requested, request cleared by stop/close).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -101,5 +103,94 @@ if active rc; then no race-stop-wins; else ok race-stop-wins; fi
   && ok race-stopped-true || no race-stopped-true
 # the record is still valid JSON (atomic writes never left it half-written)
 run show rc | python3 -c 'import json,sys;json.load(sys.stdin)' && ok race-valid-json || no race-valid-json
+
+# ===== #54 child 3: needs-relaunch request + opaque session-handle =====
+requested(){ run is-relaunch-requested "$1"; }   # exit 0 = relaunch asked, 1 = no
+jget(){ run show "$1" | python3 -c "import json,sys;v=json.load(sys.stdin)[\"$2\"];print('' if v is None else v)"; }
+
+# --- session-handle: opaque, set on create, readable, overridable on update ---
+run create s1 --handoff /art/s1/TEMP.md --session-handle "tmux:claude-3" >/dev/null
+[ "$(run session-handle s1)" = "tmux:claude-3" ] && ok session-handle-create || no session-handle-create
+run update s1 --session-handle "systemd:run-s1.service" >/dev/null
+[ "$(run session-handle s1)" = "systemd:run-s1.service" ] && ok session-handle-update || no session-handle-update
+# absent handle -> exit 1, no output
+run create s2 >/dev/null
+if run session-handle s2 >/dev/null 2>&1; then no session-handle-absent-failclosed; else ok session-handle-absent-failclosed; fi
+# missing record -> exit 1
+if run session-handle nonesuch >/dev/null 2>&1; then no session-handle-missing-failclosed; else ok session-handle-missing-failclosed; fi
+# empty --session-handle value rejected (caller bug)
+if run update s1 --session-handle "" >/dev/null 2>&1; then no empty-session-handle-rejected; else ok empty-session-handle-rejected; fi
+
+# --- request-relaunch: sets the flag + reason; is-relaunch-requested reads it; supervisor clears it ---
+run create q1 --handoff /art/q1/TEMP.md >/dev/null
+if requested q1; then no fresh-no-request; else ok fresh-no-request; fi          # default: no request
+run request-relaunch q1 --reason "policy-block" >/dev/null
+if requested q1; then ok request-sets-flag; else no request-sets-flag; fi
+[ "$(jget q1 relaunch_reason)" = "policy-block" ] && ok request-records-reason || no request-records-reason
+# a requested run is still desired-active (request != stop)
+if active q1; then ok request-stays-active; else no request-stays-active; fi
+# supervisor act-then-clear
+run clear-relaunch q1 >/dev/null
+if requested q1; then no clear-resets-flag; else ok clear-resets-flag; fi
+[ -z "$(jget q1 relaunch_reason)" ] && ok clear-drops-reason || no clear-drops-reason
+# clear is idempotent
+run clear-relaunch q1 >/dev/null && ok clear-idempotent || no clear-idempotent
+
+# --- is-relaunch-requested is fail-closed on missing/corrupt/terminal ---
+if requested nonesuch; then no request-missing-failclosed; else ok request-missing-failclosed; fi
+if requested broken; then no request-corrupt-failclosed; else ok request-corrupt-failclosed; fi   # broken.json from earlier
+
+# --- request-relaunch is refused on a terminal record (never resurrect a deliberately-ended run) ---
+run create q2 >/dev/null; run stop q2 >/dev/null
+if run request-relaunch q2 >/dev/null 2>&1; then no request-on-stopped-refused; else ok request-on-stopped-refused; fi
+run create q3 >/dev/null; run close q3 >/dev/null
+if run request-relaunch q3 >/dev/null 2>&1; then no request-on-closed-refused; else ok request-on-closed-refused; fi
+# request-relaunch on a missing record is refused
+if run request-relaunch nonesuch >/dev/null 2>&1; then no request-missing-record-refused; else ok request-missing-record-refused; fi
+
+# --- a pending request is CLEARED by stop/close, and is-relaunch-requested then says NO ---
+run create q4 --handoff /art/q4/TEMP.md >/dev/null
+run request-relaunch q4 --reason "blip" >/dev/null
+if requested q4; then ok q4-requested-before-stop; else no q4-requested-before-stop; fi
+run stop q4 >/dev/null
+if requested q4; then no stop-clears-request; else ok stop-clears-request; fi
+[ "$(jget q4 relaunch_requested)" = False ] && ok stop-clears-request-field || no stop-clears-request-field
+
+run create q5 --handoff /art/q5/TEMP.md >/dev/null
+run request-relaunch q5 >/dev/null
+run close q5 >/dev/null
+if requested q5; then no close-clears-request; else ok close-clears-request; fi
+
+# --- surplus-arg / unknown-arg fail-closed on the new commands ---
+run create q6 >/dev/null
+if run clear-relaunch q6 oops >/dev/null 2>&1; then no surplus-clear-rejected; else ok surplus-clear-rejected; fi
+if run is-relaunch-requested q6 oops >/dev/null 2>&1; then no surplus-isrequested-rejected; else ok surplus-isrequested-rejected; fi
+if run session-handle q6 oops >/dev/null 2>&1; then no surplus-sessionhandle-rejected; else ok surplus-sessionhandle-rejected; fi
+if run request-relaunch q6 --reason "" >/dev/null 2>&1; then no empty-reason-rejected; else ok empty-reason-rejected; fi
+if run request-relaunch q6 --bogus x >/dev/null 2>&1; then no request-unknown-arg-rejected; else ok request-unknown-arg-rejected; fi
+
+# --- ambient env must NOT leak into write_record (code-review MED): a subcommand only mutates fields it
+#     was asked to. A stray SET_RELAUNCH/SESSION_HANDLE in the caller's env must be ignored by a plain
+#     update/stop that didn't request them. (write_record reads explicit positional args, not env.) ---
+run create e1 --handoff /art/e1/TEMP.md >/dev/null
+SET_RELAUNCH=true SESSION_HANDLE="evil" RELAUNCH_REASON="injected" run update e1 --handoff /art/e1/TEMP2.md >/dev/null
+if requested e1; then no ambient-no-relaunch-leak; else ok ambient-no-relaunch-leak; fi
+if run session-handle e1 >/dev/null 2>&1; then no ambient-no-handle-leak; else ok ambient-no-handle-leak; fi
+# the update DID apply its own requested change (handoff)
+[ "$(jget e1 handoff_path)" = "/art/e1/TEMP2.md" ] && ok ambient-update-still-works || no ambient-update-still-works
+# a plain stop with stray ambient SET_RELAUNCH must still leave no request set
+run create e2 >/dev/null
+SET_RELAUNCH=true run stop e2 >/dev/null
+[ "$(jget e2 relaunch_requested)" = False ] && ok ambient-no-leak-on-stop || no ambient-no-leak-on-stop
+
+# --- backward-compat: a child-1-era record (no new fields) reads as no-request, no-handle, still active ---
+printf '{"run_id":"legacy","desired_active":true,"stopped":false,"closed":false,"handoff_path":"/art/legacy/TEMP.md","lease_pod_ids":[],"created_at":1}\n' > "$TMP/legacy.json"
+if active legacy; then ok legacy-active || true; else no legacy-active; fi
+if requested legacy; then no legacy-no-request; else ok legacy-no-request; fi
+if run session-handle legacy >/dev/null 2>&1; then no legacy-no-handle; else ok legacy-no-handle; fi
+# an update of the legacy record backfills the new fields without disturbing existing ones, stays valid JSON
+run update legacy --session-handle "tmux:legacy" >/dev/null
+[ "$(run session-handle legacy)" = "tmux:legacy" ] && ok legacy-update-backfills || no legacy-update-backfills
+[ "$(jget legacy handoff_path)" = "/art/legacy/TEMP.md" ] && ok legacy-update-preserves || no legacy-update-preserves
 
 [ "$fails" = 0 ] && { echo "run_supervision_record smoke PASS"; exit 0; } || { echo "run_supervision_record smoke FAIL"; exit 1; }

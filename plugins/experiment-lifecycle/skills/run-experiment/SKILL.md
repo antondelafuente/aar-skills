@@ -118,10 +118,18 @@ Three obligations, maintained continuously (not at close):
 
   > **Claude Code / this instance:** the helper is `run_supervision_record.sh` in this skill's `scripts/`
   > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start: `create <run-id>
-  > --handoff <TEMP.md path>` (marks the run **desired-active**). At each checkpoint: `update <run-id> --handoff
-  > <path> --lease-pod <id>…` (refresh the handoff + link the pod ids the run holds — these link to `gpu-job`'s
-  > pod leases by id). The supervisor branches on `is-desired-active <run-id>`. The concrete relaunch commands +
-  > the supervisor wiring are instance, not this helper.
+  > --handoff <TEMP.md path> --session-handle <opaque>` (marks the run **desired-active** and records the opaque,
+  > instance-owned handle that binds this run-id to your session — a tmux name / systemd unit / pid-file path; the
+  > product never interprets it). At each checkpoint: `update <run-id> --handoff <path> --lease-pod <id>…` (refresh
+  > the handoff + link the pod ids the run holds — these link to `gpu-job`'s pod leases by id). If you hit a case you
+  > can't resume in place (a usage-policy block, a corrupted session): `request-relaunch <run-id> [--reason …]` — a
+  > positive "recover me" signal the supervisor acts on (it is auto-cleared if you later `stop`/`close`). The
+  > supervisor branches on `is-desired-active` / `is-relaunch-requested` / `session-handle`. The concrete relaunch
+  > commands + the supervisor wiring are instance, not this helper.
+
+  See **`references/RELAUNCH_SUPERVISOR.md`** for the supervisor's side of this contract — the substrate-neutral
+  decision tree (`resume_same_session` else `launch_successor(handoff_path)`), the desired-state gating, and what
+  is deliberately out of scope (silent-wedge detection, deferred to the #54 `needs-design` child).
 
 - **Never leave a pod behind an in-conversation-only note.** A pod's existence and its cost-cap deadline must be
   on disk — the keepalive contract + the standing handoff + the linked pod ids in the record — so a reaper can
