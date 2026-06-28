@@ -52,28 +52,32 @@ Each record type is assigned one tier. A tier is the *default* visibility of tha
   pointer (a URI + content hash, see the pointer schema) and a non-sensitive caption may appear. This is for
   records whose payload is *inherently* the sensitive thing: raw rollouts, generated/training datasets,
   judge-input transcripts, anything the experiment *elicited*.
-- **T1 — structured-with-redaction.** The record may be committed inline, but it is a **structured document
-  with declared payload fields**; each payload field is replaced by a pointer (or a redaction marker) before
-  the write. The non-payload structure (hypothesis, arms, metric names, decision rules, finding severities,
-  triage statuses, counts/aggregates) stays inline so the trail is readable. This is the working tier for the
-  gate outputs and triage.
+- **T1 — structured-with-redaction.** The record may be committed inline, but it carries **declared payload
+  loci** — either named fields (for records that already have a schema) or a **payload-pattern** (for the
+  free-form Markdown the audit producers emit today). Each payload locus is replaced by a pointer (or a
+  redaction marker) before the write. The non-payload structure (hypothesis, arms, metric names, decision
+  rules, finding ids/severities/summaries, triage statuses, counts/aggregates) stays inline so the trail is
+  readable. This is the working tier for the gate outputs and triage. **The payload locus depends on the
+  record's current shape** (see "Two T1 surfaces" below) — the contract does not assume a structure that
+  doesn't exist yet.
 - **T2 — inline-clear.** The record may be committed inline verbatim. Reserved for content that is *authored
-  by the AAR for the human reader* and contains no elicited model output and no third-party data: the design
-  prose, decision rationale, the plain-English result narrative.
+  by the AAR for the human reader* AND contains no elicited model output, no third-party data, AND **no
+  operational-sensitive config** (exact prompts, eval/grader definitions, raw artifact paths, model IDs that
+  reveal a pre-release model). T2 is the design/result *prose* and decision rationale — not a brief or
+  checklist that embeds executable config (those are T1; see Finding-2 fix below).
 
 Default assignment by record type (the produce/consume contract keys on this table):
 
 | Record | Tier | Rationale |
 |---|---|---|
-| `DESIGN.md` prose (problem/hypothesis/arms/metric/decision-rules/cost) | **T2** | AAR-authored design intent; no elicited payload. |
-| `START.md`, `CHECKLIST.md` | **T2** | Executor brief / gate checklist; AAR-authored. |
-| `DESIGN.md` *embedded sample/seed/prompt* (if any inline example data) | **T1** | A literal data/prompt example is a payload field → pointer-ize. |
+| `DESIGN.md` prose (problem/hypothesis/arms/metric/decision-rules/cost narrative) | **T2** | AAR-authored design intent; no elicited payload, no executable config. |
 | `RESULTS.md` narrative + aggregate metrics/tables | **T2** | Outcome prose + numbers the AAR writes; no raw rows. |
+| `START.md`, `CHECKLIST.md`, and `DESIGN.md` *config subfields* (exact prompts, eval/grader definitions + flags, raw artifact paths, model IDs, seed/sample data) | **T1** | AAR-authored but operationally sensitive: a verbatim prompt/eval/grader or a pre-release model ID is payload even though no model produced it. Safe-field allowlist below; everything else in the brief is a payload locus → pointer/redact. |
 | `RESULTS.md` per-example rows / transcript excerpts | **T0** | Raw elicited output → pointer-only. |
-| `verify_claim` output | **T1** | Verdict + reasoning inline; any quoted brief/source payload → pointer. |
-| `audit_experiment --design` output | **T1** | Findings (id/severity/summary) inline; quoted brief payload → pointer. |
-| `audit_experiment --data` output | **T1** | Findings + the *surfaces checked* inline; the data sampled → pointer. |
-| `audit_experiment` close output | **T1** | Findings inline; quoted RESULTS/rollout payload → pointer. |
+| `verify_claim` output | **T1** (free-form surface) | Verdict + reasoning inline; the `evidence: <file>: "<quote>"` lines are the payload locus → pointer. |
+| `audit_experiment --design` output | **T1** (free-form surface) | Finding id/severity/summary inline; any quoted brief payload → pointer. |
+| `audit_experiment --data` output | **T1** (free-form surface) | Findings + the *surfaces checked* inline; the data sampled / quoted rows → pointer. |
+| `audit_experiment` close output | **T1** (free-form surface) | Findings inline; quoted RESULTS/rollout payload → pointer. |
 | Triage responses (per finding) | **T1** | Status + reason inline; any quoted payload in the reason → pointer. |
 | Raw rollouts / datasets / judge-input transcripts / model-output dumps | **T0** | Inherently the sensitive payload. |
 | PR body (umbrella: first-para Problem + Approach) | derived | Built only from T2 record bodies → inherits T2; never from T0/T1 payload. |
@@ -82,17 +86,56 @@ Default assignment by record type (the produce/consume contract keys on this tab
 The four gate outputs are T1, not T0, on purpose: their **structure** (which finding, what severity, the
 triage decision) is exactly the browsable trail the umbrella wants, and it is not itself the sensitive payload.
 What is sensitive is any *quoted payload* a finding cites ("the rollout said X"), which the redaction layer
-pointer-izes per the payload-field rule. The reviewer always reads the full payload from the artifact store
+pointer-izes per the payload-locus rule. The reviewer always reads the full payload from the artifact store
 (per #150's reviewer-resolution); the *posted* output never has to.
 
-### The payload-field rule (what T0/T1 actually redact)
+**The brief is T1, not T2 (Finding-2 fix).** `START.md` / `CHECKLIST.md` and the config subfields of
+`DESIGN.md` are authored by the AAR but carry the experiment's *executable* surface — the exact prompts, the
+eval and grader definitions and flags, raw artifact-store paths, and model IDs that can reveal a pre-release
+model. "AAR-authored" is therefore **not** sufficient for T2; T2 additionally requires no operational-sensitive
+config. The brief is T1 with an explicit **safe-field allowlist** (what stays inline): hypothesis, arms (by
+name/label), metric names, decision rules, cost estimate, gate checklist *structure* (which gate, pass/fail),
+and the design rationale prose. Everything outside the allowlist — verbatim prompts, eval/grader bodies, raw
+paths, model IDs flagged sensitive by policy — is a payload locus the validator pointer-izes/redacts. The
+allowlist is the contract's T1 default for the brief; an instance may tighten it (a model ID can be made
+allowlisted on an instance running only public models, via the policy below — a *tighten/loosen* the validator
+checks).
 
-A **payload field** is any field whose value is, or directly embeds, content the experiment *elicited or
-ingested* rather than *the AAR authored*: a raw model completion, a row of generated/training data, a
-judge-input transcript, a verbatim source/citation body, or an inline example of any of those. A T0 record is
-entirely payload (body → pointer). A T1 record declares its payload fields in its own schema; the validator
-replaces each with either an **artifact-store pointer** (preferred, so the reviewer can still reach it) or a
-**redaction marker** `[[redacted: <reason>]]` when no stable artifact exists.
+#### Two T1 surfaces — named-field vs. free-form (Finding-1 fix)
+
+T1 covers two physically different record shapes, and the validator handles them by **shape**, not by assuming
+a uniform structure:
+
+- **Named-field T1** (records with a schema): the brief subfields, triage responses, and the future
+  schema'd records (#151 triage, #145 clearance). The owning schema **declares its payload field names**; the
+  validator reads those named fields and pointer-izes/redacts them, keeping the allowlisted fields inline.
+- **Free-form T1** (the audit producers *as they emit today*): `verify_claim` / `audit_experiment` emit
+  free-form Markdown whose payload appears in a **known convention** — the `evidence: <file>: "<quote>"` line
+  and any fenced quote block. The validator's payload locus for these is that **convention/pattern**: the
+  quoted `"<...>"` after an `evidence:` key, and fenced code/quote blocks, are treated as payload and
+  pointer-ized/redacted; the surrounding finding text (id, severity, summary, recommendation) stays inline.
+
+**The clean target, named as the child's first task.** The free-form pattern-match is the *bridge* that lets
+the contract bind to today's outputs without a producer rewrite. The cleaner end state is to make the audit
+producers emit a **structured sanitized record** (named safe fields + `artifact_ref` payload refs) so the
+validator never pattern-matches free text. The spawned implementation child's **first task** is to add that
+structured-emit to the audit producers (a small, well-scoped change to `verify_claim` / `audit_experiment`
+output); until it lands, the free-form pattern-match is the fail-closed fallback (an `evidence:` line whose
+quote cannot be parsed → BLOCK, never publish-through). This resolves the "T1 assumes structure that doesn't
+exist" gap: the contract works on today's free-form output *and* names the structured-emit upgrade.
+
+### The payload-locus rule (what T0/T1 actually redact)
+
+A **payload locus** is any field, quote, or block whose value is, or directly embeds, content that is either
+(a) *elicited or ingested* by the experiment (a raw model completion, a row of generated/training data, a
+judge-input transcript, a verbatim source/citation body, an inline example of any of those) or (b)
+*operationally sensitive* config (an exact prompt, an eval/grader definition, a raw artifact path, a
+pre-release model ID). A T0 record is entirely payload (body → pointer). A T1 record locates its payload by
+**shape** — named fields for schema'd records, the `evidence:`/fenced-block convention for the free-form audit
+outputs (see "Two T1 surfaces" above). The validator replaces each locus with either an **artifact-store
+pointer** (preferred, so the reviewer can still reach it) or a **redaction marker** `[[redacted: <reason>]]`
+when no stable artifact exists. A locus the validator cannot parse (e.g. a malformed `evidence:` quote) →
+BLOCK, never publish-through.
 
 Pointer schema (the single shape every pointer uses — this is the contract the artifact store and the trail
 agree on):
@@ -135,6 +178,8 @@ record_visibility:
   require_private_repo: <bool>        # if true, the gate fails closed unless the research repo is private
   tier_overrides:                    # may only TIGHTEN (T2→T1→T0), never loosen; validator rejects a loosen
     RESULTS_narrative: T1            # e.g. an instance that won't even publish result prose inline
+  brief_safe_fields:                 # the T1 brief allowlist; instance may EXTEND only with non-sensitive keys
+    - model_id                       #   e.g. an instance running only public models can inline model_id
   max_quote_chars: <int>             # PR-quote ceiling; default 0 (no payload quote). >0 requires private repo.
   redaction_marker: "[[redacted: %s]]"  # format; default as above
 ```
@@ -181,7 +226,8 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
 - It does not define the artifact store, its auth, or how `uri` resolves — that is the instance profile (#153)
   and the existing run-experiment artifact-store seam. The contract only fixes the **pointer shape** the trail
   uses.
-- It does not implement the validator or wire it into the skills — that is the spawned `ready` child.
+- It does not implement the validator or wire it into the skills — the validator *library* is the `ready`
+  child; the wiring is the `blocked-by` child (see Rollout).
 - It does not define the triage-artifact field schema (#151), the design-clearance artifact (#145), or
   terminal-state evidence (#152). It classifies the **visibility tier** of those records' content and declares
   their payload-field rule; their internal field schemas are those children's. The contract is additive: each
@@ -211,8 +257,9 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
 
 ## Blast radius
 
-- **No code in this PR.** Doc-only design; the deliverable is the contract above. The validator and its wiring
-  are the spawned `ready` child.
+- **No code in this PR.** Doc-only design; the deliverable is the contract above. The dependency-free validator
+  *library* is the spawned `ready` child; its produce/post/merge wiring + the audit structured-emit are a
+  separate `blocked-by` child (see Rollout).
 - **Unblocks (the umbrella's `blocked-by` wiring):** #155 (canonical-path record layout) consumes the tier
   table to decide which record content is committed vs pointer-ized; #156 (design-experiment PR-open + --design
   review posting) consumes the produce-time + post-time validation; #157 (run-experiment push/close + merge
@@ -236,16 +283,29 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
 ## Rollout + rollback
 
 Doc-only design PR; lands the contract on `main` via the cross-family `--scaffold` gate (closes exactly #146,
-disposition `needs-design`). Then file the implementation as a `ready` child: **build the record-visibility
-validator + the three enforcement call sites (produce / post / merge-recheck) + the public-safe default
-policy + the fail-closed smoke (a T0 body inline, a loosening override, a payload quote over ceiling, an
-unknown record type — each must BLOCK).** That child is `ready` because this doc leaves no open design
-decision: the tiers, the table, the pointer shape, the policy schema, and the three boundaries are all fixed
-here. It is `blocked-by` #150 (the helper hosts the post/merge call sites) and references #153 (the policy
-block) — it can build the validator + produce-time path immediately and wire the post/merge sites as #150 and
-#153 land. Rollback is a normal revert of the validator + wiring; with the contract reverted, the umbrella's
-`blocked-by` pieces are simply un-authorized again — no data loss, since no experiment-PR path ships before
-this contract's validator does.
+disposition `needs-design`). The decomposition is split so the `ready` unit is genuinely dependency-free and
+the dependent wiring is honestly `blocked-by` — matching the umbrella's discipline (the umbrella kept *its
+own* pieces `needs-design`/`blocked-by` precisely because they had hidden dependencies; this child spawns one
+narrow piece that does not, and files the rest blocked):
+
+- **`ready` — the record-visibility validator *library*.** A pure function `validate(record_type, body,
+  policy) → safe_render | BLOCK` plus the public-safe default policy and its own unit smoke (a T0 body inline,
+  a loosening tier override, a payload quote over `max_quote_chars`, an unknown record type, a malformed
+  `evidence:` quote — each must BLOCK). This is `ready` because it has **no** GitHub / helper / profile / skill
+  dependency — it is a self-contained classifier+redactor tested against fixture record bodies. The tiers, the
+  table, the pointer shape, the two T1 surfaces, and the policy schema are all fixed in this doc, so it carries
+  no open design.
+- **`blocked-by` — the produce/post/merge wiring + the structured audit-emit.** Wiring the validator into
+  `design-experiment` / `run-experiment` (produce-time), the helper's review/PR-body post path (post-time),
+  and the merge gate (merge-recheck), plus the audit-producer structured-emit upgrade. This is filed
+  `blocked-by` #150 (helper hosts the post/merge call sites), #153 (the `record_visibility` policy block lives
+  in its profile), and the per-experiment worktree/record-layout contract (#155) — it cannot land before those
+  seams exist. The audit structured-emit (Finding-1's clean target) rides with this wiring issue as its first
+  task.
+
+Rollback is a normal revert of the validator + wiring; with the contract reverted, the umbrella's `blocked-by`
+pieces are simply un-authorized again — no data loss, since no experiment-PR path ships before this contract's
+validator does.
 
 ## Decision note (for the PM record)
 
