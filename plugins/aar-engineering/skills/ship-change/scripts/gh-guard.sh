@@ -134,18 +134,19 @@ is_mutating_verb(){
     *) return 1 ;;
   esac
 }
-# has_mutating_positional: scan EVERY positional word (flag/value-skipping) for a mutating verb, so a nested
-# write a few tokens in — `gh repo deploy-key add`, `gh project item-add` — is caught, not just the first
-# verb after the family (#165 review). Sets nothing; returns 0 if any positional word is a mutating verb.
+# has_mutating_positional: check the LEADING run of positional words (the verb + an immediately-following
+# nested sub-verb) for a mutating verb — `gh repo deploy-key add`, `gh project item-add`. It STOPS at the
+# first flag, so a flag's VALUE deep in the args (`gh run list --event push`) is never mis-read as a verb
+# (#165 review F2-regression). Returns 0 if a verb in that leading run is mutating. The nested command word
+# (subcommand groups like `repo deploy-key`, `project item`) is NEVER itself a flag, so a real nested write
+# always sits in this leading positional run before any flag.
 has_mutating_positional(){
   local start=$1 i n=${#ARGV[@]} tok
   i=$start
   while [ "$i" -lt "$n" ]; do
     tok=${ARGV[$i]}
-    if [ "${tok#-}" != "$tok" ]; then
-      if is_value_flag "$tok"; then i=$((i+2)); continue; fi
-      i=$((i+1)); continue
-    fi
+    # stop at the first FLAG: everything after it is options/values, not the command's verb path.
+    [ "${tok#-}" != "$tok" ] && break
     if is_mutating_verb "$tok"; then return 0; fi
     i=$((i+1))
   done
@@ -162,8 +163,10 @@ case "$sub" in
   repo|release|secret|variable|ruleset|workflow|run|cache|gist|label|environment|codespace|org|extension)
     # `run` has no plain create but `gh run rerun|cancel|delete` mutate; `workflow run|enable|disable` mutate;
     # `gh repo create|delete|edit|rename|archive|fork|sync`, `gh repo deploy-key add`, `gh release
-    # create|delete|edit|upload`, `gh secret set|delete`, etc. Scan ALL positional words (not just the first
-    # verb) so a NESTED write is caught. Reads (view/list/download/clone) pass.
+    # create|delete|edit|upload|delete-asset`, `gh secret set|delete`, etc. Reads (view/list/download/clone) pass.
+    # CONTEXT-specific: `gh label clone` is a WRITE (copies labels into a repo), unlike the read `gh repo clone`
+    # — handle it here before the generic verb scan, which deliberately omits `clone` to keep `repo clone` a read.
+    [ "$sub" = label ] && [ "$verb" = clone ] && guard_die "label clone"
     if has_mutating_positional $((sub_idx+1)); then guard_die "$sub $safe_verb"; fi
     exec_real_gh "$@"
     ;;
