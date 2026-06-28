@@ -698,21 +698,48 @@ fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
   fi
   return 0
 }
-# fd_save posts the local cache as the new canonical comment, after guarding the monotonic counter
-# (fd_merge_canonical_round). The canonical read is REQUIRED, not best-effort: if it FAILS (GitHub error) we
-# cannot know whether the post would regress `round`, so we fail closed (rc 3, no post) rather than risk
-# overwriting a higher canonical counter with a stale local cache. A clean read that finds NO canonical comment
-# yet (empty body) is a legitimate first save and proceeds. The local cache's `round` is also validated at save
-# time (not only on finish's load) so a hand-edited `fdispo save` can never PUBLISH a malformed counter. RETURNS:
-# gh post rc on a real post; 3 if the required canonical read failed; 4 if the local round is malformed; 5 if a
-# required higher-canonical round adoption could not be written.
-fd_save(){  # fd_save <wt> <repo> <pr> <tok>
-  local wt=$1 repo=$2 pr=$3 tok=$4 cache cbody rrc=0; cache=$(fd_cache "$wt")
+# fd_clamp_to_canonical (#137): the OTHER half of monotonicity. The round counter is REVIEWER-OWNED — only the
+# finish path (fd_bump_round, after a completed merge-gate review) may ADVANCE it. An author-facing `fdispo save`
+# of a hand-edited cache must not be able to publish a `round` ABOVE the canonical value (which would advance, or
+# attach bogus fingerprint/sha to, the counter without a merge review). So on a non-finish save, if the local
+# round exceeds canonical, clamp the local round + fingerprint + sha DOWN to canonical's before posting. (Combined
+# with fd_merge_canonical_round's adopt-when-canonical-is-higher, a non-finish save can only ever publish exactly
+# the canonical round — it can change findings, never the counter.) Args: <cache> <canonical-body>. rc nonzero
+# only if the clamp write was required but failed (fd_save then aborts). No-op (rc 0) when local <= canonical.
+fd_clamp_to_canonical(){  # fd_clamp_to_canonical <cache> <canonical-body>
+  local cache=$1 cbody=$2 cjson cround lround fp sha
+  cround=0
+  if [ -n "$cbody" ]; then
+    cjson=$(printf '%s' "$cbody" | sed -n '/```json/,/```/p' | sed '1d;$d' \
+      | jq -c '{r:(.round // 0), fp:(.last_review_fingerprint // ""), sha:(.last_reviewed_sha // "")}' 2>/dev/null || true)
+    if [ -n "$cjson" ]; then cround=$(printf '%s' "$cjson" | jq -r '.r' 2>/dev/null); case "$cround" in ''|*[!0-9]*) cround=0 ;; esac; fi
+  fi
+  lround=$(jq -r '(.round // 0)' "$cache" 2>/dev/null); case "$lround" in ''|*[!0-9]*) lround=0 ;; esac
+  if [ "$lround" -gt "$cround" ] 2>/dev/null; then
+    fp=""; sha=""
+    if [ -n "${cjson:-}" ]; then fp=$(printf '%s' "$cjson" | jq -r '.fp'); sha=$(printf '%s' "$cjson" | jq -r '.sha'); fi
+    if jq --argjson r "$cround" --arg fp "$fp" --arg sha "$sha" \
+        '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
+        && mv "$cache.tmp" "$cache"; then :; else rm -f "$cache.tmp" 2>/dev/null || true; return 1; fi
+  fi
+  return 0
+}
+# fd_save posts the local cache as the new canonical comment, after guarding the monotonic counter. The canonical
+# read is REQUIRED, not best-effort: if it FAILS (GitHub error) we fail closed (rc 3, no post) rather than risk
+# regressing `round`. A clean read that finds NO canonical comment yet (empty body) is a legitimate first save. The
+# local round is validated at save time (rc 4 on malformed). The round is REVIEWER-OWNED: by default (allow_advance
+# unset/0 — the author `fdispo save` path) a local round ABOVE canonical is CLAMPED down, so only the finish path
+# (allow_advance=1, right after fd_bump_round) may advance it. RETURNS: gh post rc on a real post; 3 read failed;
+# 4 malformed local round; 5 a required canonical adoption couldn't be written; 6 a required author-clamp couldn't
+# be written.
+fd_save(){  # fd_save <wt> <repo> <pr> <tok> [allow_advance:0|1]
+  local wt=$1 repo=$2 pr=$3 tok=$4 allow_advance=${5:-0} cache cbody rrc=0; cache=$(fd_cache "$wt")
   fd_round_valid "$cache" || return 4   # never publish a malformed round (back-compat absent/null still ok)
   cbody=$(gh_author "$tok" -R "$repo" pr view "$pr" --json comments \
     --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null) || rrc=$?
   [ "$rrc" = 0 ] || return 3   # canonical read failed -> cannot guarantee monotonicity -> fail closed, do NOT post
-  fd_merge_canonical_round "$cache" "$cbody" || return 5   # required round adoption couldn't be written -> fail closed
+  fd_merge_canonical_round "$cache" "$cbody" || return 5   # canonical >= local: required adoption couldn't be written
+  [ "$allow_advance" = 1 ] || fd_clamp_to_canonical "$cache" "$cbody" || return 6  # author save: local can't out-advance canonical
   printf '%s\n\n## Finding dispositions — disposition-aware merge gate (canonical, latest)\n\n```json\n%s\n```\n' \
     "$FD_MARKER" "$(cat "$cache")" | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1
 }
@@ -1888,7 +1915,10 @@ Split into one design PR per doc."
       # pre-review short-circuit + the trip both read round/last_reviewed_sha from the comment) — a lost save
       # would UNDERCOUNT and silently defeat the backstop. So fail CLOSED on a save failure that drops a real
       # increment; a non-advancing save (clean review / idempotent retry) stays a cosmetic WARN.
-      if fd_save "$WT" "$REPO" "$PR" "$ATOK"; then :; else
+      # allow_advance=1: THIS is the one legitimate round-advancing save (right after fd_bump_round). Every other
+      # fd_save (the author-facing fdispo paths) defaults to 0 and is clamped to canonical, so the counter is
+      # reviewer-owned — only finish can advance it.
+      if fd_save "$WT" "$REPO" "$PR" "$ATOK" 1; then :; else
         if [ "${NCV_ROUND:-0}" != "${NCV_BEFORE:-0}" ]; then
           die "could not persist the advanced non-convergence round ($NCV_BEFORE -> $NCV_ROUND) to the canonical PR comment (GitHub write failed) — failing closed so the next finish does not undercount. Re-run finish."
         fi

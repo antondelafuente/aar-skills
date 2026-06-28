@@ -94,15 +94,17 @@ The load-bearing decisions:
    - A *present-but-malformed* `round` in the loaded state (a corrupt or hand-edited disposition comment) is
      treated as corruption: `finish` dies up front rather than letting the safe-reader reset it to `0` and
      defeat the backstop. Absent / null stays back-compatible `0`.
-   - The counter is **monotonic and reviewer-owned**: every `fd_save` (including the author-facing
-     `wf.sh fdispo save`, which posts a hand-edited cache carrying only finding dispositions) first re-reads
-     the canonical `round` from the PR and carries forward `MAX(local, canonical)` with its matching
-     fingerprint + `last_reviewed_sha`. An author save can therefore never *lower or delete* the counter and
-     reset the backstop; `finish`'s own advancing save still wins (its cache already holds the higher,
-     just-incremented round). That canonical re-read is **required**, not best-effort: if it fails (GitHub
-     error) `fd_save` fails closed (no post) rather than risk overwriting a higher canonical counter with a
-     stale local cache. A `round` that is present but not a non-negative integer JSON *number* (a numeric
-     string, float, or negative — type-checked, not rendered-string-checked) is rejected as corruption.
+   - The counter is **monotonic and strictly reviewer-owned — only `finish` may move it**. Every `fd_save`
+     re-reads the canonical `round` and reconciles in BOTH directions: it carries forward a higher canonical
+     value (an author save can never *lower or delete* the counter), AND, on the author-facing
+     `wf.sh fdispo save` path, it CLAMPS a local round *above* canonical back down (an author save can never
+     *raise* it either, nor attach bogus fingerprint/sha). The single exception is `finish`'s own save right
+     after `fd_bump_round` (`allow_advance=1`), the one legitimate advance. Net: a `fdispo save` can change
+     findings but publishes exactly the canonical round; the counter advances only through a completed
+     merge-gate review. The canonical re-read is **required**, not best-effort: if it fails (GitHub error)
+     `fd_save` fails closed (no post). A `round` that is present but not a non-negative integer JSON *number*
+     (numeric string, float, negative — type-checked, in both the local cache and the canonical comment) is
+     rejected as corruption (fail closed), never silently coerced to 0.
 
    Idempotence holds across a failed save because the PR comment is the source of truth: a re-run reloads the
    last *persisted* state and re-increments from there.

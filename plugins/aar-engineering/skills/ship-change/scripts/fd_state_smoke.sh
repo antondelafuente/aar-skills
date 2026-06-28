@@ -168,5 +168,19 @@ mc4="$TMP/mc4.json"; echo '{"round":2,"findings":[]}' > "$mc4"
 fd_merge_canonical_round "$mc4" ""; [ "$(fd_round "$mc4")" = 2 ] && ok merge-empty-canonical-noop || no "merge-empty-canonical-noop ($(fd_round "$mc4"))"
 fd_merge_canonical_round "$mc4" "no json fence here"; [ "$(fd_round "$mc4")" = 2 ] && ok merge-unparseable-canonical-noop || no "merge-unparseable-canonical-noop ($(fd_round "$mc4"))"
 
+# fd_clamp_to_canonical: the round is reviewer-owned — an author save can't publish a round ABOVE canonical.
+# local > canonical -> clamp DOWN to canonical (round + fp/sha), preserving findings.
+cl="$TMP/cl.json"; echo '{"round":9,"last_reviewed_sha":"BOGUS","findings":[{"id":"z","severity":"LOW","status":"fixed"}]}' > "$cl"
+fd_clamp_to_canonical "$cl" "$(canon_body '{"round":3,"last_reviewed_sha":"SHA3"}')" && ok clamp-rc0 || no "clamp-rc0"
+[ "$(fd_round "$cl")" = 3 ] && ok clamp-lowers-round || no "clamp-lowers-round ($(fd_round "$cl"))"
+[ "$(fd_last_reviewed_sha "$cl")" = "SHA3" ] && ok clamp-adopts-canonical-sha || no "clamp-adopts-canonical-sha ($(fd_last_reviewed_sha "$cl"))"
+[ "$(jq -r '.findings[0].id' "$cl")" = "z" ] && ok clamp-preserves-findings || no "clamp-preserves-findings"
+# local <= canonical -> no-op (merge half handles raising; clamp leaves it).
+cl2="$TMP/cl2.json"; echo '{"round":2,"findings":[]}' > "$cl2"
+fd_clamp_to_canonical "$cl2" "$(canon_body '{"round":5}')"; [ "$(fd_round "$cl2")" = 2 ] && ok clamp-noop-when-not-above || no "clamp-noop-when-not-above ($(fd_round "$cl2"))"
+# no canonical comment at all -> an author can't publish ANY round (clamp to 0).
+cl3="$TMP/cl3.json"; echo '{"round":4,"findings":[]}' > "$cl3"
+fd_clamp_to_canonical "$cl3" ""; [ "$(fd_round "$cl3")" = 0 ] && ok clamp-to-zero-no-canonical || no "clamp-to-zero-no-canonical ($(fd_round "$cl3"))"
+
 if [ "$fails" -eq 0 ]; then echo "fd_state_smoke: ALL PASS"; else echo "fd_state_smoke: FAILURES"; fi
 exit "$fails"
