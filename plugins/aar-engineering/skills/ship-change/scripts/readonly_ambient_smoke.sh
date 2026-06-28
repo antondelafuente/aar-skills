@@ -501,6 +501,20 @@ else
   fail "F2 r12: non-GitHub origin not flagged/skipped"
 fi
 
+# F1 r18b (behavioral): a credential-bearing GitHub HTTPS origin must NOT expose its token in the `git push`
+# child argv — the push URL is userinfo-stripped (the credential is supplied via the shim). The fake git logs
+# every push argv; assert no push argv carries the token.
+WT18="$TMP/wt-credgithub"; mkdir -p "$WT18"
+"$REAL_GIT" -C "$WT18" init -q
+"$REAL_GIT" -C "$WT18" remote add origin "https://user:PUSHARGVTOKEN@github.com/o/r.git"
+: > "$MUTLOG"
+RO_TARGET="$WT18" run_strict "RO_aaa" "" "" denied rejected || true
+if grep 'GIT_PUSH_ATTEMPT' "$MUTLOG" | grep -q 'PUSHARGVTOKEN'; then
+  fail "F1 r18b: a credential-bearing origin exposed its token in the git push argv"
+else
+  pass "F1 r18b: git push argv is userinfo-stripped (token not in child argv)"
+fi
+
 # F1 r18 (behavioral): an ENV-INJECTED credential helper (GIT_CONFIG_COUNT/KEY/VALUE) must be neutralized by
 # the probe's full isolation (GIT_CONFIG_COUNT=0 + helper reset + shim) — a real `git push --dry-run` under
 # that env must NOT invoke the env helper's store/erase. Mirror the r9 approach against a non-resolving host.

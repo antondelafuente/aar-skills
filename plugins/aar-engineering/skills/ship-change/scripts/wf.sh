@@ -1269,7 +1269,7 @@ readonly_probe_one_push_url(){
   # This both preserves detection (a real ambient credential is found by git's own correct parsing) and makes
   # store/erase impossible.
   shim="$tmp/cred-ro-shim.sh"
-  local cred_in cred_out parsed_host parsed_proto parsed_path parsed_user rest
+  local cred_in cred_out parsed_host parsed_proto parsed_path parsed_user rest push_url
   parsed_proto=${url%%://*}; case "$url" in *://*) : ;; *) parsed_proto=ssh ;; esac
   parsed_user=""
   # Use the PARSED authority host (url_host), never an inline glob-prone parse — so the host handed to
@@ -1289,6 +1289,14 @@ readonly_probe_one_push_url(){
       [ "$parsed_path" = "$rest" ] && parsed_path=""
       ;;
     *) parsed_path="" ;;
+  esac
+  # Build a USERINFO-STRIPPED push URL so a credential-bearing origin
+  # (https://user:TOKEN@github.com/o/r) never exposes its token in the `git push` child argv (visible via ps)
+  # — the credential is supplied via the read-only shim, not the URL (#166 code-review F1 r18b). For HTTPS we
+  # reconstruct https://host[/path]; scp-style / ssh:// carry no secret userinfo (just `git@`), so pass as-is.
+  case "$url" in
+    https://*) if [ -n "$parsed_path" ]; then push_url="https://${parsed_host}/${parsed_path}"; else push_url="https://${parsed_host}/"; fi ;;
+    *) push_url=$url ;;
   esac
   # `git credential fill` resolves the ambient credential using git's OWN rules (handles helpers with args,
   # url-scoped helpers, !-commands) and performs only `get` — no mutation. Run in the TARGET WORKTREE context
@@ -1332,7 +1340,7 @@ readonly_probe_one_push_url(){
         timeout "$to" git -C "$tmp" -c core.askPass= -c core.hooksPath=/dev/null \
         -c credential.helper= -c "credential.helper=$shim" \
         -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
-        push --dry-run --no-verify "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" >/dev/null 2>&1 || rc=$?
+        push --dry-run --no-verify "$push_url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" >/dev/null 2>&1 || rc=$?
   rm -rf "$tmp"
   # ASYMMETRIC: ONLY an ACCEPTED dry-run (rc 0) is meaningful -> RC=0 (the caller raises a FAIL). EVERY other
   # outcome — auth rejection, authz denial, pre-auth transport failure, timeout, any error — is simply "not
