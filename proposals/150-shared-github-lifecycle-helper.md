@@ -55,7 +55,8 @@ function is merge-authority — the cost of base-sourcing a function that didn't
 of branch-sourcing one that did is a gate bypass. **Note the split is documentation, not the runtime boundary:**
 a *merge-authority command* base-sources the entire helper+driver and sources no worktree shell (round-4
 FINDING 1); the runtime/merge-authority labels record *which functions are gate-bearing*, and the "runtime may
-run from the worktree copy" license applies only to **read-only commands** (decision 2).
+run from the worktree copy" license applies only to **static, credential-free commands** — every command that
+mints a token, pushes, posts to GitHub, or runs/posts a reviewer base-enters (decision 2, round-5 FINDING 1).
 
 **Identity + auth (MERGE-AUTHORITY).** Resolve and mint the engineer-bot identity for a given family, fail
 closed when a named identity is required and missing — `engineer_token`, `engineer_token_cmd`,
@@ -134,8 +135,9 @@ The split (the full assignment is in decision 1's function surface; the principl
   (`need_gh`, `need_ambient_gh`). The label means these are **not gate-bearing** — but it does **not** license
   sourcing branch shell in a merge-authority command (round-4 FINDING 1): in a merge-authority command even
   these are reached from the base-sourced helper, and branch content they format is passed as **data**. The
-  "may run from the worktree copy" license applies only to **read-only commands** (`doctor`, interim
-  `design-review`), which carry no merge authority.
+  "may run from the worktree copy" license applies only to **static, credential-free commands** (help/usage,
+  purely-local diagnostics that touch no token and no `gh`) — NOT to `design-review`/`doctor`, which handle
+  credentials and therefore base-enter (round-5 FINDING 1).
 - **Poisoned-helper smoke.** Ship a smoke test matching `locate_audit_smoke.sh`: construct a branch that edits
   `gh-lifecycle.sh`'s merge-authority code to a known-bad behavior (e.g. force `count_high` to return 0, or
   rewrite `opposite_family` to return the author's own family), run the gate, and assert the gate used the
@@ -168,8 +170,15 @@ keep itself honest. The resolution is a **minimal trusted loader that stays outs
   from the worktree. Where a merge-authority command must render text from branch content, it does so via the
   base-sourced formatters operating on that string, or in a **sanitized output-only subprocess with no
   credentials in its environment** — so even a malicious branch string cannot reach a token or a `gh` call.
-  (Read-only commands — `doctor`, interim `design-review` comments — may run the worktree copy; they carry no
-  merge authority, so a poisoned formatter there changes only that non-gating output.)
+- **Base-enter ANY command that touches credentials or GitHub, not just merge-satisfying ones (round-5 FINDING
+  1).** The base-launcher requirement is keyed on **handling credentials / GitHub**, not on "can it merge":
+  `design-review` mints a token, pushes, and posts as the reviewer identity, and `doctor` mints tokens to test
+  them — all carry credentials even though they are not merge-satisfying. So **every command that mints a token,
+  pushes, posts to GitHub, or runs/posts a reviewer enters through the installed/base launcher** with the whole
+  helper+driver base-sourced. Only genuinely static, credential-free commands (help/usage, purely local
+  diagnostics that touch no token and no `gh`) may run the worktree copy — a poisoned formatter there reaches
+  no credential and no GitHub call. The earlier "interim `design-review`/`doctor` may run the worktree copy"
+  carve-out was wrong and is removed.
 
 #### The trusted entrypoint — the boundary must terminate in base code, not a branch driver (round-2 FINDING 3)
 
@@ -195,8 +204,8 @@ all.** The rule:
   poison did not take effect, and the branch driver did not become the boundary). Strictly stronger than the
   poisoned-*helper* smoke.
 - **Scope/cost note.** The base-launcher entry is needed only for the merge-authority *commands* (those that can
-  merge/approve/select-closing-ref/mint a privileged write), not for read-only subcommands (`doctor`, interim
-  `design-review` comments), which may run from the worktree copy. The extraction child decides the exact set of
+  merge/approve/select-closing-ref/mint a privileged write/push/post/run-a-reviewer), not for static
+  credential-free subcommands (help/usage, purely-local diagnostics). The extraction child decides the exact set of
   base-entry commands, but the rule — *no merge-authority command's security boundary is branch-resident; it
   enters through the installed/base launcher* — is settled here.
 
@@ -260,22 +269,28 @@ a fresh machine is a silent install break. The contract:
   verify-claims, with the merge-authority subset re-materialized from base ref by the trusted loader/entrypoint
   (decision 2). The library's location is therefore not hardcoded to one install layout — it is discovered, with
   a fail-closed error if the dependency is absent (never a silent fallback to a missing/forked copy).
-- **Machine-readable dependency declaration (round-4 FINDING 3).** "Declared dependency" must not collapse into
-  README-only discipline. The dependency is declared in a **repo-owned, machine-readable surface** — the
-  consumer plugins' `.claude-plugin/plugin.json` (a `dependencies`/companion field) where the harness supports
-  it, plus a small repo-owned CI manifest the cross-plugin smoke reads — so the smoke and the consumers both
-  resolve the dependency from the *same* declared source, not from prose. A consumer's resolution-failure error
-  prints the **exact companion install command** so a fresh install is self-correcting.
+- **One canonical machine-readable dependency source (round-4 FINDING 3 / round-5 FINDING 2).** "Declared
+  dependency" must not collapse into README-only discipline *or* spread across multiple possible homes. The
+  canonical source is **exactly one repo-owned CI manifest, `.aar-ci/plugin-deps.conf`** (a simple
+  `<consumer>: <dependency>` map), and **both** the consumers' resolution path **and** the cross-plugin smoke
+  read *that same file* — not plugin.json (harness-dependent, not guaranteed across harnesses), not prose. A
+  consumer's resolution-failure error prints the **exact companion install command** so a fresh install is
+  self-correcting. (If a harness later supports a native `plugin.json` dependency field, that becomes an
+  additive convenience; `.aar-ci/plugin-deps.conf` stays the canonical source the smoke enforces.)
 - **Cross-plugin install smoke (a deliverable).** Today `.aar-ci/fake_home_smoke.sh` installs only the single
-  plugin under test. The extraction child extends the smoke (or adds a companion) to read the dependency
-  manifest above and install **each consumer together with its declared `aar-github-lifecycle` dependency** in a
-  virgin HOME, then assert the consumer can *resolve and source* the helper — the install-path proof that the
-  dependency contract holds, the same role the existing fake-HOME smoke plays for a single plugin.
-- **Codex skill mirror.** The repo mirrors plugins into Codex skill installs; the extraction child updates that
-  mirror so the helper is present on the Codex path too (the same surface #69's discovery already spans).
+  plugin under test. The extraction child extends the smoke (or adds a companion) to read
+  `.aar-ci/plugin-deps.conf` and install **each consumer together with its declared `aar-github-lifecycle`
+  dependency** in a virgin HOME, then assert the consumer can *resolve and source* the helper — the install-path
+  proof that the dependency contract holds, the same role the existing fake-HOME smoke plays for a single plugin.
+- **Codex install documentation, not a product-tree mirror (round-5 FINDING 3).** The product tree carries no
+  "Codex mirror" artifact — Codex install is done per-instance by symlinking each source skill dir into the
+  harness's skills directory (README). So the deliverable is **documentation**: the README's Codex-install
+  section gains `aar-github-lifecycle` as a skill to symlink, exactly like the existing plugins. Updating a given
+  fleet's actual symlinks is consuming-instance install state, **out of the product** — the product only
+  documents the step.
 
-This contract is settled here; the extraction child implements the marketplace/README/Codex-mirror edits and the
-cross-plugin smoke.
+This contract is settled here; the extraction child implements the marketplace.json + README edits (incl. the
+Codex symlink doc) and the cross-plugin smoke.
 
 ### 5. The contract for the #130 consumers
 
@@ -341,9 +356,10 @@ The boundary is: helper enforces family on what it runs; #154 enforces it on wha
   `skills/github-lifecycle/scripts/{gh-lifecycle.sh, gh-lifecycle-load.sh, poisoned-helper + poisoned-driver
   smokes}` + `.aar-ci` hook), so it passes the module-shape convention and the fake-HOME install gate. The
   SKILL.md documents the library; the library is *sourced by drivers*, not invoked by an agent.
-- **Install surface** (decision 4): `.claude-plugin/marketplace.json` + README install list + the Codex skill
-  mirror gain the new plugin; `.aar-ci/fake_home_smoke.sh` gains a cross-plugin install assertion (each consumer
-  + its declared helper dependency resolves in a virgin HOME).
+- **Install surface** (decision 4): `.claude-plugin/marketplace.json` + the README install list (incl. the Codex
+  symlink doc) gain the new plugin; a new canonical `.aar-ci/plugin-deps.conf` declares the
+  consumer→`aar-github-lifecycle` dependency; `.aar-ci/fake_home_smoke.sh` gains a cross-plugin install
+  assertion that reads that manifest (each consumer + its declared helper dependency resolves in a virgin HOME).
 - **`aar-engineering` / `wf.sh`** is refactored to source the shared library instead of carrying its own copies
   of the extracted primitives, *and* to route its merge-authority subcommands through the installed/base
   launcher (decision 2 — the worktree driver becomes a refusing stub for those). This is the one cross-cutting
