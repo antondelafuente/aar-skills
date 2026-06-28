@@ -74,10 +74,10 @@ Default assignment by record type (the produce/consume contract keys on this tab
 | `RESULTS.md` narrative + aggregate metrics/tables | **T2** | Outcome prose + numbers the AAR writes; no raw rows. |
 | `START.md`, `CHECKLIST.md`, and `DESIGN.md` *config subfields* (exact prompts, eval/grader definitions + flags, raw artifact paths, model IDs, seed/sample data) | **T1** | AAR-authored but operationally sensitive: a verbatim prompt/eval/grader or a pre-release model ID is payload even though no model produced it. Safe-field allowlist below; everything else in the brief is a payload locus → pointer/redact. |
 | `RESULTS.md` per-example rows / transcript excerpts | **T0** | Raw elicited output → pointer-only. |
-| `verify_claim` output | **T1** (free-form surface) | Verdict + reasoning inline; the `evidence: <file>: "<quote>"` lines are the payload locus → pointer. |
-| `audit_experiment --design` output | **T1** (free-form surface) | Finding id/severity/summary inline; any quoted brief payload → pointer. |
-| `audit_experiment --data` output | **T1** (free-form surface) | Findings + the *surfaces checked* inline; the data sampled / quoted rows → pointer. |
-| `audit_experiment` close output | **T1** (free-form surface) | Findings inline; quoted RESULTS/rollout payload → pointer. |
+| `verify_claim` output | **T1** | Today free-form → **pointer-only**; once structured-emit lands, verdict + payload-free summary inline, quotes → pointer. |
+| `audit_experiment --design` output | **T1** | Today free-form → **pointer-only**; structured-emit inlines id/severity/safe-summary, quoted brief payload → pointer. |
+| `audit_experiment --data` output | **T1** | Today free-form → **pointer-only**; structured-emit inlines findings + surfaces-checked, sampled/quoted rows → pointer. |
+| `audit_experiment` close output | **T1** | Today free-form → **pointer-only**; structured-emit inlines findings, quoted RESULTS/rollout payload → pointer. |
 | Triage responses (per finding) | **T1** | Status + reason inline; any quoted payload in the reason → pointer. |
 | Raw rollouts / datasets / judge-input transcripts / model-output dumps | **T0** | Inherently the sensitive payload. |
 | PR body (umbrella: first-para Problem + Approach) | derived | Built only from T2 record bodies → inherits T2; never from T0/T1 payload. |
@@ -89,40 +89,58 @@ What is sensitive is any *quoted payload* a finding cites ("the rollout said X")
 pointer-izes per the payload-locus rule. The reviewer always reads the full payload from the artifact store
 (per #150's reviewer-resolution); the *posted* output never has to.
 
-**The brief is T1, not T2 (Finding-2 fix).** `START.md` / `CHECKLIST.md` and the config subfields of
+**The brief is T1, not T2 (prior Finding-2 fix).** `START.md` / `CHECKLIST.md` and the config subfields of
 `DESIGN.md` are authored by the AAR but carry the experiment's *executable* surface — the exact prompts, the
 eval and grader definitions and flags, raw artifact-store paths, and model IDs that can reveal a pre-release
 model. "AAR-authored" is therefore **not** sufficient for T2; T2 additionally requires no operational-sensitive
-config. The brief is T1 with an explicit **safe-field allowlist** (what stays inline): hypothesis, arms (by
-name/label), metric names, decision rules, cost estimate, gate checklist *structure* (which gate, pass/fail),
-and the design rationale prose. Everything outside the allowlist — verbatim prompts, eval/grader bodies, raw
-paths, model IDs flagged sensitive by policy — is a payload locus the validator pointer-izes/redacts. The
-allowlist is the contract's T1 default for the brief; an instance may tighten it (a model ID can be made
-allowlisted on an instance running only public models, via the policy below — a *tighten/loosen* the validator
-checks).
+config.
+
+**But today's briefs are free-form Markdown, so they are pointer-only until #155 gives them a schema
+(Finding-3 fix).** `DESIGN.md` / `START.md` / `CHECKLIST.md` today interleave exact evals, paths, model IDs,
+and rationale in prose — there are no named fields to selectively redact. Per the payload-locus rule, a
+free-form T1 surface is **pointer-only** (a free-form brief body inline → BLOCK). The contract therefore
+defines the **target safe-field allowlist** that #155 (the canonical-path record layout) must realize as a
+machine-readable brief schema: the inline-safe fields are hypothesis, arms (by name/label), metric *names*,
+decision rules, cost estimate, gate checklist *structure* (which gate, pass/fail), and the design *rationale
+prose*; everything else — verbatim prompts, eval/grader bodies, raw paths, sensitive model IDs — is a payload
+field carried as a pointer. **#155 owns turning the free-form brief into that structured form; until it lands,
+the brief is committed to the artifact store and the trail carries the pointer + the T2 rationale prose only.**
+This is the brief's analogue of the audit structured-emit prerequisite: selective inline redaction is unlocked
+only by a structured schema, never by pattern-matching prose. An instance may tighten the allowlist (e.g. drop
+`model_id` to pointer-only); it may extend it only via a product-owned schema enum (see Finding-5 fix in the
+policy).
 
 #### Two T1 surfaces — named-field vs. free-form (Finding-1 fix)
 
 T1 covers two physically different record shapes, and the validator handles them by **shape**, not by assuming
 a uniform structure:
 
-- **Named-field T1** (records with a schema): the brief subfields, triage responses, and the future
-  schema'd records (#151 triage, #145 clearance). The owning schema **declares its payload field names**; the
-  validator reads those named fields and pointer-izes/redacts them, keeping the allowlisted fields inline.
-- **Free-form T1** (the audit producers *as they emit today*): `verify_claim` / `audit_experiment` emit
-  free-form Markdown whose payload appears in a **known convention** — the `evidence: <file>: "<quote>"` line
-  and any fenced quote block. The validator's payload locus for these is that **convention/pattern**: the
-  quoted `"<...>"` after an `evidence:` key, and fenced code/quote blocks, are treated as payload and
-  pointer-ized/redacted; the surrounding finding text (id, severity, summary, recommendation) stays inline.
+- **Named-field T1** (records with a structured schema): the future schema'd records (#151 triage, #145
+  clearance) and the brief *once #155 schematizes it*. The owning schema **declares its payload field names**;
+  the validator reads those named fields and pointer-izes/redacts them, keeping the allowlisted fields inline.
+  A record only enters this surface when its schema exists — until then it is treated as free-form (below).
+- **Free-form T1** (the audit producers *as they emit today*) is **pointer-only at publish boundaries until
+  the structured-emit lands** — see below. The reviewer reads the full free-form audit from the artifact store;
+  the trail gets a pointer + the parsed severity/summary header only.
 
-**The clean target, named as the child's first task.** The free-form pattern-match is the *bridge* that lets
-the contract bind to today's outputs without a producer rewrite. The cleaner end state is to make the audit
-producers emit a **structured sanitized record** (named safe fields + `artifact_ref` payload refs) so the
-validator never pattern-matches free text. The spawned implementation child's **first task** is to add that
-structured-emit to the audit producers (a small, well-scoped change to `verify_claim` / `audit_experiment`
-output); until it lands, the free-form pattern-match is the fail-closed fallback (an `evidence:` line whose
-quote cannot be parsed → BLOCK, never publish-through). This resolves the "T1 assumes structure that doesn't
-exist" gap: the contract works on today's free-form output *and* names the structured-emit upgrade.
+**Structured sanitized emit is a PREREQUISITE, not a ride-along (Finding-2 fix).** A pattern-match over the
+`evidence:` convention alone *under-solves* leakage: `audit_experiment` is instructed to "quote the claim and
+the evidence," so payload can land in a finding's **issue** and **recommendation** prose, not only in an
+`evidence:` quote or a fenced block. Redacting only the quote leaves a leak. Therefore the contract does **not**
+treat free-form pattern-matching as a sufficient publish path. Instead:
+
+- The audit producers (`verify_claim` / `audit_experiment`) must gain a **structured sanitized output**: named
+  safe fields (finding id, severity, one-line summary the producer guarantees payload-free) + every quote /
+  cited excerpt carried as an `artifact_ref`, never inline. This structured-emit is the **first task and a hard
+  prerequisite** of the wiring child — the GitHub commit/post wiring may not be authorized until it lands.
+- **Until structured-emit lands, legacy free-form audit output is rejected at every publish boundary** — it is
+  pointer-only (committed to the artifact store, a pointer + parsed header on the trail). The validator
+  fail-closes on any attempt to inline a legacy free-form audit body. There is no "redact the quote and publish
+  the rest" path, precisely because the rest can also carry payload.
+
+This resolves both the "T1 assumes structure that doesn't exist" gap and the "pattern-match under-solves"
+gap: the trail only ever carries audit content that a producer has *structurally* guaranteed safe; everything
+else is a pointer.
 
 ### The payload-locus rule (what T0/T1 actually redact)
 
@@ -130,26 +148,35 @@ A **payload locus** is any field, quote, or block whose value is, or directly em
 (a) *elicited or ingested* by the experiment (a raw model completion, a row of generated/training data, a
 judge-input transcript, a verbatim source/citation body, an inline example of any of those) or (b)
 *operationally sensitive* config (an exact prompt, an eval/grader definition, a raw artifact path, a
-pre-release model ID). A T0 record is entirely payload (body → pointer). A T1 record locates its payload by
-**shape** — named fields for schema'd records, the `evidence:`/fenced-block convention for the free-form audit
-outputs (see "Two T1 surfaces" above). The validator replaces each locus with either an **artifact-store
-pointer** (preferred, so the reviewer can still reach it) or a **redaction marker** `[[redacted: <reason>]]`
-when no stable artifact exists. A locus the validator cannot parse (e.g. a malformed `evidence:` quote) →
-BLOCK, never publish-through.
+pre-release model ID). A T0 record is entirely payload (body → pointer). A T1 record's payload is located by **shape**: for a record with a
+**structured sanitized schema** (the schema'd records, and the audit outputs once structured-emit lands) the
+validator pointer-izes the declared payload fields and inlines the declared safe fields; for any record that is
+still **free-form Markdown** (today's audit outputs, today's free-form briefs) the validator does **not** try
+to selectively redact — that surface is **pointer-only** until it has a structured schema (a free-form body
+inline → BLOCK). The validator replaces each payload locus with either an **artifact-store pointer** (preferred,
+so the reviewer can still reach it) or a **redaction marker** `[[redacted: <reason>]]` when no stable artifact
+exists. Anything the validator cannot prove safe → BLOCK, never publish-through.
 
 Pointer schema (the single shape every pointer uses — this is the contract the artifact store and the trail
 agree on):
 
 ```yaml
 artifact_ref:
-  uri:    "r2://<bucket>/<key>"      # opaque, instance-resolved; the artifact-store address
+  handle: "<content-addressed id>"   # opaque artifact ID (e.g. the sha256 itself, or a store-issued opaque key)
+                                     #   — NOT a raw bucket/path; resolved to a real URI privately by #153
   sha256: "<hex>"                     # content hash → integrity + dedup; the reviewer verifies what it fetched
   bytes:  <int>                       # size, for the reader's sense of scale (optional)
   caption: "<non-sensitive one-line>"# safe-to-show description; MUST itself satisfy T2 (no payload)
 ```
 
-`uri` is opaque to the contract — the instance profile (#153) owns how it resolves; the contract only requires
-that a pointer is what appears on the trail in place of a payload, and that `caption` is itself non-payload.
+**The trail carries an opaque `handle`, never a raw store path (Finding-4 fix).** A raw `r2://<bucket>/<key>`
+URI is itself operational-sensitive payload (it leaks the store layout / bucket names), so it must not appear on
+the trail. The pointer on the trail carries only an **opaque, content-addressed handle** (the `sha256`, or a
+store-issued opaque id); the **instance profile (#153) resolves that handle to a real, possibly-credentialed
+store URI privately** at fetch time. The validator rejects an `artifact_ref` whose `handle` looks like a raw
+path (contains a scheme like `r2://`/`s3://` or a `/`-delimited bucket path) → BLOCK. The contract only
+requires that a pointer is what appears on the trail in place of a payload, that the `handle` is opaque, and
+that `caption` is itself non-payload.
 
 ### The PR-quote rule (the review surface)
 
@@ -178,11 +205,36 @@ record_visibility:
   require_private_repo: <bool>        # if true, the gate fails closed unless the research repo is private
   tier_overrides:                    # may only TIGHTEN (T2→T1→T0), never loosen; validator rejects a loosen
     RESULTS_narrative: T1            # e.g. an instance that won't even publish result prose inline
-  brief_safe_fields:                 # the T1 brief allowlist; instance may EXTEND only with non-sensitive keys
-    - model_id                       #   e.g. an instance running only public models can inline model_id
+  brief_safe_fields_remove:          # instance may only REMOVE keys from the product allowlist (tighten);
+    - model_id                       #   extension is NOT allowed here — see brief_safe_fields_enable
+  brief_safe_fields_enable:          # extension is restricted to a PRODUCT-OWNED enum the brief schema (#155)
+    - model_id                       #   declares as optionally-inline-able; an instance opts in, never invents
   max_quote_chars: <int>             # PR-quote ceiling; default 0 (no payload quote). >0 requires private repo.
   redaction_marker: "[[redacted: %s]]"  # format; default as above
 ```
+
+**Per-experiment visibility, merged with the instance floor (most-restrictive wins).** Sensitivity is *not*
+uniform across an instance's experiments — one run may probe a pre-release model whose very *aggregate* outcome
+is sensitive, while the next is fully public. An instance-wide policy alone is therefore the wrong granularity:
+default-public + T2 result aggregates would publish a private model's behavior. So the contract takes a
+**per-experiment declaration** in `DESIGN.md` front-matter, merged with the instance floor by **most-restrictive
+wins** (a tier may only be tightened by the merge, never loosened; the more-private repo requirement wins):
+
+```yaml
+# DESIGN.md front-matter (per-experiment), validated against the instance floor
+visibility:
+  sensitivity: standard | sensitive   # `sensitive` = pre-release model / private data / block-prone elicitation
+  tier_overrides: { RESULTS_narrative: T1 }   # tighten only; merged over the instance floor
+  require_private_repo: true                  # may raise the floor; may never lower it
+```
+
+The **merge gate and PR-open both fail closed** if a `sensitivity: sensitive` experiment is about to post to a
+non-private repo, or if its effective (merged) tiers would inline any payload. `sensitive` forces, at minimum,
+`RESULTS_narrative` and aggregate metrics to T1 (pointer-only outcome) unless the repo is private — a
+private-model run cannot publish even its aggregate behavior to a public trail. The per-experiment declaration
+can only *tighten* the instance floor; an experiment can never declare itself *more* public than the instance
+allows. This closes the "instance-wide seam is the wrong granularity" gap: the floor is the instance's, the
+ceiling is per-experiment, and the validator enforces the stricter of the two at every boundary.
 
 **`require_private_repo` and the visibility floor.** The contract does not *force* private on every instance —
 a public alignment-research repo is a legitimate, deliberate choice for non-sensitive work, and the umbrella
@@ -203,17 +255,22 @@ either returns a trail-safe rendering or BLOCKS. It runs at three boundaries —
 ship-change's own merge gate uses (parse an authoritative verdict; missing/garbled → BLOCK):
 
 1. **Produce-time (write a record to the branch).** `design-experiment` / `run-experiment` call the validator
-   before committing any record. T0 body present inline → BLOCK. T1 payload field not pointer-ized/redacted →
-   BLOCK. A pointer missing `uri` or `sha256`, or a `caption` that itself contains payload → BLOCK. Tier
-   override that *loosens* → BLOCK (config error, fail closed).
+   before committing any record. T0 body present inline → BLOCK. A **free-form** T1 body (legacy audit output,
+   un-schematized brief) present inline → BLOCK (pointer-only until it has a structured schema). A structured
+   T1 payload field not pointer-ized/redacted → BLOCK. A pointer missing `handle` or `sha256`, a `handle` that
+   looks like a raw store path (`r2://`/`s3://`/bucket path) → BLOCK, or a `caption` that itself contains
+   payload → BLOCK. A tier override that *loosens* (instance or per-experiment) → BLOCK (config error). A
+   `brief_safe_fields_enable` key not in the product-owned schema enum → BLOCK.
 2. **Post-time (a PR review comment / PR body).** The helper (#150) runs the validator over the review/PR-body
    text before calling GitHub. Payload quote over `max_quote_chars` → BLOCK. `max_quote_chars > 0` on a
-   non-private repo → BLOCK.
+   non-private repo → BLOCK. **Also at PR-open:** a `sensitivity: sensitive` experiment whose effective
+   (instance-floor ⊓ per-experiment) policy would post to a non-private repo, or inline any payload → BLOCK
+   before the PR is created.
 3. **Merge-time (the close gate, re-check).** The merge gate re-runs the validator over the **full diff being
    merged** (every record file the PR adds/edits) so a hand-edited branch or a bypassed produce-time call
-   cannot smuggle a T0 body or un-redacted T1 payload onto `main`. This mirrors ship-change's "re-review the
-   final diff" integrity property: the merged trail is the validated trail. A `require_private_repo: true`
-   policy against a public repo also BLOCKS here.
+   cannot smuggle a T0 body, a free-form T1 body, or un-redacted T1 payload onto `main`. This mirrors
+   ship-change's "re-review the final diff" integrity property: the merged trail is the validated trail. A
+   `require_private_repo: true` (instance OR per-experiment) policy against a public repo also BLOCKS here.
 
 **Fail-closed posture (explicit):** unknown record type → treat as **T0** (most restrictive) and BLOCK if any
 inline body is present — a new record type cannot accidentally publish before it is classified. A malformed or
@@ -223,8 +280,9 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
 
 ### What this contract does NOT do (scope fence)
 
-- It does not define the artifact store, its auth, or how `uri` resolves — that is the instance profile (#153)
-  and the existing run-experiment artifact-store seam. The contract only fixes the **pointer shape** the trail
+- It does not define the artifact store, its auth, or how a `handle` resolves to a real URI — that is the
+  instance profile (#153) and the existing run-experiment artifact-store seam. The contract only fixes the
+  **pointer shape** (opaque `handle` + `sha256` on the trail) the trail
   uses.
 - It does not implement the validator or wire it into the skills — the validator *library* is the `ready`
   child; the wiring is the `blocked-by` child (see Rollout).
@@ -261,7 +319,9 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
   *library* is the spawned `ready` child; its produce/post/merge wiring + the audit structured-emit are a
   separate `blocked-by` child (see Rollout).
 - **Unblocks (the umbrella's `blocked-by` wiring):** #155 (canonical-path record layout) consumes the tier
-  table to decide which record content is committed vs pointer-ized; #156 (design-experiment PR-open + --design
+  table to decide which record content is committed vs pointer-ized, **and owns schematizing the free-form
+  brief into the safe-field allowlist this contract defines** (until #155 lands, the brief is pointer-only);
+  #156 (design-experiment PR-open + --design
   review posting) consumes the produce-time + post-time validation; #157 (run-experiment push/close + merge
   gate) consumes all three boundaries. None of those may be authorized until this lands (umbrella rule); this
   doc is the thing that unblocks them.
