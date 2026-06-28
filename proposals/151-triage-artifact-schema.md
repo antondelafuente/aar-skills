@@ -147,6 +147,37 @@ This retires the earlier framing that made the final re-run the source of *requi
 `fixed` (FINDING 2): a fixed finding's id is legitimately absent from the final audit. The final re-run is the
 residual check; the per-round union is the response-completeness check.
 
+### 2b. The round ledger is reviewer-authored — the triage is never its own trust source (FINDING 1)
+
+The union-across-rounds in decision 2a only has integrity if the gate compares the author's `close_triage`
+against a **reviewer-authored record of what each round actually raised** — otherwise the author's own triage
+file is the sole record of the rounds, and an author who simply omits a round (or a HIGH within it) produces a
+file that passes its own check. That is the trust hole the structural gate exists to close, so the round ledger
+is **reviewer-derived, not author-supplied:**
+
+- Each close-audit round's output is the **committed audit artifact the runner produces** —
+  `audit_experiment` already writes its findings to a deterministic path (`AUDIT.md` today); the per-round
+  outputs land at a per-round path under `experiments/<exp>/` (e.g. `close_audit/round-<n>.md`), committed as
+  records like every other gate output (#130's "all four gate outputs … are committed or PR-linked"). These
+  are the **trust anchor**: the gate reads the `(round, id, severity)` set from *these reviewer-authored files*,
+  not from the triage's own `raised_in_round` tags.
+- The triage's `raised_in_round` / `final_audit_round` fields are therefore **cross-checked against the
+  committed round ledger, not trusted**: the structural gate's "every id any round raised has exactly one
+  response" iterates the ids in the **reviewer-authored round artifacts**, and an id present in a round artifact
+  but absent from the triage **blocks** (the author cannot drop a finding by omitting it). A triage `raised_in_round`
+  that disagrees with the ledger **blocks**.
+- The **final round** is the one the gate itself re-runs at merge (decision 2a) — so its artifact is produced
+  by the gate's own reviewer invocation, the freshest reviewer-authored anchor, and the residual check compares
+  against it directly.
+
+So the **complete set of findings to respond to is defined by the reviewer-authored round artifacts**; the
+triage file only carries the *responses*. This makes the gate's input two reviewer-anchored sources (the round
+ledger + the final re-run) plus one author source (the responses) — never author state checking itself. Pinning
+the exact committed path/format of the per-round audit artifacts is shared with the **canonical-path record
+layout (#155)** — which already owns where the gate outputs live — so #155 reserves the `close_audit/round-<n>`
+path alongside `close_triage`; this schema names the contract, #155 fixes the layout, and the close-gate wiring
+(#157) is **`blocked-by` both**.
+
 ### 3. Stable finding identifiers — emitted by the audit, not invented by the author
 
 A response must survive re-review: when the author fixes H1 and re-runs the close audit, the still-open
@@ -192,17 +223,29 @@ reference doc is the one piece that ships first, since it only *declares* the `i
   *valid* experiment merge** (decision 4a) — deferral parks follow-up work, it does not dispose of a HIGH that
   bears on whether the headline claim holds.
 
+**The `reason` field is committed record — pointer-discipline applies (FINDING 2).** A `justified` reason is
+free text committed into `experiments/<exp>/close_triage.toml`, which rides into `main`. That is exactly the
+content the **record-sensitivity/visibility contract (#146)** governs: a `reason` may reference unreleased data
+or block-prone rollout text. So the same rule #130 already states for records applies here — **pointers, not
+payloads**: a `reason` states *why* the finding does not invalidate the claim and may cite a metric/figure, but
+must **not** inline sensitive evidence (raw rollout text, unreleased data); it points at the artifact-store
+location instead, per #146. #146 owns the precise redaction/quote rule; this schema declares that `reason`/`issue`
+are record content subject to it, and the close-gate wiring is **`blocked-by` #146** (below).
+
 **The pass/fail rule — two layers, both must pass, fail-closed (FINDING 1):**
 
 **Layer 1 — deterministic structural gate (model-independent):**
 
 1. The artifact exists, parses, and `schema_version` is a known MAJOR — else **BLOCK**.
 2. `final_audit_sha` equals the head the gate re-ran the close audit on — else **BLOCK** (stale triage).
-3. Every HIGH/MED id raised by **any** audit round (the union, decision 2a) has **exactly one** response with a
-   valid status + its required evidence field present — a missing response, a duplicate id, an id no round
-   raised, or a missing/forbidden evidence field **BLOCKS**.
-4. The **final round adds no unaccounted HIGH** (decision 2a residual check) — a fresh HIGH in
-   `final_audit_round` with no response **BLOCKS**.
+3. Every HIGH/MED id in the **reviewer-authored round ledger** (the committed per-round audit artifacts, the
+   union across rounds — decision 2b, **not** the triage's own tags) has **exactly one** response with a valid
+   status + its required evidence field present — an id in the ledger with no response, a duplicate, a response
+   id absent from the ledger, a `raised_in_round` disagreeing with the ledger, or a missing/forbidden evidence
+   field **BLOCKS**. (The author cannot drop a finding by omitting it: the ledger, not the triage, defines the
+   set to answer.)
+4. The **final round adds no unaccounted HIGH** (decision 2a/2b residual check, against the gate's own final
+   re-run artifact) — a fresh HIGH in `final_audit_round` with no response **BLOCKS**.
 5. **Every HIGH** is `fixed` or `justified` (a `deferred` HIGH does **not** pass for a *valid-conclusion*
    experiment — decision 4a). A HIGH that is `deferred`, `unresolved`, or absent **BLOCKS**. **MED** may be
    `fixed`, `justified`, or `deferred` (with its tracking issue), but every MED still needs one explicit
@@ -287,9 +330,10 @@ optional later factoring.
 | Consumer | Reads from this interface |
 |---|---|
 | **#157** run-experiment close/merge gate | the artifact at `experiments/<exp>/close_triage.{toml,json}`; the status set; the **two-layer** pass/fail rule (decision 4: structural + semantic); the `final_audit_sha`/round residual-check binding (decision 2a) |
-| **#155** canonical-path record layout | the file name `close_triage.toml` + that it lives in `experiments/<exp>/` (so the layout reserves the path) |
+| **#155** canonical-path record layout | the file name `close_triage.toml` **and** the per-round audit-ledger path `close_audit/round-<n>.md` (decision 2b) — both live in `experiments/<exp>/`; #155 reserves both paths |
 | **#152** terminal experiment states | the seam in decision 4a — a HIGH that is neither fixed nor justified is a #152 terminal signal, not a #151 deferral; the gate passes on EITHER a clean triage OR a #152 terminal declaration |
 | **#145** design-clearance schema | the **shared per-finding grammar** (`FINDING_RESPONSE.md`, decision 6) both gates cite; the two artifacts differ only in container + what they bind to |
+| **#146** record sensitivity/visibility | `reason`/`issue` are committed record content (decision 4): #146 owns the pointer-only/redaction rule for free-text `reason`; the close-gate wiring is `blocked-by` #146 |
 | **#154** audit-runner cross-family contract | the **stable finding-id emission** is a `needs-design` dependency (decision 3): preserving an id across stateless re-review rounds is open design; it lands in the same audit-output surface #154 touches, so it is sequenced with #154 |
 
 ## Alternatives considered
@@ -340,10 +384,11 @@ optional later factoring.
   `audit_experiment` must emit a stable per-finding id that survives stateless re-review rounds — the
   preservation mechanism is open design; lands in the same audit-runner surface #154 reworks.
 - **Cluster coupling:** **prerequisite** that unblocks the #157 close-gate wiring (it lists the triage schema in
-  its `blocked-by`). **Adjacent** to #155 (reserves the file path), #152 (the terminal-state seam, decision 4a),
-  #145 (shares `FINDING_RESPONSE.md`, decision 6), and #154 (the id-emission dependency, decision 3). It
-  **contradicts no sibling** — it defines the close gate's input contract and names, but does not implement,
-  each neighbor's enforcement.
+  its `blocked-by`). **Adjacent** to #155 (reserves the `close_triage` + per-round `close_audit/round-<n>` paths,
+  decisions 1/2b), #152 (the terminal-state seam, decision 4a), #145 (shares `FINDING_RESPONSE.md`, decision 6),
+  #146 (governs the committed `reason` content, decision 4 / FINDING 2), and #154 (the id-emission dependency,
+  decision 3). It **contradicts no sibling** — it defines the close gate's input contract and names, but does
+  not implement, each neighbor's enforcement.
 - **No runtime behavior ships in this PR** — doc-only design. The only thing that "breaks" if mis-specified is
   the children built on it, which is why it is reviewed first.
 
@@ -368,17 +413,20 @@ mechanism, FINDING 3), so the children split into `ready` and `needs-design`:
    packet vs content-hash vs post-hoc matcher, and the defined behavior for {re-worded, fixed, split, new}
    findings. Open design; sequenced with #154 (same audit-output surface). `needs-design`.
 
-The **close-gate wiring itself** (parse the artifact, evaluate the two-layer rule, the #152 terminal-state OR
-branch) is **#157's** `run-experiment` close-gate child, `blocked-by` children 1+2 here, child 3 (no
-id-stable input until it lands), #155 (path), and #152 (terminal branch) — it is not a child this design
-spawns, it is the consumer #157 already tracks.
+The **close-gate wiring itself** (parse the artifact against the reviewer-authored round ledger, evaluate the
+two-layer rule, the #152 terminal-state OR branch) is **#157's** `run-experiment` close-gate child, `blocked-by`
+children 1+2 here, child 3 (no id-stable input until it lands), **#155** (the `close_triage` + per-round
+`close_audit/round-<n>` paths — decision 2b's round ledger), **#152** (terminal branch), and **#146** (the
+committed-`reason` sensitivity contract — decision 4 / FINDING 2) — it is not a child this design spawns, it is
+the consumer #157 already tracks.
 
 ## Rollout + rollback
 
 Doc-only design PR; lands the schema on `main` via the `--scaffold` gate, closing exactly #151. Then the
 `ready` children land in order (`FINDING_RESPONSE.md` first, then `CLOSE_TRIAGE.md`) as normal single-phase
 ship-change runs; the `needs-design` id-preservation child gets its own design pass (with #154); the close-gate
-wiring follows as #157's `blocked-by` child once all of these and its co-requisites (#155, #152) land. Rollback
+wiring follows as #157's `blocked-by` child once all of these and its co-requisites (#155 — incl. the per-round
+audit-ledger path, #152, #146) land. Rollback
 is a plain revert of each spawned child — the reference docs are inert text until #157's gate consumes them, so
 reverting strands no run; the lifecycle falls back to the status-quo local-file close audit with no data loss
 (the audit engine itself is unchanged).
