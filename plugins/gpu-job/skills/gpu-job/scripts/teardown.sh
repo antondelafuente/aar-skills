@@ -30,8 +30,12 @@ KEY=$(grep -E "^$KEY_NAME=" ~/.config/gpu-job/env 2>/dev/null | cut -d= -f2- || 
 if [ -n "${2:-}" ] && [ -f "$HERE/pod_lease.sh" ]; then
   owned=$(bash "$HERE/pod_lease.sh" show "$2" 2>/dev/null \
           | python3 -c 'import json,sys;print(json.load(sys.stdin).get("pod_id") or "")' 2>/dev/null || true)
-  if [ -n "$owned" ] && [ "$owned" != "$PID" ]; then
-    echo "BLOCKED: lease $2 is bound to pod '$owned', not '$PID' — refusing to delete (mismatched pod/nonce pair)" >&2
+  # An explicit arg-2 nonce MUST resolve to a lease bound to THIS pod. A lookup yielding no pod_id (a
+  # typo'd / nonexistent / not-yet-provisioned intent nonce) OR a different pod is a caller error — block
+  # BEFORE the DELETE rather than tear the pod down under a lease that doesn't own it (which would also
+  # leave the real lease stale). post-rebase Finding 2.
+  if [ "$owned" != "$PID" ]; then
+    echo "BLOCKED: lease $2 does not own pod '$PID' (bound to '${owned:-<none/unprovisioned>}') — refusing to delete (wrong/typo nonce?)" >&2
     exit 1
   fi
 fi

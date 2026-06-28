@@ -359,6 +359,11 @@ if __name__ == "__main__":
             gone = delete_pod_now(pid)
             try:
                 lease("emergency", nonce, str(pid), check=False)   # mark immediately reapable as backstop
+                # If our DELETE was accepted, persist the marker (review post-rebase Finding 1) so a later
+                # reaper sweep — whose fresh DELETE would 404 (already gone) — closes on verified-gone
+                # instead of retrying this emergency lease forever (parallels the provisional-failure path).
+                if gone:
+                    lease("mark-deleted", nonce, check=False)
             except Exception:
                 pass
             raise SystemExit(f"[deploy] enrich failed; pod {pid} "

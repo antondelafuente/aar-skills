@@ -369,6 +369,11 @@ if [ -f "$TD" ]; then
   # the lease was NOT mutated by the blocked teardown (still provisional)
   [ "$(lease show "$TDN" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = provisional ] \
     && ok teardown-mismatch-no-mutation || no teardown-mismatch-no-mutation
+  # an explicit nonce that does NOT exist (typo) also BLOCKS before DELETE (post-rebase Finding 2)
+  if bash "$TD" pod-owner gpujob-doesnotexist0000000000000000 >/dev/null 2>&1; then no teardown-bad-nonce-blocked; else ok teardown-bad-nonce-blocked; fi
+  # an explicit nonce for a not-yet-provisioned INTENT (no pod_id) also BLOCKS
+  TDI=$(lease intent RUNPOD_API_KEY --expiry-min 60)
+  if bash "$TD" pod-owner "$TDI" >/dev/null 2>&1; then no teardown-intent-nonce-blocked; else ok teardown-intent-nonce-blocked; fi
 fi
 
 [ "$fails" = 0 ] && { echo "pod_reaper smoke PASS"; exit 0; } || { echo "pod_reaper smoke FAIL"; exit 1; }
