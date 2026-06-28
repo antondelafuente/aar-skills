@@ -81,8 +81,9 @@ case "$sub" in
       # Key off the TOKEN in GH_TOKEN (the detector probes per-source with GH_TOKEN="$tok"), so per-source
       # isolation is exercised faithfully (RW_* -> 200; RO_*/everything else -> 403).
       case "${GH_TOKEN:-}" in
-        RW_*) printf 'HTTP/2.0 200 OK\n' ; exit 0 ;;
-        *)    printf 'HTTP/2.0 403 Forbidden\n' ; exit 1 ;;
+        RW_*)  printf 'HTTP/2.0 200 OK\n' ; exit 0 ;;
+        RWX_*) printf 'HTTP/2.0 422 Unprocessable Entity\n' ; exit 1 ;;  # validation-reject after perm check -> writable
+        *)     printf 'HTTP/2.0 403 Forbidden\n' ; exit 1 ;;
       esac
     fi
     # a GET: just succeed (no output needed by the detector's provenance path)
@@ -131,6 +132,7 @@ cat > "$INFOCMD" <<'EOF'
 tok=$(cat)
 case "$tok" in
   RO_*) printf '{"permissions":{"contents":"read","metadata":"read","pull_requests":"read"}}\n' ;;
+  RWX_*) printf '{"permissions":{"contents":"read","metadata":"read"}}\n' ;;  # provenance says READ-ONLY...
   RW_*) printf '{"permissions":{"contents":"write","metadata":"read"}}\n' ;;
   *)    : ;;   # unattested: emit nothing -> detector FAILS CLOSED
 esac
@@ -245,6 +247,24 @@ if [ $? -eq 0 ]; then
   fail "host-key-verification (pre-auth) must NOT certify read-only (strict-fail)"
 else
   echo "$RO_OUT" | grep -q 'ambient git push: inconclusive' && pass "F1 r3: pre-auth host-key failure -> inconclusive (strict-fail, not read-only)" || fail "F1 r3: pre-auth failure should be inconclusive"
+fi
+
+# fixture 9b (F2/422): the advisory probe classifies HTTP 422 as WRITABLE. Token whose provenance says
+# read-only but whose advisory PATCH returns 422 -> the contradiction path FAILs (advisory saw a write).
+: > "$MUTLOG"
+if run_strict "RWX_zzz" "" "" denied rejected; then
+  fail "422 advisory must be treated as writable -> contradiction FAIL"
+else
+  echo "$RO_OUT" | grep -q 'advisory probe accepted a write' && pass "F2: HTTP 422 advisory classified writable (contradiction FAIL)" || fail "F2: 422 not treated as writable"
+fi
+
+# fixture 10b (F1 r6): strict --readonly with NO probeable target must fail closed on the git surface. The CLI
+# always defaults a repo target, so this branch is exercised by a structural check that the no-target strict
+# branch both emits NOT-VERIFIED and sets the fail flag (DOCTOR_RO_FAIL=1 on the same line).
+if grep -q 'no repo/worktree target in strict --readonly -> fail closed.*DOCTOR_RO_FAIL=1' "$WF"; then
+  pass "F1 r6: strict no-target branch fails closed (NOT-VERIFIED + DOCTOR_RO_FAIL=1)"
+else
+  fail "F1 r6: strict no-target fail-closed branch missing or does not set DOCTOR_RO_FAIL"
 fi
 
 # fixture 10 (F1 r5): strict --readonly with WF_DOCTOR_SKIP_LIVE_PROBES=1 must NOT emit READONLY-PASS — the

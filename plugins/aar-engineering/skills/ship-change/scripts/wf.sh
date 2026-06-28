@@ -1151,6 +1151,7 @@ readonly_advisory_probe(){
   code=$(printf '%s\n' "$out" | awk 'toupper($1) ~ /^HTTP/ {print $2; exit}')
   case "$code" in
     2*)      echo writable ;;     # GitHub ACCEPTED the (empty, non-mutating) write attempt -> write-capable
+    422)     echo writable ;;     # validation-reject AFTER the permission check passed -> write-capable too
     403|404) echo denied ;;       # forbidden / not-visible -> no reachable write on this floor
     *)       echo inconclusive ;; # 400/5xx/garbled -> advisory says nothing (provenance still gates)
   esac
@@ -1323,6 +1324,10 @@ doctor_readonly_section(){
     gitrc=0; readonly_probe_git_push "$repo" "$wt" || gitrc=$?
     [ "$gitrc" = 2 ] && DOCTOR_RO_FAIL=1
     [ "$gitrc" = 3 ] && DOCTOR_RO_FAIL=1   # strict: inconclusive is NOT a PASS
+  elif [ "$strict" = 1 ]; then
+    # strict --readonly with NO probeable target cannot prove the git surface -> fail closed (#166 code-review
+    # F1 r6); the invariant is "strict PASS only when every surface was actually verified".
+    echo "    ambient git push: NOT-VERIFIED (no repo/worktree target in strict --readonly -> fail closed; pass an owner/repo or a worktree)"; DOCTOR_RO_FAIL=1
   else
     echo "    ambient git push: skipped (no repo target)"
   fi
