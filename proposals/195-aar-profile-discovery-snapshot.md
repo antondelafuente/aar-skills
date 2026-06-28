@@ -18,16 +18,19 @@ copies would drift from the schema — the precise failure the SCHEMA.md single-
 prevent.
 
 This child ships that helper: the **discovery resolution** step (decision 1) and the **snapshot build** step
-(decision 4), plus the **one narrow live step** the executor needs (mint a fresh token from the env-var name the
-snapshot carries). It is the executable seam children #4's skill edits call; it adds no validation (that is
-#194's `aar-profile-validate`) and no enforcement (those are the gates #146/#150/#154/#156/#157).
+(decision 4). It is the executable seam children #4's skill edits call; it adds no validation (that is
+#194's `aar-profile-validate`), no enforcement (those are the gates #146/#150/#154/#156/#157), **and no token
+minting** — the executor's one narrow live step (mint a fresh token from the snapshotted seam name) belongs to
+the shared GitHub-lifecycle helper #150, which owns engineer-identity token resolution for the whole flow; this
+helper deliberately does NOT mint, so there is exactly one home for identity resolution (design-review FINDING
+2).
 
 ## Approach
 
 Ship one stdlib-only Python helper — `aar_profile.py` — packaged **byte-identical in both skill dirs**
 (`design-experiment/scripts/`, `run-experiment/scripts/`), the same per-skill-copy + `.aar-ci` drift-check
-contract #193's SCHEMA.md and feedback-loop's init helper already use. It exposes the three callable steps the
-#153 role split needs, and nothing else:
+contract #193's SCHEMA.md and feedback-loop's init helper already use. It exposes the two callable steps the
+#153 designer role needs, and nothing else:
 
 - **`resolve`** (the designer step): walk the fixed discovery lookup order, read the **product `schema_version`
   constant** out of the packaged `SCHEMA.md` (the `<!-- SCHEMA_VERSION: N -->` marker — never a hardcoded `1`),
@@ -37,13 +40,17 @@ contract #193's SCHEMA.md and feedback-loop's init helper already use. It expose
   NON-SECRET execution field (the `[github]` facts, the family-keyed identity env-var **names**, the protection
   expectations, the typed recipe pointers) plus `profile_sha256` — in the exact grammar #153 decision 4 fixes,
   ready to write into `START.md`.
-- **`mint-token`** (the executor's one narrow live step): given the snapshot's `token_cmd_env` value (an env-var
-  *name*), read that env var, run the command it holds, and print the fresh token. This is the *only* live step
-  the executor takes; all config comes from the frozen snapshot.
 
-The helper is **read-only on config** and writes no instance state — it resolves, serializes, and (for the token
-step) shells out to the seam the instance configured. It is the thin executable glue between the SCHEMA.md
-contract and the skill prose; the heavy validation (`aar-profile-validate`) and the gates own everything else.
+Both verbs resolve the **same** file by the **same** lookup, and `snapshot` embeds the `profile_sha256` it
+computed from the very bytes it parsed, so `resolve`'s reported path/hash and the frozen snapshot can never
+diverge (design-review FINDING 3). `snapshot` also accepts an explicit `--path` to pin a specific file (the
+override/test seam), and otherwise resolves identically to `resolve`.
+
+The helper is **read-only on config** and writes no instance state, and it **runs no external command** — it
+resolves, hashes, and serializes, nothing more. Token minting is out of scope (it belongs to #150's shared
+helper, FINDING 2), so this helper has no external-command wait to bound. It is the thin executable glue between
+the SCHEMA.md contract and the skill prose; the heavy validation (`aar-profile-validate`) and the gates own
+everything else.
 
 ### The load-bearing decisions
 
@@ -75,12 +82,23 @@ parsed profile back to canonical TOML rather than copying file bytes, so the sna
 secret-by-reference invariant is structural (it only ever emits the seam *names* it read, never resolves a
 token).
 
-**4. The one narrow live step is `mint-token`, and it is the only thing resolved at use.** The executor never
-re-reads the live profile; its world is the snapshot. The single exception #153 decision 4 carves out is the
-credential, because a token must never be frozen into a record. `mint-token <env-var-name>` reads the named env
-var (the snapshot's `token_cmd_env` *value*), runs the command it holds, and prints the fresh token to stdout —
-fail closed (non-zero, clear message) if the env var is unset or the command fails. It prints **only** the
-token, so a caller can `TOKEN=$(aar_profile.py mint-token "$(...token_cmd_env...)")` without scrubbing noise.
+**4. Token minting is NOT in this helper — one home for identity resolution (FINDING 2).** #153 decision 4
+carves out one narrow live step for the executor: mint a fresh token from the env-var the snapshot names
+(`token_cmd_env`), because a token must never be frozen into a record. But engineer-identity *token resolution*
+is exactly the primitive #150's shared GitHub-lifecycle helper is designated to own for the whole flow (its
+`needs-design` scope: "engineer-identity token seams ... extract the low-level primitives into a shared helper
+both flows consume"). Putting a `mint-token` here too would create **two homes** for the same identity seam and
+guarantee drift. So this helper carries the seam *names* through into the snapshot (so the executor knows
+*which* env var to use) but does **not** run the minting command itself — that live step is #150's, called by
+child #4's executor prose. A dropped `mint-token` also means this helper runs no external command, so there is
+no unbounded external wait to bound (this dissolves design-review FINDING 1, which flagged an unbounded
+`mint-token`).
+
+**4a. `resolve` and `snapshot` are bound to one resolution (FINDING 3).** Both verbs use the identical lookup,
+and `snapshot` computes `profile_sha256` from the same bytes it parses to emit the block, so the path/hash
+`resolve` reports and the hash frozen into `START.md` are guaranteed equal. `snapshot --path <file>` pins an
+explicit file (matching `$AAR_PROFILE`'s override/test role) for child #4 to resolve once and snapshot the exact
+same file; with no `--path`, `snapshot` resolves exactly as `resolve` does.
 
 **5. Packaged per-skill, byte-identical, drift-checked — the SCHEMA.md / feedback-loop precedent.**
 `experiment-lifecycle` ships two independently-installed skills and symlinks per-skill, so a module-level helper
@@ -91,11 +109,15 @@ drift guard added to `.aar-ci/checks.sh` mirroring the existing SCHEMA.md and fe
 skill resolves the helper relative to itself. (Both copies of SCHEMA.md are already identical, so the helper
 reading its sibling SCHEMA.md sees the same constant from either skill dir.)
 
-**6. Stdlib only — `tomllib`, `json`, `hashlib`, `subprocess`.** #153 decision argues against any non-stdlib
-parser dependency (the reason YAML is rejected). The helper parses `.toml` with `tomllib` (Python 3.11+) and
-`.json` with `json`, hashes file bytes with `hashlib.sha256`, and serializes the snapshot TOML by hand (a small,
-deterministic emitter — no `tomli_w` dependency). This keeps the helper installable anywhere the product runs
-with zero extra packages.
+**6. Stdlib only — `tomllib`, `json`, `hashlib`; Python 3.11+ is the declared floor (FINDING 4).** #153 argues
+against any non-stdlib parser dependency (the reason YAML is rejected), and #193's SCHEMA.md already names
+`tomllib` as the profile parser — so Python 3.11+ (where `tomllib` entered the stdlib) is already the de-facto
+runtime contract this child makes explicit. The helper parses `.toml` with `tomllib` and `.json` with `json`,
+hashes file bytes with `hashlib.sha256`, and serializes the snapshot TOML by hand (a small, deterministic
+emitter — no `tomli_w` dependency). On a Python without `tomllib`, it **fails closed** with a clear
+`BLOCKED: aar_profile needs Python 3.11+ (tomllib)` rather than a raw ImportError, and the smoke asserts
+`tomllib` imports (the product runtime floor) so an install below the floor fails the check rather than a run.
+This keeps the helper installable with zero extra packages on any in-floor Python.
 
 ### Scope boundary (what this child does NOT do)
 
@@ -104,8 +126,8 @@ with zero extra packages.
   `branch_prefix == run/` check, and recipe-pointer resolution are **#194's `aar-profile-validate`**. (`resolve`
   will surface a parse error or a missing `schema_version` as a fail-closed BLOCK, since it cannot snapshot
   without them — but it is not the validator.)
-- **No enforcement.** It mints a token on request but never posts a review, opens a PR, or checks protection —
-  those are the gates (#146/#150/#154/#156/#157).
+- **No token minting / no enforcement.** It runs no external command — it never mints a token, posts a review,
+  opens a PR, or checks protection. Token minting is #150's; the gates (#146/#154/#156/#157) enforce.
 - **No skill rewiring.** The `design-experiment`/`run-experiment` prose edits that *call* this helper are
   child #4; this child ships the callable + its smoke so #4 builds against a proven seam.
 
@@ -121,8 +143,8 @@ its smoke changes) covers the behavior the JSON/syntax checks can't:
 - **refuse an unknown MAJOR** → a fixture with `schema_version` above the SCHEMA.md constant fails closed.
 - **`.toml`-wins precedence** → both files present at the module home, the `.toml` resolves and the `.json` is
   noted shadowed.
-- **mint via the seam name** → an env var holding `echo FRESH-TOKEN` is minted to exactly `FRESH-TOKEN`;
-  fail-closed when the named env var is unset.
+- **`tomllib` runtime floor** → the smoke asserts `tomllib` imports (the Python 3.11+ floor #193 already
+  assumes), so an install below the floor fails the check.
 - **snapshot round-trips through a parser** — the load-bearing one (#153 rollout): the emitted fenced-TOML
   `## Instance profile (snapshot)` block is extracted from the fence and re-parsed with `tomllib`, asserting
   every non-secret field (github scalars, both identity seam-name pairs, protection, a repo- and a uri-kind
@@ -130,9 +152,12 @@ its smoke changes) covers the behavior the JSON/syntax checks can't:
 
 ## Alternatives considered
 
+- **Keep `mint-token` in this helper.** Rejected on design review (FINDING 2) — engineer-identity token
+  resolution is #150's designated primitive; a second home here guarantees drift. This helper carries the seam
+  *names* through the snapshot and stops there; #150's shared helper does the live mint. (Bonus: removing the
+  only external-command path removes the unbounded-wait concern FINDING 1 raised.)
 - **Bash helper instead of Python.** Rejected — TOML parsing in bash is exactly the ambiguity #153 rejects YAML
-  for; `tomllib` is stdlib and gives an unambiguous parse. The token step shells out either way; the parse/hash/
-  serialize steps want a real parser.
+  for; `tomllib` is stdlib and gives an unambiguous parse. The parse/hash/serialize steps want a real parser.
 - **One combined "resolve+snapshot" subcommand.** Rejected — `design-experiment` resolves once and writes the
   snapshot into the pre-audit brief commit; keeping `resolve` (path + hash + version check) and `snapshot`
   (the block) as separate verbs lets the skill report the resolved path to the human before serializing, and

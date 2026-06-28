@@ -133,6 +133,20 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   done
 fi
 
+# 1f. experiment-lifecycle ships the aar-profile discovery+snapshot helper (aar_profile.py) in both
+#     independently-installed skill dirs, same per-skill-copy + byte-identical drift contract as the SCHEMA.md
+#     reference and feedback-loop's init helper (#153 child #195). Each copy reads its OWN sibling SCHEMA.md for
+#     the schema_version constant, so the two MUST stay byte-identical.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|run-experiment)/scripts/aar_profile\.py$'; then
+  DE_HELPER="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/scripts/aar_profile.py"
+  RE_HELPER="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/aar_profile.py"
+  if [ -f "$DE_HELPER" ] && [ -f "$RE_HELPER" ] && cmp -s "$DE_HELPER" "$RE_HELPER"; then
+    ok "aar_profile.py copies match"
+  else
+    err "aar_profile.py copies drift; keep design-experiment and run-experiment copies byte-identical"
+  fi
+fi
+
 # 2. shell syntax — *.sh AND extensionless shell scripts (e.g. .githooks/* hooks) detected by shebang
 for p in "${PATHS[@]}"; do
   [ -f "$p" ] || continue
@@ -283,6 +297,20 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scrip
     bash "$PR_SMOKE" >&2 && ok "pod_reaper smoke" || err "pod_reaper smoke FAILED"
   else
     err "pod_reaper.sh changed but pod_reaper_smoke.sh missing — cannot verify the reaper logic"
+  fi
+fi
+
+# 12. aar-profile discovery+snapshot smoke (#153 child #195): discovery lookup order + fail-closed,
+#     refuse-unknown-MAJOR, .toml-wins precedence, the tomllib runtime floor, and the load-bearing round-trip
+#     of the emitted fenced-TOML snapshot block back through a parser — behavior the JSON/syntax checks can't
+#     cover. Runs when the helper or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|run-experiment)/scripts/aar_profile(_smoke)?\.(py|sh)$'; then
+  AP_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/aar_profile_smoke.sh"
+  if [ -f "$AP_SMOKE" ]; then
+    echo "[checks] aar-profile discovery+snapshot smoke" >&2
+    bash "$AP_SMOKE" >&2 && ok "aar_profile smoke" || err "aar_profile smoke FAILED"
+  else
+    err "aar_profile.py changed but aar_profile_smoke.sh missing — cannot verify discovery/snapshot behavior"
   fi
 fi
 
