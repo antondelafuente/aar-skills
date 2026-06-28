@@ -472,7 +472,7 @@ def fmt_bool(value):
     return "" if value is None else str(value)
 
 print(f"record={path}")
-print(f"run_id={rec.get('run_id')}")
+print(f"run_id={rec.get('run_id') or ''}")
 print(f"state={state}")
 print(f"desired_active={fmt_bool(rec.get('desired_active'))}")
 print(f"handoff_path={rec.get('handoff_path') or ''}")

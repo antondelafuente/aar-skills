@@ -213,6 +213,8 @@ if run session-handle legacy >/dev/null 2>&1; then no legacy-no-handle; else ok 
 run update legacy --session-handle "tmux:legacy" >/dev/null
 [ "$(run session-handle legacy)" = "tmux:legacy" ] && ok legacy-update-backfills || no legacy-update-backfills
 [ "$(jget legacy handoff_path)" = "/art/legacy/TEMP.md" ] && ok legacy-update-preserves || no legacy-update-preserves
+printf '{"desired_active":true,"stopped":false,"closed":false,"handoff_path":"/art/noid/TEMP.md","lease_pod_ids":[],"created_at":1}\n' > "$TMP/noid.json"
+printf '%s\n' "$(run status noid)" | grep -qx 'run_id=' && ok status-missing-run-id-empty || no status-missing-run-id-empty
 
 # ===== agent-facing lifecycle aliases: same state machine, smaller executor vocabulary =====
 run start a1 --handoff /art/a1/TEMP.md --session-handle "tmux:a1" >/dev/null
