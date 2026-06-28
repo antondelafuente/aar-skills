@@ -52,8 +52,14 @@ e.g. "if any single arm wins >90% the selection is degenerate".>
 - Keep a standing successor handoff at `<TEMP.md path>` (pointers only — pod ids, artifact paths, look-again
   deadline, next action; never trigger-prone prose); refresh it at every checkpoint.
 - Write the run-supervision record at run start and keep it current:
-  `run_supervision_record.sh create <run-id> --handoff <TEMP.md path>`, then `update … --lease-pod <id>` at each
-  checkpoint. At close it's a POST-AUDIT finalizer: `close <run-id>` (finished) / `stop <run-id>` (deliberate
+  `run_supervision_record.sh create <run-id> --handoff <TEMP.md path> --session-handle <opaque session handle>`,
+  then `update … --lease-pod <id>` at each checkpoint. The `--session-handle` is the supervisor's `run-id` →
+  session binding (how it knows WHICH process this run is, to probe liveness and resume in place); it is an
+  **opaque, instance-owned** value — a tmux session name, a systemd unit, a pid-file path, whatever the
+  instance's launcher owns. The consuming instance's dispatch/launcher RESOLVES this placeholder: it injects
+  the concrete handle into this brief, or pre-creates / `update`s the record with it. Don't ship the literal
+  `<opaque session handle>` — a brief with the placeholder unresolved leaves the supervisor unable to find the
+  session. At close it's a POST-AUDIT finalizer: `close <run-id>` (finished) / `stop <run-id>` (deliberate
   quit) — never cleared early. (See the run-experiment resume contract + the CHECKLIST open/close gates.)
 
 ## Constraints

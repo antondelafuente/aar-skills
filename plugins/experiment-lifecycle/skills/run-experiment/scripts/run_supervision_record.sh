@@ -30,6 +30,11 @@
 #   request-relaunch -> relaunch_requested=true (the agent / a StopFailure-style hook asks the
 #              supervisor to recover this run — the can't-resume-in-place case). FAILS CLOSED on a
 #              stopped/closed/missing/corrupt record (a deliberately-ended run is never requested back).
+#              REQUIRES a bound handoff_path: pass --handoff PATH to bind it atomically with the request,
+#              or it must already be on the record. FAILS CLOSED if no handoff is bound after the request —
+#              this is the can't-resume-in-place signal, and its fallback (launch_successor) needs the
+#              handoff to point the fresh successor at, so a "recover me" with nothing to recover from is
+#              refused rather than silently accepted.
 #   clear-relaunch   -> relaunch_requested=false (the supervisor's act-then-clear path, so one request
 #              is acted on once and not re-triggered). Idempotent; allowed on a still-active record.
 #   is-desired-active   -> exit 0 iff desired_active && !stopped && !closed; else exit 1 (a MISSING
@@ -48,7 +53,7 @@
 #   run_supervision_record.sh update <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H]
 #   run_supervision_record.sh stop   <run-id>
 #   run_supervision_record.sh close  <run-id>
-#   run_supervision_record.sh request-relaunch <run-id> [--reason TEXT]
+#   run_supervision_record.sh request-relaunch <run-id> [--handoff PATH] [--reason TEXT]
 #   run_supervision_record.sh clear-relaunch   <run-id>
 #   run_supervision_record.sh is-desired-active     <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh is-relaunch-requested <run-id>  # exit 0/1, no output
@@ -128,13 +133,16 @@ PY
 #   <session_handle> non-empty -> set the opaque instance-owned session handle; "" -> leave
 #   <set_relaunch>   "true" -> set the needs-relaunch request; "false" -> clear it; "" -> leave
 #   <relaunch_reason> free-text reason recorded with a set request (cleared with the request)
+#   <require_handoff> "true" -> after merging, FAIL CLOSED (exit 4, no write) if handoff_path is null/empty
+#                     (used by request-relaunch: the recover-me signal needs a handoff for the successor path)
 # Preserves existing fields it doesn't touch. For any non-create mutation, malformed existing JSON fails
 # CLOSED (exit 3) rather than being treated as empty.
-write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create> [<session_handle> <set_relaunch> <relaunch_reason>]
+write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create> [<session_handle> <set_relaunch> <relaunch_reason> <require_handoff>]
   local file=$1 handoff=$2 add_pods=$3 set_stopped=$4 set_closed=$5 create=$6
-  local session_handle=${7:-} set_relaunch=${8:-} relaunch_reason=${9:-}
+  local session_handle=${7:-} set_relaunch=${8:-} relaunch_reason=${9:-} require_handoff=${10:-}
   HANDOFF="$handoff" ADD_PODS="$add_pods" SET_STOPPED="$set_stopped" SET_CLOSED="$set_closed" CREATE="$create" \
   SESSION_HANDLE="$session_handle" SET_RELAUNCH="$set_relaunch" RELAUNCH_REASON="$relaunch_reason" \
+  REQUIRE_HANDOFF="$require_handoff" \
   python3 - "$file" <<'PY'
 import json, os, sys, tempfile, time
 
@@ -209,6 +217,20 @@ if os.environ.get("SET_CLOSED") == "true":
     rec["relaunch_requested"] = False
     rec["relaunch_reason"] = None
 rec["updated_at"] = now
+
+# request-relaunch's bound-handoff guard: this is the can't-resume-in-place signal, and the supervisor's
+# fallback for it (launch_successor) needs a handoff_path to point the fresh successor at. So fail CLOSED —
+# before writing anything — if the merged record still has no handoff bound. Checked here (inside the lock,
+# with the merged record in hand) so it is atomic with the request and reflects any --handoff passed in.
+if os.environ.get("REQUIRE_HANDOFF") == "true":
+    hp = rec.get("handoff_path")
+    if not (isinstance(hp, str) and hp.strip()):
+        sys.stderr.write(
+            "request-relaunch requires a bound handoff_path (pass --handoff PATH, or bind it first via "
+            "create/update): the successor fallback needs it. Refusing to set a recover-me request with "
+            "nothing to recover from.\n"
+        )
+        sys.exit(4)
 
 d = os.path.dirname(path) or "."
 fd, tmp = tempfile.mkstemp(dir=d, prefix=".rsr.", suffix=".tmp")
@@ -332,10 +354,11 @@ cmd_close(){
 
 cmd_request_relaunch(){
   local id=$1; shift
-  local reason=""
+  local reason="" handoff=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --reason) require_val --reason "${2:-}"; reason=$2; shift 2;;
+      --handoff) require_val --handoff "${2:-}"; handoff=$2; shift 2;;
+      --reason)  require_val --reason  "${2:-}"; reason=$2;  shift 2;;
       *) die "request-relaunch: unknown arg '$1'";;
     esac
   done
@@ -352,7 +375,10 @@ cmd_request_relaunch(){
     active)  : ;;
     *)       die "request-relaunch: unexpected record state '$state' for '$id'";;
   esac
-  write_record "$file" "" "" "" "" "false" "" "true" "$reason"
+  # Bind any passed --handoff atomically with the request, and require a bound handoff_path after the merge
+  # (the last positional "true"): this is the can't-resume-in-place signal, and its successor fallback needs
+  # the handoff. write_record exits 4 (no write) if none is bound — surface that as a clear failure.
+  write_record "$file" "$handoff" "" "" "" "false" "" "true" "$reason" "true"
   echo "requested relaunch: $file"
 }
 

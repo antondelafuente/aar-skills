@@ -56,7 +56,7 @@ if not is-desired-active(run):            # /quit, killed, finished, unknown, or
 
 else if session_is_alive(run):            # instance probe over the recorded session_handle
     if is-relaunch-requested(run):        #   alive but the agent asked to be recovered
-        relaunch(run); clear-relaunch(run)#   (e.g. a policy block it can't itself resume past)
+        relaunch(run)                     #   (e.g. a policy block it can't itself resume past)
     else:
         skip                              #   healthy -> leave it alone
 
@@ -64,14 +64,17 @@ else:                                     # desired-active but the session is go
     relaunch(run)
 ```
 
-`relaunch(run)` itself is:
+`relaunch(run)` itself is — note it **clears any pending relaunch request on EVERY successful branch**, not
+only the alive-but-requested call site, so a crashed run that *also* carried a `request-relaunch` can't have
+that request survive its own relaunch and re-trigger on the next pass (the contract is symmetric;
+`clear-relaunch` is idempotent, so on a crash relaunch that had no pending request it is a harmless no-op):
 
 ```
 relaunch(run):
     acquire single-writer lock for run    # never double-relaunch; never race the in-pane loop
     if crash-storm cap for run tripped: give up (log)   # keep the in-pane loop's existing cap
-    if resume_same_session(run) succeeds: done          # PREFERRED: resume in place
-    else: launch_successor(handoff_path(run))           # fresh successor at the standing handoff
+    if resume_same_session(run) succeeds: clear-relaunch(run); done  # PREFERRED: resume in place
+    else: launch_successor(handoff_path(run)); clear-relaunch(run)   # fresh successor at the standing handoff
     release lock
 ```
 
@@ -117,7 +120,7 @@ atomic-write + monotonic-state + fail-closed semantics (so no consumer re-derive
 |---|---|---|
 | `create <run-id> [--handoff P] [--session-handle H]` | agent, at run start | mark desired-active; bind handoff + session handle |
 | `update <run-id> [--handoff P] [--lease-pod ID]… [--session-handle H]` | agent, at checkpoints | refresh handoff / link pods / rebind handle |
-| `request-relaunch <run-id> [--reason T]` | agent or a `StopFailure`-style hook | positive "recover me" signal (fail-closed on a terminal/missing record) |
+| `request-relaunch <run-id> [--handoff P] [--reason T]` | agent or a `StopFailure`-style hook | positive "recover me" signal (fail-closed on a terminal/missing record). **Requires a bound `handoff_path`** — pass `--handoff P` to bind it atomically, or it must already be on the record — since this is the can't-resume-in-place signal whose fallback (`launch_successor`) needs the handoff to point the fresh successor at. Fails closed if no handoff is bound after the request. |
 | `is-desired-active <run-id>` | **supervisor** | exit 0 = relaunch-eligible; else 1 (fail-closed) |
 | `is-relaunch-requested <run-id>` | **supervisor** | exit 0 = an active run asked to be recovered; else 1 (fail-closed) |
 | `session-handle <run-id>` | **supervisor** | print the opaque instance handle (exit 1 if unset) |
