@@ -57,7 +57,7 @@ set -euo pipefail
 # caller's shell must never leak into a lease write (round-3 Finding 3). Clear them up front — every
 # real mutation sets the ones it means via an inline `VAR=val write_record` call, which re-exports just
 # those for that single subprocess.
-unset POD_ID SSH STATE COST EXPIRY_MIN NONCE KEY_REF CREATE CLAIMED_AT 2>/dev/null || true
+unset POD_ID SSH STATE COST EXPIRY_MIN NONCE KEY_REF CREATE CLAIMED_AT DELETE_ACCEPTED 2>/dev/null || true
 
 ROOT="${GPU_JOB_LEASE_DIR:-$HOME/.config/gpu-job/leases}"
 
@@ -174,6 +174,8 @@ if not creating:
     ca = os.environ.get("CLAIMED_AT", "")
     if ca != "":
         rec["claimed_at"] = int(ca)
+    if os.environ.get("DELETE_ACCEPTED") == "true":
+        rec["delete_accepted"] = True
 em = os.environ.get("EXPIRY_MIN", "")
 if em != "":
     rec["expiry_at"] = now + int(float(em) * 60)
@@ -366,6 +368,22 @@ cmd_reaping(){
   echo "marked lease $id reaping"
 }
 
+# mark-deleted: persist that the provider ACCEPTED a DELETE for this lease's pod (round-7 Finding 3), so
+# a later retry can close on verified-gone even if a fresh DELETE then 404s (pod already gone). Survives
+# unclaim-reaping. Refuses a closed lease.
+cmd_mark_deleted(){
+  local id=$1; local file; file=$(record_path "$id")
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    closed)  die "mark-deleted: lease '$id' already closed";;
+    absent)  die "mark-deleted: no lease for '$id'";;
+    invalid) die "mark-deleted: lease '$id' is malformed — inspect $file";;
+    *) : ;;
+  esac
+  DELETE_ACCEPTED=true write_record "$file"
+  echo "marked lease $id delete-accepted"
+}
+
 # claim-reaping: the ATOMIC locked-reap claim (code-review Finding 1). In ONE lock acquisition it
 # RE-CHECKS that the lease is still reapable (expiry still in the past) AND marks it `reaping`. Exit 0
 # iff the claim succeeded (caller may now DELETE); exit 1 if a concurrent refresh moved expiry into the
@@ -532,6 +550,10 @@ main(){
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "reaping: unexpected extra argument(s): $*"
       with_lock "$id" cmd_reaping "$id";;
+    mark-deleted)
+      validate_id "${1:-}"; local id=$1; shift
+      [ $# -eq 0 ] || die "mark-deleted: unexpected extra argument(s): $*"
+      with_lock "$id" cmd_mark_deleted "$id";;
     claim-reaping)
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "claim-reaping: unexpected extra argument(s): $*"
@@ -556,7 +578,7 @@ main(){
     find-nonce)
       [ $# -eq 1 ] || die "usage: pod_lease.sh find-nonce <pod-name>"
       cmd_find_nonce "$1";;
-    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|expire|emergency|reaping|claim-reaping|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
+    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|expire|emergency|reaping|mark-deleted|claim-reaping|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
     *) die "unknown subcommand '$sub'";;
   esac
 }

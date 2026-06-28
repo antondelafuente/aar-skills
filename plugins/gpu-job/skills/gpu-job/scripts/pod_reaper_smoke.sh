@@ -239,6 +239,45 @@ echo "$DOUT" | grep -q "DRY-RUN would bind+reap" && ok dryrun-logs-would-bind ||
 [ "$(lease show "$DRYPEND" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = intent ] \
   && ok dryrun-pending-not-bound || no dryrun-pending-not-bound
 
+# === round-7 Finding 2: a still-LIVE pod whose only lease is CLOSED is reported as unknown, not skipped ===
+: > "$DEL_LOG"; : > "$TMP/delfail"; : > "$TMP/nogone"; rm -f "$TMP"/pods_*.txt
+CLO=$(mk_lease pod-clo 120 RUNPOD_API_KEY); lease close "$CLO" >/dev/null   # lease closed but pod still live
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-clo $CLO
+EOF
+COUT=$(bash "$REAPER" 2>&1)
+deleted pod-clo && no closed-lease-pod-deleted || ok closed-lease-pod-not-deleted
+echo "$COUT" | grep -q "UNKNOWN pod" && ok closed-lease-pod-reported || no closed-lease-pod-reported
+
+# === round-7 Finding 3: accepted delete + INCONCLUSIVE verify reopens; a retry whose fresh DELETE 404s
+#     still CLOSES via the persisted accepted-delete marker (pod really is gone) ===
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+# verify is inconclusive on round 1 (GPU_JOB_VERIFY_GONE_CMD exit 2), accepted delete recorded
+cat > "$TMP/verify2.sh" <<EOF
+#!/bin/bash
+# inconclusive (exit 2) while $TMP/inconclusive lists the pod; else gone iff $GONE/<pod> exists
+grep -qx "\$2" "$TMP/inconclusive" 2>/dev/null && exit 2
+[ -f "$GONE/\$2" ]
+EOF
+chmod +x "$TMP/verify2.sh"
+RETRY=$(mk_lease pod-retry -1 RUNPOD_API_KEY)
+echo pod-retry > "$TMP/inconclusive"          # round 1: verify inconclusive
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-retry $RETRY
+EOF
+GPU_JOB_VERIFY_GONE_CMD="bash $TMP/verify2.sh" bash "$REAPER" >/dev/null 2>&1
+# round 1: delete accepted+marked, verify inconclusive -> lease reopened (not closed), marker persisted
+[ "$(lease show "$RETRY" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("delete_accepted"))')" = True ] \
+  && ok retry-marker-persisted || no retry-marker-persisted
+r1_state=$(lease show "$RETRY" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')
+case "$r1_state" in provisional|enriched|intent) ok retry-reopened-round1 ;; *) no "retry-reopened-round1 ($r1_state)" ;; esac
+# round 2: fresh DELETE now 404s (pod gone), verify says gone -> CLOSE via the persisted marker
+echo pod-retry >> "$TMP/delfail"               # fresh DELETE non-2xx (already gone)
+: > "$TMP/inconclusive"; touch "$GONE/pod-retry"   # verify now says gone
+GPU_JOB_VERIFY_GONE_CMD="bash $TMP/verify2.sh" bash "$REAPER" >/dev/null 2>&1
+[ "$(lease show "$RETRY" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = closed ] \
+  && ok retry-closes-on-prior-accept || no retry-closes-on-prior-accept
+
 # === round-6 Finding 2: an unknown/typo arg must FAIL, never silently run a live destructive sweep ===
 if bash "$REAPER" --dryrun >/dev/null 2>&1; then no unknown-arg-rejected; else ok unknown-arg-rejected; fi
 if bash "$REAPER" extra >/dev/null 2>&1; then no surplus-arg-rejected; else ok surplus-arg-rejected; fi

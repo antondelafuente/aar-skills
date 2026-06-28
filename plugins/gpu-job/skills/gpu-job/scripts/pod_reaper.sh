@@ -159,7 +159,13 @@ while read -r nonce state pod exp; do
   [ -n "${nonce:-}" ] || continue
   LEASE_POD["$nonce"]="$pod"
   LEASE_STATE["$nonce"]="$state"
-  [ "$pod" != "-" ] && [ -n "$pod" ] && POD_TO_NONCE["$pod"]="$nonce"
+  # A pod counts as "accounted for" only if its lease is ACTIVE/REAPING (round-7 Finding 2). A pod whose
+  # only lease is `closed` (a teardown thought it gone) or `invalid` but is STILL LIVE is effectively an
+  # orphan — leaving it out of POD_TO_NONCE makes step 2 REPORT it (an unknown live pod), not skip it.
+  case "$state" in
+    intent|provisional|enriched|reaping)
+      [ "$pod" != "-" ] && [ -n "$pod" ] && POD_TO_NONCE["$pod"]="$nonce" ;;
+  esac
 done < <(bash "$LEASE" list)
 
 reaped=0; reported=0; kept=0; retried=0
@@ -182,10 +188,19 @@ reap_lease(){ # <nonce> <key> <pod-id>
   if ! bash "$LEASE" claim-reaping "$nonce" >/dev/null 2>&1; then
     log "keep (refreshed under lock): $nonce pod=$pod"; kept=$((kept+1)); return
   fi
-  # Close the lease ONLY on an ACCEPTED delete (2xx) AND a verified-gone confirmation. A delete that
-  # was not accepted (wrong key, auth/network error, non-2xx) must NOT be trusted even if a subsequent
-  # GET 404s (round-4 Finding 2). Anything short of accepted+verified -> reopen for the next sweep.
-  if delete_pod "$key" "$pod" && verify_gone "$key" "$pod"; then
+  # Was THIS lease's delete accepted on a PRIOR sweep? (round-7 Finding 3) — if so, a fresh DELETE that
+  # now 404s because the pod is already gone must still let us close on verified-gone, instead of looping
+  # forever (the pod IS gone; only the fresh DELETE is no longer "accepted").
+  local prior_accepted
+  prior_accepted=$(bash "$LEASE" show "$nonce" 2>/dev/null | python3 -c 'import json,sys;print("yes" if json.load(sys.stdin).get("delete_accepted") is True else "no")' 2>/dev/null || echo no)
+  local accepted=no
+  if delete_pod "$key" "$pod"; then
+    accepted=yes
+    bash "$LEASE" mark-deleted "$nonce" >/dev/null 2>&1 || true   # persist the accepted-delete marker
+  fi
+  # Close ONLY when the delete was accepted (now OR on a prior sweep) AND the pod is verified gone. A
+  # delete never accepted at all (wrong key, auth error) is NOT trusted even if a GET 404s.
+  if { [ "$accepted" = yes ] || [ "$prior_accepted" = yes ]; } && verify_gone "$key" "$pod"; then
     bash "$LEASE" close "$nonce" >/dev/null || true
     log "REAPED: nonce=$nonce pod=$pod (delete accepted + verified gone)"; reaped=$((reaped+1))
   else

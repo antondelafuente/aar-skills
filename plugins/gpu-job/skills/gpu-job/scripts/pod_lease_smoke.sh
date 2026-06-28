@@ -89,6 +89,13 @@ if GPU_JOB_STALE_REAPING_SEC=900 run claim-reaping "$FRC" >/dev/null 2>&1; then 
 # with a 0s staleness window, the same claim is immediately stale -> reclaimable (a crashed-reaper retry)
 if GPU_JOB_STALE_REAPING_SEC=0 run claim-reaping "$FRC" >/dev/null 2>&1; then ok stale-reaping-reclaimable; else no stale-reaping-reclaimable; fi
 
+# --- mark-deleted: persists delete_accepted, and it SURVIVES unclaim-reaping (round-7 Finding 3) ---
+MD=$(run intent RUNPOD_API_KEY --expiry-min -1); run provisional "$MD" pod-md >/dev/null
+run mark-deleted "$MD" >/dev/null
+[ "$(field "$MD" delete_accepted)" = True ] && ok markdeleted-set || no markdeleted-set
+run claim-reaping "$MD" >/dev/null; run unclaim-reaping "$MD" >/dev/null
+[ "$(field "$MD" delete_accepted)" = True ] && ok markdeleted-survives-unclaim || no markdeleted-survives-unclaim
+
 # --- emergency: binds a pod id + forces expiry NOW even from an intent-only lease (Finding 3) ---
 EM=$(run intent RUNPOD_API_KEY --expiry-min 600)          # intent only, future expiry
 run emergency "$EM" pod-em >/dev/null

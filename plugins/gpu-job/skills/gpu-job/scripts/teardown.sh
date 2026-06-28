@@ -28,6 +28,16 @@ case "$del_http" in 200|201|202|204) del_ok=1; echo "deleted $PID (HTTP $del_htt
 # INCONCLUSIVE and leaves the lease IMMEDIATELY reapable for the standing reaper to retry (never closes
 # a still-billing pod).
 if [ -n "$NONCE" ] && [ -f "$HERE/pod_lease.sh" ]; then
+  # SAFETY: only mutate the lease if it actually OWNS this pod (round-7 Finding 1). A mistyped nonce
+  # must not close/expire another live pod's lease (which would orphan that pod from the reaper).
+  lease_pod=$(bash "$HERE/pod_lease.sh" show "$NONCE" 2>/dev/null \
+              | python3 -c 'import json,sys;print(json.load(sys.stdin).get("pod_id") or "")' 2>/dev/null || true)
+  if [ "$lease_pod" != "$PID" ]; then
+    echo "WARNING: lease $NONCE pod_id ('$lease_pod') != deleted pod '$PID' — NOT mutating it (wrong nonce?)" >&2
+    NONCE=""
+  fi
+fi
+if [ -n "$NONCE" ] && [ -f "$HERE/pod_lease.sh" ]; then
   body=$(curl -s -w '\n%{http_code}' --connect-timeout 15 --max-time 60 \
            -H "Authorization: Bearer $KEY" -H "User-Agent: gpu-job" \
            "https://rest.runpod.io/v1/pods/$PID" 2>/dev/null) || body=""
