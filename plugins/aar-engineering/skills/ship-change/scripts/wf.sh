@@ -665,14 +665,24 @@ fd_load(){  # fd_load <wt> <repo> <pr> <tok> -> echoes cache path (canonical PR 
 # own advancing save still wins (its local round is strictly greater => this branch is skipped => local wins).
 # Args: <cache> <canonical-comment-body>. No-op on empty/unparseable canonical (best-effort; finish's advancing
 # save is independently fail-closed and the gate re-derives findings from GitHub regardless). RETURNS nonzero
-# ONLY when an adoption WAS required (canonical >= local) but the cache write FAILED — so fd_save aborts before
-# posting a stale lower round. A no-op (no canonical / lower canonical / unparseable) returns 0.
+# when fd_save must abort: rc 2 if the canonical comment's round is present-but-malformed (would otherwise be
+# coerced to 0 and reset the counter), or rc 1 if a required adoption (canonical >= local) cannot be written. A
+# no-op (no canonical / lower canonical / unparseable body / absent canonical round) returns 0.
 fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
   local cache=$1 cbody=$2 cjson cround lround fp sha
   [ -n "$cbody" ] || return 0
   cjson=$(printf '%s' "$cbody" | sed -n '/```json/,/```/p' | sed '1d;$d' \
     | jq -c '{r:(.round // 0), fp:(.last_review_fingerprint // ""), sha:(.last_reviewed_sha // "")}' 2>/dev/null) || return 0
   [ -n "$cjson" ] || return 0
+  # The canonical comment's `round` is also the load-bearing counter — a PRESENT-but-malformed canonical value
+  # must NOT be silently coerced to 0 (that would let a corrupt canonical comment be overwritten/reset). Tell a
+  # legitimate ABSENT round (back-compat 0) from a present-but-bad one via the jq->0 input, and fail closed (rc 2)
+  # on the latter so fd_save aborts. (`.r` came from `.round // 0`, so 0 here = absent OR a literal 0 — both fine.)
+  local cround_raw; cround_raw=$(printf '%s' "$cbody" | sed -n '/```json/,/```/p' | sed '1d;$d' \
+    | jq -r 'if (has("round")|not) or .round==null then "OK0"
+             elif (.round|type)=="number" and (.round|floor)==.round and .round>=0 then (.round|tostring)
+             else "BAD" end' 2>/dev/null)
+  [ "$cround_raw" = BAD ] && return 2
   cround=$(printf '%s' "$cjson" | jq -r '.r' 2>/dev/null); case "$cround" in ''|*[!0-9]*) cround=0 ;; esac
   lround=$(jq -r '(.round // 0)' "$cache" 2>/dev/null); case "$lround" in ''|*[!0-9]*) lround=0 ;; esac
   if [ "$cround" -ge "$lround" ] 2>/dev/null && [ "$cround" -gt 0 ] 2>/dev/null; then

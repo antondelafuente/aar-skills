@@ -156,6 +156,13 @@ chmod 755 "$mdir"
 # a NO-OP (lower canonical) returns 0 even though no write happens.
 mok="$TMP/mok.json"; echo '{"round":5,"findings":[]}' > "$mok"
 fd_merge_canonical_round "$mok" "$(canon_body '{"round":2}')" && ok merge-noop-rc0 || no "merge-noop-rc0"
+# a present-but-MALFORMED canonical round must fail closed (rc nonzero), NOT coerce to 0 and reset the counter.
+mbad="$TMP/mbad.json"; echo '{"round":3,"findings":[]}' > "$mbad"
+fd_merge_canonical_round "$mbad" "$(canon_body '{"round":"notnum"}')" 2>/dev/null && no "merge-malformed-canonical-rc" || ok merge-malformed-canonical-rc
+fd_merge_canonical_round "$mbad" "$(canon_body '{"round":-2}')" 2>/dev/null && no "merge-negative-canonical-rc" || ok merge-negative-canonical-rc
+# absent canonical round (back-compat) is a clean no-op (rc 0), local untouched.
+fd_merge_canonical_round "$mbad" "$(canon_body '{"findings":[]}')" && ok merge-absent-canonical-rc0 || no "merge-absent-canonical-rc0"
+[ "$(fd_round "$mbad")" = 3 ] && ok merge-absent-canonical-keeps-local || no "merge-absent-canonical-keeps-local ($(fd_round "$mbad"))"
 # no/empty/unparseable canonical -> no-op, local untouched.
 mc4="$TMP/mc4.json"; echo '{"round":2,"findings":[]}' > "$mc4"
 fd_merge_canonical_round "$mc4" ""; [ "$(fd_round "$mc4")" = 2 ] && ok merge-empty-canonical-noop || no "merge-empty-canonical-noop ($(fd_round "$mc4"))"
