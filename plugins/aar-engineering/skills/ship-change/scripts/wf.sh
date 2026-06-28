@@ -1137,8 +1137,11 @@ github_repo_slug(){
   esac
   path=${path%.git}; path=${path#/}
   # REJECT (don't truncate) anything that isn't exactly owner/repo — silently truncating an extra-segment URL
-  # could make the detector probe a DIFFERENT repo than the supplied remote (#166 code-review F3 r18h).
-  is_clean_repo_slug "$path" && printf '%s' "$path"
+  # could make the detector probe a DIFFERENT repo than the supplied remote (#166 code-review F3 r18h). ALWAYS
+  # return 0 (empty output on rejection) so a bare `slug=$(github_repo_slug …)` assignment can't trip `set -e`
+  # (#166 code-review r18i) — callers handle the empty value explicitly.
+  if is_clean_repo_slug "$path"; then printf '%s' "$path"; fi
+  return 0
 }
 
 # is_clean_repo_slug <s> — true ONLY for a well-formed bare `owner/repo`: exactly one slash, BOTH components
