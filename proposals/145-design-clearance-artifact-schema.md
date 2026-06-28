@@ -43,23 +43,38 @@ versioned, and committed to the branch in its own clearance commit so it lands o
 the `DESIGN.md` + the posted `--design` audit are that — it is the **decision record on top of them**: the
 human's verdict, frozen against a SHA.
 
-**The artifact is not self-attesting.** A designer-written file that merely *says* "anton cleared this" is
-forgeable and unverifiable — the executor would be trusting a string. So the clearance binds to **two
-independently-verifiable external facts**, neither of which the designer can fabricate in the JSON: (a) a real
-**clearance event** authored on the experiment PR by an authorized actor and bound to the cleared SHA, which
-the executor re-fetches from GitHub via the shared helper (#150) and verifies (below); and (b) the
-**structured `--design` audit record** the responses are checked against (below), not a hand-copied count. The
-JSON records *pointers and the human's per-finding verdict*; the two facts it points at are verified at the
-source, so the gate cannot be passed by editing the file alone.
+**The artifact is not self-attesting — and its content is digest-bound to two externally-authored events.** A
+designer-written file that merely *says* "anton cleared this" is forgeable; so is one whose internal hash
+(`findings_sha256`) is recomputed in the same edit that tampers the findings it hashes. Closing both holes
+requires the *trusted, externally-authored* events to attest the **digests of the branch-authored content**,
+not just author + SHA. So:
+
+- **(a) The `--design` audit event attests the findings-record digest.** When the `--design` audit is posted
+  (by the audit-runner / helper, not the designer), the posted event carries the canonical
+  `sha256(findings_record)` in its machine-readable marker. The executor verifies `findings_sha256` in the JSON
+  equals **the digest the posted audit event attests** — so an edited `findings_record` (dropping a HIGH) no
+  longer matches the audit GitHub published, and BLOCKs. (Hashing the local file against a hash *in the same
+  JSON* alone is necessary but not sufficient; the audit event is the external anchor.)
+- **(b) The clearance event attests the `CLEARANCE.json` digest.** The authorized clearance event's marker
+  carries `sha256(CLEARANCE.json-without-the-event-block)` plus the repo+PR identity. The executor verifies the
+  on-disk `CLEARANCE.json` digest equals what the authorized actor's event attests — so editing
+  `finding_responses` (e.g. flipping an unanswered HIGH to `justified`) after clearance invalidates the
+  attestation and BLOCKs. The actor is committing to *these responses on this brief*, not just "I approve."
+
+(The `CLEARANCE.json` digest is computed over the file with the `approval.event_*`/digest fields excluded, to
+avoid the circularity of a file hashing its own attestation pointer.) The JSON thus records *pointers and the
+verdict*; the two external events anchor both the **identity** (authorized actor, cleared SHA) **and the
+content** (findings + responses) — so the gate cannot be passed by editing the branch files alone.
 
 **The clearance event is NOT a merge-satisfying GitHub `APPROVED` review.** #130 decision 2 is explicit: the
 design review gates the *run*, never the merge — only the *close* gate posts the final merge-satisfying native
 APPROVE. If clearance were a native `APPROVED` review it would satisfy branch protection and could merge an
 *un-run* experiment, defeating the close gate and the "main only receives closed experiments" promise. So the
 clearance event is a **non-merge-satisfying signal**: a structured **clearance comment** (a canonical PR
-comment carrying a machine-readable marker — `clearance: cleared`, the cleared SHA, the actor) posted by the
-authorized actor. The executor re-fetches it via the helper and verifies author + SHA + marker; it never reads
-as a GitHub approval, so it cannot satisfy the merge gate. (A GitHub *review thread* could also carry it if the
+comment carrying a machine-readable marker — `clearance: cleared`, the cleared SHA, the repo+PR identity, and
+the attested `CLEARANCE.json` digest) posted by the authorized actor. The executor re-fetches it via the helper
+and verifies author + SHA + repo/PR identity + the attested digest; it never reads as a GitHub approval, so it
+cannot satisfy the merge gate. (A GitHub *review thread* could also carry it if the
 helper guarantees it is posted as a COMMENT/REQUEST_CHANGES event, never APPROVE — but the canonical-comment
 form is the safe default precisely because it is structurally incapable of satisfying branch protection.)
 `approval.event_kind` records which form was used so the executor checks the right surface; the field is named
@@ -85,10 +100,12 @@ form is the safe default precisely because it is structurally incapable of satis
     "cleared_sha": "9f3a1c4e8b2d6a0f5c7e9b1d3f5a7c9e1b3d5f7a"
   },
   "brief_commit": "9f3a1c4e8b2d6a0f5c7e9b1d3f5a7c9e1b3d5f7a",
-  "brief_files": ["DESIGN.md", "START.md"],
+  "brief_files": ["DESIGN.md", "START.md", "CHECKLIST.md"],
+  "digest_algorithm": "sha256",
   "brief_blobs": {
-    "DESIGN.md": "b1946ac92492d2347c6235b4d2611184",
-    "START.md": "591785b794601e212b260e25925636fd"
+    "DESIGN.md": "b1946ac9...",
+    "START.md": "591785b7...",
+    "CHECKLIST.md#gates": "1d229271..."
   },
   "design_audit": {
     "audit_ref": "https://github.com/<owner>/<repo>/pull/<n>#pullrequestreview-<id>",
@@ -115,8 +132,9 @@ form is the safe default precisely because it is structurally incapable of satis
 }
 ```
 
-`brief_blobs` are illustrative short digests; the implementation uses Git's own per-file blob OIDs (or a
-sha256 per file), captured at clearance — see the brief-integrity rule. The `--design` audit is persisted as
+`brief_blobs` are illustrative truncated digests; the implementation uses the single `digest_algorithm`
+(`sha256` in schema v1 — one algorithm, not a per-file choice, for determinism) over each drift-checked unit,
+captured at clearance — see the brief-integrity rule. The `--design` audit is persisted as
 a **structured `findings_record`** (a machine-readable finding list: stable id, severity, text per finding)
 committed alongside the brief, and `findings_sha256` pins its content so the response set is validated against
 the *actual* findings, not a copied integer. **The findings record is the one from the audit on the cleared
@@ -139,8 +157,9 @@ and the surviving responses are `justified`/`deferred`, never `fixed`.
 | `approval.actor` | string | yes | The GitHub login that authored the clearance event. Must be an **authorized approver** (instance-profile policy, #153) — the executor checks the fetched event's author equals this and is authorized; a designer cannot self-clear by writing a string. |
 | `approval.cleared_sha` | 40-hex SHA | yes | The commit the clearance event names (carried in the comment marker / review SHA). Must equal `brief_commit`. |
 | `brief_commit` | 40-hex SHA | yes | The commit carrying the cleared brief — the **final** audited brief (the binding target, #130 decision 2). |
-| `brief_files` | string[] | yes | The immutable brief inputs whose content is integrity-checked; `["DESIGN.md","START.md"]`. **`CHECKLIST.md` is deliberately excluded** — the executor mutates it as run evidence (see "Checklist is run-mutable" below), so it is not a drift-checked input. Listed (not assumed) so the verifier can assert presence. |
-| `brief_blobs` | object (path→digest) | yes | Per-file content digest (Git blob OID or sha256) of each `brief_files` entry **at `brief_commit`**, captured at clearance — the integrity anchor the executor compares current content against (see brief-integrity rule). |
+| `brief_files` | string[] | yes | The brief files present at `brief_commit`; `["DESIGN.md","START.md","CHECKLIST.md"]` (#130). Listed so the verifier can assert presence. Drift-coverage differs per file — see `brief_blobs`. |
+| `digest_algorithm` | enum (fixed `"sha256"` in v1) | yes | The one digest algorithm for `brief_blobs`/all digests in this schema. Fixed for determinism (#130 F3 fix); a future algorithm is a schema-version bump, not a per-file choice. |
+| `brief_blobs` | object (unit→digest) | yes | `digest_algorithm` digest of each **drift-checked unit** at `brief_commit`: `DESIGN.md` whole, `START.md` whole, and `CHECKLIST.md#gates` (the gate-definition section only — the run-evidence section is excluded so the executor can write it). The integrity anchor the executor compares current content against (brief-integrity rule). |
 | `design_audit.audit_ref` | string (URL) | yes | Pointer to the posted `--design` PR review the verdict arbitrates. Pointer only — never the audit payload (#130 record-sensitivity). |
 | `design_audit.audit_commit` | 40-hex SHA | yes | The commit the `--design` audit reviewed. Must equal `brief_commit`; if they differ the executor blocks (the audited design is not the cleared brief). |
 | `design_audit.findings_record` | string (path) | yes | Committed path of the **structured** machine-readable audit finding list (id, severity, text per finding) the responses are validated against — not a copied count. |
@@ -184,16 +203,32 @@ that resolves this, and the reason the proceed rule can safely require `audit_co
 So "fix a finding" is fully supported — it just resolves to *re-audit then bind the clean commit*, the
 re-clearance loop, rather than a `fixed` annotation on a stale audit.
 
-### Checklist is run-mutable (excluded from the drift check)
+### Checklist: pin the gate definitions, leave the evidence mutable
 
-The executor *works* `CHECKLIST.md` during the run (ticking gates, recording evidence) — it is intentionally
-mutated and committed as the run's evidence record (`run-experiment`'s "work the checklist as you go"). So it
-**cannot** be a drift-checked immutable input: a content-equality rule over it would block the executor on its
-own expected edits. Therefore `brief_files` is `["DESIGN.md", "START.md"]` only — the two inputs that *define*
-the experiment and must not drift after clearance. `CHECKLIST.md` is still part of the brief commit and still
-handed off; it is simply governed by the run-evidence contract, not the clearance integrity check. (If a future
-need arises to pin the checklist's *instruction* content while leaving its *evidence* mutable, that is a split
-of the file — out of scope here; this schema takes the simpler correct stance of not drift-checking it.)
+There is a real tension here. #130 decision 2 says clearance binds the brief commit carrying **all three**
+files — including `CHECKLIST.md` — and any later change forces re-clearance; the *gates* the executor must pass
+are exactly the kind of thing that must not silently change after clearance. But the executor also *works*
+`CHECKLIST.md` during the run (ticking gates, recording evidence — `run-experiment`'s "work the checklist as
+you go"), so a naive content-equality rule over the whole file would block the executor on its own expected
+edits.
+
+Resolution — **separate the immutable gate definitions from the mutable run-evidence**, and drift-check only
+the former. Concretely, the checklist's static content (the gate/instruction definitions — *what* must pass) is
+captured at clearance as a pinned representation in `brief_blobs` (a `CHECKLIST.gates` digest over the checklist's
+gate-definition section, the part the executor reads but must not change), while the run-evidence the executor
+appends (checkmarks, per-gate notes) is written to a **separate run record** (or a clearly-delimited evidence
+section excluded from the digest). So:
+
+- The **gate definitions are drift-checked** — changing what the executor must satisfy after clearance forces
+  re-clearance, honoring #130's "later brief change forces re-clearance" for the load-bearing part.
+- The **evidence is freely mutable** — the executor records its work without tripping the gate.
+
+`brief_files` lists `["DESIGN.md", "START.md", "CHECKLIST.md"]`, and `brief_blobs` pins `DESIGN.md` and
+`START.md` whole plus the checklist's **gate-definition section** (not the evidence section). The exact
+split-point — a separate `CHECKLIST.gates.md` immutable file vs. a delimited section within `CHECKLIST.md` — is
+an implementation choice for the producer/consumer children; the *contract* this schema fixes is "gate
+definitions are pinned and drift-checked; run-evidence is not." This satisfies both #130 (the brief's gates are
+bound at clearance) and the run-mutability reality.
 
 ### Path and produce/consume contract
 
@@ -222,40 +257,45 @@ of the file — out of scope here; this schema takes the simpler correct stance 
 
 The executor proceeds **iff all** hold; **any** failure blocks (fail-closed — a missing/malformed file is a
 block, never a pass). Crucially, rules 4, 6, and 7 verify against **external sources** (Git content, the
-GitHub clearance event, the committed findings record), so the gate cannot be passed by editing the JSON alone:
+authorized clearance event's attested digest, and the posted audit event's attested findings digest), so the
+gate cannot be passed by editing the branch files in concert — the externally-authored events anchor both
+identity and content:
 
 1. **File exists and parses** as JSON with a `schema_version` the executor supports. Missing file, parse
    error, or unknown major version → BLOCK.
 2. **`decision == "cleared"`.** Any other value (`blocked`, or absent) → BLOCK.
 3. **`experiment`** equals the `experiments/<exp>/` directory name → else BLOCK (mis-filed artifact).
-4. **Brief integrity (the re-clearance trigger).** Every file in `brief_files` (`DESIGN.md`, `START.md` —
-   *not* the run-mutable `CHECKLIST.md`) exists at `brief_commit`, and the **current working-tree content** of
-   each is byte-identical to its content at `brief_commit`. Concretely the executor compares content, not commit
-   identity — `git diff --quiet <brief_commit> -- DESIGN.md START.md` must be clean, AND each file's current
-   digest must equal its `brief_blobs` entry. (Commit-identity equality would be wrong: clearance is its own
-   commit on top, so `HEAD != brief_commit` always — comparing SHAs directly would block every run. Content
-   equality over the immutable inputs is the correct test.) Any drift-checked brief file touched after clearance
+4. **Brief integrity (the re-clearance trigger).** Each drift-checked unit exists at `brief_commit` and its
+   **current working-tree content** matches its `brief_blobs` digest: `DESIGN.md` whole, `START.md` whole, and
+   the **gate-definition section of `CHECKLIST.md`** (the static gates — *not* the run-evidence section the
+   executor mutates; see "Checklist" above). The executor compares content, not commit identity (clearance is
+   its own commit on top, so `HEAD != brief_commit` always — comparing SHAs directly would block every run);
+   each unit's current digest must equal its `brief_blobs` entry. Any drift-checked unit changed after clearance
    → BLOCK with "brief changed since clearance — re-clear before running." This is #130's "any later change
-   forces re-clearance," made mechanical.
+   forces re-clearance" for the load-bearing brief content, made mechanical, while leaving checklist evidence
+   freely writable.
 5. **Audit binds the cleared brief.** `design_audit.audit_commit == brief_commit` → else BLOCK (the audited
    design is not the brief being run). Consistent with fixing findings via the fix loop above — the binding
    audit is the *final* one.
-6. **Clearance event is real, non-merge-satisfying, and authorized.** The executor **re-fetches** the event
-   named by `approval.event_id`/`event_kind` (via the shared helper, #150) and requires: it exists and is the
-   declared kind; it is **not** a GitHub `APPROVED` review (a clearance event must be structurally
-   non-merge-satisfying — #130 decision 2); its author equals `approval.actor`; `actor` is an **authorized
-   approver** per the instance-profile policy (#153); and the SHA it names equals `approval.cleared_sha ==
-   brief_commit`. A missing event, an APPROVE-typed event, an unauthorized actor, or a SHA mismatch → BLOCK.
-   (This is what makes the artifact non-self-attesting: a designer-written `actor:"anton"` is worthless unless
-   GitHub confirms anton posted the clearance event for that SHA.)
-7. **Finding-response completeness, validated against the findings record.** The executor loads
-   `design_audit.findings_record`, verifies its content hash equals `findings_sha256` (else BLOCK — tampered
-   findings), then requires: every HIGH and every MED finding **id present in the findings record** has
-   exactly one `finding_responses` entry with matching `id` and `severity`; every response `id` exists in the
-   record (no phantom responses); every response has non-empty `evidence`; every `deferred` has a
-   `followup_issue`. A HIGH/MED with no response, a phantom/mismatched id, an empty evidence, or a deferral
-   with no issue → BLOCK. (`summary` is a fast cross-check only; the *record* is the denominator, so a
-   hand-shrunk count can't hide an unanswered finding.)
+6. **Clearance event is real, non-merge-satisfying, authorized, and content-attesting.** The executor
+   **re-fetches** the event named by `approval.event_id`/`event_kind` (via the shared helper, #150) and
+   requires: it exists and is the declared kind; it is **not** a GitHub `APPROVED` review (a clearance event
+   must be structurally non-merge-satisfying — #130 decision 2); its author equals `approval.actor`; `actor` is
+   an **authorized approver** per the instance-profile policy (#153); the repo+PR identity in its marker matches
+   this experiment; the SHA it names equals `approval.cleared_sha == brief_commit`; **and the
+   `CLEARANCE.json` digest it attests equals the on-disk digest** (computed over the file with the
+   `approval.event_*`/digest fields excluded). A missing event, an APPROVE-typed event, an unauthorized actor, a
+   wrong repo/PR, a SHA mismatch, or a digest mismatch → BLOCK. (The digest attestation is what stops a designer
+   editing `finding_responses` after clearance: the authorized actor committed to *these* responses.)
+7. **Finding-response completeness, validated against the externally-attested findings record.** The executor
+   loads `design_audit.findings_record`, verifies `sha256(findings_record) == findings_sha256` **AND that this
+   digest equals the one the posted `--design` audit event attests** (else BLOCK — the findings were edited
+   after the audit GitHub published). It then requires: every HIGH and every MED finding **id present in the
+   findings record** has exactly one `finding_responses` entry with matching `id` and `severity`; every response
+   `id` exists in the record (no phantom responses); every response has non-empty `evidence`; every `deferred`
+   has a `followup_issue`. A HIGH/MED with no response, a phantom/mismatched id, an empty evidence, or a deferral
+   with no issue → BLOCK. (`summary` is a fast cross-check only; the *externally-attested record* is the
+   denominator, so a hand-shrunk count or a re-hashed local file can't hide an unanswered finding.)
 
 The executor records the verdict (proceed or the block reason) to its run log / ledger, so the
 proceed-decision is itself auditable. The block reason is a single precise line (which rule failed), never a
@@ -269,10 +309,17 @@ generic "not cleared."
   it does not define the policy.
 - **Fetching/verifying the GitHub clearance event** — the read is performed via the shared GitHub-lifecycle
   helper (#150). This schema names what to fetch (`event_id`/`event_kind`) and the proceed condition (including
-  the "must not be APPROVE" check); the helper owns the GitHub read. And the cross-family guarantee on the
-  `--design` audit the responses answer is owned by the audit-runner cross-family contract (#154). This schema
-  only *records results*; it must not become a second home for cross-family enforcement (the #130 decision-5
-  boundary).
+  the "must not be APPROVE", repo/PR-identity, and `CLEARANCE.json`-digest checks); the helper owns the GitHub
+  read. And the cross-family guarantee on the `--design` audit the responses answer is owned by the
+  audit-runner cross-family contract (#154). This schema only *records results*; it must not become a second
+  home for cross-family enforcement (the #130 decision-5 boundary).
+- **The posted `--design` audit event attesting the findings digest** — for the external-content anchor (proceed
+  rule 7) to hold, the audit-posting step (the helper / audit-runner, #150/#154) must include
+  `sha256(findings_record)` in the posted audit event's marker. This schema *requires* that attestation and
+  *consumes* it; producing it is the audit-posting step's job, named here as a dependency so #150/#154 carry it.
+  Likewise the authorized clearance-comment marker (carrying the `CLEARANCE.json` digest) is posted via the
+  helper. This schema does not own GitHub posting — only what the markers must contain and how the executor
+  checks them.
 - **Emitting the structured `findings_record`** — `findings_sha256`/`findings_record` require a machine-readable
   audit finding list with **stable ids** (id, severity, text per finding). The audit engine
   (`verify-claims`/`audit_experiment`) currently emits markdown `FINDING:`/`SUMMARY:` text, not canonical JSON
@@ -339,10 +386,12 @@ generic "not cleared."
   `experiments/<exp>/` layout #130 establishes — event references are pointer-only (`event_ref`/`audit_ref`
   URLs), but the per-finding evidence + findings record are committed content governed by #130's
   record-sensitivity contract (see Rollout `blocked-by`).
-- **Touches the shared GitHub-lifecycle helper (#150) as a consumer:** the executor needs a helper primitive
-  to *fetch + verify a non-approve clearance event* (`event_id`/`event_kind` → actor/SHA/marker, and assert it
-  is not an APPROVE). This is a read, not new mutation authority; it is in the helper's posting/read surface,
-  not its merge-authority/trusted-base surface. Named here so #150 knows this consumer exists.
+- **Touches the shared GitHub-lifecycle helper (#150):** as a *consumer*, the executor needs a primitive to
+  fetch + verify a non-approve clearance event (`event_id`/`event_kind` → actor/SHA/repo-PR/attested-digest,
+  assert not APPROVE) — a read, not new mutation authority. As a *producer requirement*, the audit-posting and
+  clearance-comment steps must include the findings digest / `CLEARANCE.json` digest in their event markers
+  (the external-content anchors). Both sit in the helper's posting/read surface, not its merge-authority/
+  trusted-base surface. Named here so #150 carries them.
 - **Depends on a structured-audit-output capability** (correcting the prior draft's "no `verify-claims`
   change"): the `findings_record` needs stable-id JSON findings, which the audit engine does not emit today.
   This is a named prerequisite of the consumer child (a thin markdown→JSON parser with id generation + a parser
@@ -364,10 +413,12 @@ Doc-only design PR: lands the schema on `main` via the `--scaffold` gate, then s
    non-merge-satisfying clearance event exists against the final brief commit, record the `approval` block,
    finding responses, `brief_commit`, and `brief_blobs`; commit + a writer-side schema assert.
 2. **`run-experiment`: read + evaluate `CLEARANCE.json` as the pre-spend gate (GitHub path only)** — the
-   consumer step + the 7-rule fail-closed proceed rule, with smokes that a missing/malformed file, a
-   brief-drifted file, a forged/absent clearance event, an APPROVE-typed event (must BLOCK — clearance is not
-   merge-satisfying), and a tampered findings record each BLOCK, and that a local-handoff run with no
-   `experiments/<exp>/` is untouched.
+   consumer step + the 7-rule fail-closed proceed rule, with smokes that each of these BLOCKs: a
+   missing/malformed file; a brief-drifted file (gate-definition section changed) — while checklist *evidence*
+   edits do **not** block; a forged/absent clearance event; an APPROVE-typed event (clearance is not
+   merge-satisfying); a `CLEARANCE.json` whose digest the clearance event does not attest (tampered responses);
+   a `findings_record` whose digest the posted audit event does not attest (tampered findings); and that a
+   local-handoff run with no `experiments/<exp>/` is untouched.
 
 Both implementation children are filed **`blocked-by`**: the GitHub-lifecycle helper (#150, for the
 clearance-event fetch/verify primitive + the resolved commit/branch identity), the instance-profile interface
