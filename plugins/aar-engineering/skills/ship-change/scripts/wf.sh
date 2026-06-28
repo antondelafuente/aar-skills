@@ -1202,13 +1202,19 @@ readonly_probe_one_push_url(){
         -c user.name="wf-doctor" -c user.email="wf-doctor@local" \
         commit -q --no-verify --allow-empty -m probe 2>/dev/null
   ) || { rm -rf "$tmp"; RO_PUSH_OUT="could not stage a probe commit"; RO_PUSH_RC=3; return; }
-  # MUTATION-SAFE credential layer (#166 code-review F1 r8): a successful auth on a `--dry-run` push makes git
-  # call the credential helper's `store` (verified empirically), which MUTATES the user's credential store. So
-  # we install a read-only SHIM as the SOLE helper: it forwards ONLY `get` to the inherited helper chain (so we
-  # still detect an ambient credential) and NO-OPS `store`/`erase` (so the probe can never write the store).
+  # MUTATION-SAFE credential layer (#166 code-review F1 r8/r9): a successful auth on a `--dry-run` push makes
+  # git call the credential helper's `store` (verified empirically), which MUTATES the user's credential store.
+  # So we install a read-only SHIM as the SOLE helper: it forwards ONLY `get` to the inherited helper chain (so
+  # we still detect an ambient credential) and NO-OPS `store`/`erase` (so the probe can never write the store).
+  # CRITICAL (r9): git also honors URL-SCOPED helpers (`credential.https://github.com.helper`, e.g. `gh auth
+  # git-credential`) that a bare `-c credential.helper=` does NOT clear — so we ISOLATE the probe's git config
+  # entirely (GIT_CONFIG_GLOBAL/SYSTEM -> /dev/null, NOSYSTEM=1) and re-inject ONLY our shim. We snapshot BOTH
+  # the unscoped helpers AND the github.com URL-scoped helpers FIRST (from the real config) so the shim can
+  # still forward `get` to them.
   shim="$tmp/cred-ro-shim.sh"
-  # snapshot the inherited helper chain (system+global+any env-config), so the shim can forward `get` to them.
-  helpers=$(git config --get-all credential.helper 2>/dev/null || true)
+  helpers=$( { git config --get-all credential.helper 2>/dev/null; \
+               git config --get-all "credential.https://github.com.helper" 2>/dev/null; \
+               git config --get-all "credential.https://github.com/.helper" 2>/dev/null; } || true)
   {
     printf '#!/bin/bash\n'
     printf 'op=$1\n'
@@ -1232,10 +1238,14 @@ readonly_probe_one_push_url(){
   # Disable every interactive/ambient-helper PROMPT but keep the AMBIENT credential surface reachable for `get`
   # via the read-only shim — that is exactly what we must catch, WITHOUT the store/erase mutation. Bound with
   # `timeout` so a DNS/network/helper stall can never hang doctor (#166 F2 / AGENTS.md bounded background waits).
-  # We RESET the helper chain (-c credential.helper=) then set ONLY the shim, so no inherited helper runs store.
+  # ISOLATE git config (GIT_CONFIG_GLOBAL/SYSTEM -> /dev/null + NOSYSTEM=1) so NO inherited helper — unscoped OR
+  # URL-scoped (credential.https://github.com.helper) — runs and writes the store (#166 F1 r9); then install
+  # ONLY the read-only shim, which forwards `get` to the snapshotted helpers but no-ops store/erase. The repo's
+  # OWN tmp config carries the shim + ssh/hooks settings via -c, which survive the global/system isolation.
   RO_PUSH_OUT=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
         timeout "$to" git -C "$tmp" -c core.askPass= -c core.hooksPath=/dev/null \
-        -c credential.helper= -c "credential.helper=$shim" \
+        -c "credential.helper=$shim" \
         -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
         push --dry-run --no-verify "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" 2>&1) ; rc=$?
   rm -rf "$tmp"

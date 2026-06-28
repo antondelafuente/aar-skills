@@ -313,10 +313,13 @@ fi
 #     chain and uses ONLY the read-only shim, and the shim no-ops store/erase. Behavioral: a real-git push with
 #     a LOGGING credential helper inherited must NOT trigger the helper's `store`/`erase` (proven empirically to
 #     fire on a successful dry-run otherwise), while `get` is still forwarded.
-if grep -q 'credential.helper= -c "credential.helper=\$shim"' "$WF" && grep -q 'no-op store/erase (never mutate)' "$WF"; then
-  pass "F1 r8: probe resets the helper chain + installs a read-only shim (structural)"
+if grep -q 'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1' "$WF" \
+   && grep -q '"credential.helper=$shim"' "$WF" \
+   && grep -q 'no-op store/erase (never mutate)' "$WF" \
+   && grep -q 'credential.https://github.com.helper' "$WF"; then
+  pass "F1 r8/r9: probe isolates git config (clears URL-scoped helpers) + installs a read-only shim (structural)"
 else
-  fail "F1 r8: probe does not reset+shim the credential helper"
+  fail "F1 r8/r9: probe does not isolate config + shim the credential helper"
 fi
 # behavioral shim unit: build a shim like the function does (forward get to a logging helper, no-op store/erase)
 CREDLOG="$TMP/cred-ops.log"; : > "$CREDLOG"
@@ -347,6 +350,41 @@ if grep -q 'REAL_HELPER_OP: get' "$CREDLOG" && ! grep -qE 'REAL_HELPER_OP: (stor
 else
   fail "F1 r8: shim did not isolate get from store/erase (ops: $(tr '\n' ' ' < "$CREDLOG"))"
 fi
+# F1 r9 (behavioral): a URL-SCOPED helper (credential.https://github.com.helper) must be neutralized by the
+# config isolation — under GIT_CONFIG_GLOBAL=/dev/null + the shim, a real `git push --dry-run` must NOT invoke
+# the URL-scoped helper's store/erase (it would mutate the store). Uses real git against a non-resolving host
+# so it stays offline (auth/transport fails fast; we only assert no store/erase op was logged).
+URLLOG="$TMP/urlscoped-ops.log"; : > "$URLLOG"
+URLHELPER="$TMP/urlhelper.sh"
+cat > "$URLHELPER" <<EOF
+#!/bin/bash
+echo "URLSCOPED_OP: \$1" >> "$URLLOG"
+[ "\$1" = get ] && printf 'username=x\npassword=SECRET\n'
+exit 0
+EOF
+chmod +x "$URLHELPER"
+R9GLOBAL="$TMP/r9-gitconfig"; : > "$R9GLOBAL"
+GIT_CONFIG_GLOBAL="$R9GLOBAL" "$REAL_GIT" config --global "credential.https://nonresolve.invalid.helper" "$URLHELPER"
+R9TMP=$(mktemp -d); "$REAL_GIT" -C "$R9TMP" init -q
+"$REAL_GIT" -C "$R9TMP" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+# the read-only shim (get-forward, store/erase no-op) — same shape the probe builds
+R9SHIM="$TMP/r9-shim.sh"
+cat > "$R9SHIM" <<EOF
+#!/bin/bash
+op=\$1
+if [ "\$op" != get ]; then cat >/dev/null 2>&1 || true; exit 0; fi
+in=\$(cat); out=\$(printf "%s\n" "\$in" | "$URLHELPER" get 2>/dev/null); printf "%s\n" "\$out"; exit 0
+EOF
+chmod +x "$R9SHIM"
+GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  timeout 15 "$REAL_GIT" -C "$R9TMP" -c "credential.helper=$R9SHIM" -c core.sshCommand='ssh -o BatchMode=yes -o ConnectTimeout=3' \
+  push --dry-run --no-verify "https://nonresolve.invalid/o/r.git" HEAD:refs/heads/probe >/dev/null 2>&1
+if ! grep -qE 'URLSCOPED_OP: (store|erase)' "$URLLOG"; then
+  pass "F1 r9: URL-scoped helper neutralized by config isolation (no store/erase during probe)"
+else
+  fail "F1 r9: URL-scoped helper still ran store/erase (ops: $(tr '\n' ' ' < "$URLLOG"))"
+fi
+rm -rf "$R9TMP"
 
 # --- F3: GitHub SSH authz-denial messages classify as read-only (auth-rejected), not inconclusive.
 WT3="$TMP/wt-authz"; mkdir -p "$WT3"
