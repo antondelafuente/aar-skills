@@ -16,27 +16,43 @@ That recreates the same fragility the crash-resilience work was meant to remove.
 
 ## Approach
 
-Add one small `run_state.sh` helper under `experiment-lifecycle/skills/run-experiment/scripts/`. It is an
-agent-facing facade over the existing **run-supervision** helper, not a new state store:
+Extend the existing `run_supervision_record.sh` helper in place. Do not add a second facade script. The same
+canonical helper gets a small agent-facing vocabulary plus a compact evidence command:
 
-- `start <run-id> --handoff TEMP.md [--session-handle H]` creates the run-supervision record.
-- `checkpoint <run-id> [--handoff TEMP.md] [--session-handle H] [--lease-pod ID]...` refreshes the run record.
-- `pod <run-id> <pod-id>` links a pod id to the run-supervision record. It does **not** refresh or mutate the
+- `start <run-id> --handoff TEMP.md [--session-handle H]` is an alias for `create` at run start.
+- `checkpoint <run-id> [--handoff TEMP.md] [--session-handle H] [--lease-pod ID]...` is an alias for `update`
+  at each run checkpoint.
+- `link-pod <run-id> <pod-id>` links a pod id to the run-supervision record. It does **not** refresh or mutate the
   pod lease; deletion/TTL policy remains in `gpu-job`.
-- `request-relaunch <run-id> [--reason TEXT]` exposes the existing positive recovery signal.
 - `status <run-id>` prints a compact run-state summary for checklist evidence.
-- `close <run-id>` / `stop <run-id>` finalize the run-supervision record, preserving the existing
-  post-audit-finalizer ordering.
+- Existing `request-relaunch`, `clear-relaunch`, `close`, and `stop` remain the same.
 
-This does not replace the underlying record or change its state machine. It hides the common run-supervision
-operations behind run-lifecycle words so the visible protocol is "start / checkpoint / pod / status / close"
-rather than "remember the exact lower-level `create/update/show/close` calls." The helper must preserve the
-underlying fail-closed exit semantics: if `run_supervision_record.sh` would reject a terminal/corrupt/missing
-record, the wrapper rejects it too.
+This does not replace the underlying record or change its state machine. It gives executors lifecycle words while
+preserving the supervisor/instance API. The helper must preserve the existing fail-closed exit semantics: if
+`create`/`update` would reject a terminal/corrupt/missing record, `start`/`checkpoint`/`link-pod` reject it too.
+`status` is read-only and must fail closed on missing/corrupt records.
+
+The practical simplification is that generated briefs can say:
+
+```bash
+run_supervision_record.sh start "$RUN_ID" --handoff "$TEMP" --session-handle "$SESSION"
+run_supervision_record.sh checkpoint "$RUN_ID" --handoff "$TEMP" --lease-pod "$POD_ID"
+run_supervision_record.sh status "$RUN_ID"
+run_supervision_record.sh close "$RUN_ID"
+```
+
+instead of teaching the executor the internal create/update/show vocabulary and separately explaining how to
+turn that into checklist evidence.
+
+The lower-level `create`/`update` names stay supported because the supervisor reference and existing instance
+callers already use them, but the docs/templates should teach the run-lifecycle aliases to executors. The
+`RELAUNCH_SUPERVISOR.md` reference should mention the aliases in the record API table so the two surfaces do
+not drift.
 
 Update `run-experiment`, `START_TEMPLATE.md`, and `CHECKLIST_TEMPLATE.md` to name the wrapper as the preferred
 interface. The docs should still state the invariant (run state and pod backstops are armed), but the evidence
-line becomes `run_state.sh status <run-id>` instead of a paragraph of internal implementation details.
+line becomes `run_supervision_record.sh status <run-id>` instead of a paragraph of internal implementation
+details.
 
 ## Alternatives considered
 
@@ -50,23 +66,26 @@ line becomes `run_state.sh status <run-id>` instead of a paragraph of internal i
 - **Have `run_state.sh` call `gpu-job`'s `pod_lease.sh`.** Rejected after scaffold review. Cross-plugin helper
   discovery is not defined, and deletion policy belongs to `gpu-job`. The wrapper may link pod ids into
   run-supervision, but pod lease creation/refresh remains the `gpu-job` interface.
+- **Add a separate `run_state.sh` facade.** Rejected after scaffold review. It would create a second live
+  interface over the same record and increase the vocabulary a debugger has to map. The right canonical home is
+  the existing `run_supervision_record.sh` helper.
 
 ## Blast radius
 
-Product layer only, inside `experiment-lifecycle`. The wrapper reads only the sibling
-`run_supervision_record.sh` helper. It does not call `gpu-job`, does not change provider deletion behavior, does
-not change pod lease TTL policy, and does not change the model-free relaunch supervisor contract.
+Product layer only, inside `experiment-lifecycle`. It changes `run_supervision_record.sh`, its smoke test,
+`run-experiment` skill prose, `RELAUNCH_SUPERVISOR.md`, and the `design-experiment/templates/` files that seed
+`START.md` and `CHECKLIST.md`. It does not call `gpu-job`, does not change provider deletion behavior, does not
+change pod lease TTL policy, and does not change the model-free relaunch supervisor decision tree.
 
-The change also updates both halves of the experiment-lifecycle plugin: `run-experiment` skill prose and the
-`design-experiment/templates/` files that seed `START.md` and `CHECKLIST.md`. The wrapper is additive: existing
-lower-level helpers remain callable for debugging and migration.
+The new aliases are additive: existing lower-level helper commands remain callable for the supervisor, instance
+integrations, debugging, and migration.
 
 ## Rollout + rollback
 
-Roll out with a smoke test that uses a temporary run-supervision root, verifying that the wrapper creates,
-checkpoints, links pod ids, exposes status, refuses invalid/terminal operations through the underlying
-fail-closed behavior, and finalizes records. The existing run-supervision and gpu-job smokes remain the
-lower-level coverage.
+Roll out by extending `run_supervision_record_smoke.sh` with temporary run-supervision roots, verifying that
+`start`, `checkpoint`, `link-pod`, and `status` behave as the documented aliases, preserve fail-closed behavior,
+and leave the existing `create`/`update`/`show`/`close`/`stop` behavior unchanged. The existing gpu-job smokes
+remain the pod-lease coverage.
 
 Rollback is a normal revert of this PR. Because the underlying helpers remain unchanged, reverting only removes
 the facade and restores the previous explicit protocol.
