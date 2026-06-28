@@ -122,12 +122,15 @@ is_mutating_verb(){
   case "$1" in
     create|delete|remove|rm|edit|set|rename|archive|unarchive|fork|sync|transfer|\
     upload|enable|disable|add|clear|import|restore|deploy|cancel|rerun|run|lock|unlock|pin|unpin|\
-    close|reopen|merge|comment|review|ready|develop|copy|move) return 0 ;;
-    # nested/hyphenated write forms: `repo deploy-key add`, `project item-add|item-edit|item-delete|
-    # item-create|field-create|link|unlink|mark-template|copy`, `pr|issue edit`, etc. Catch any token whose
-    # ACTION suffix (after the last '-') is a write verb, plus the standalone link/unlink/mark-* forms.
+    close|reopen|merge|comment|review|ready|develop|copy|move|\
+    stop|suspend|resume|rebuild|publish|promote|revoke|regenerate|update|put|patch|post|push) return 0 ;;
+    # nested/hyphenated write forms: `repo deploy-key add`, `release delete-asset`, `project item-add|
+    # item-edit|item-delete|item-create|field-create|link|unlink|mark-template|copy`, `pr|issue edit`, etc.
+    # Catch any token whose ACTION component is a write verb (prefix `delete-…`/`create-…` or suffix
+    # `…-add`/`…-delete`), plus the standalone link/unlink/mark-* forms.
     *-add|*-create|*-delete|*-remove|*-edit|*-set|*-rename|*-archive|*-upload|*-enable|*-disable|*-import|\
-    *-restore|*-rerun|*-cancel|item-*|field-*|link|unlink|mark-template|set-default) return 0 ;;
+    *-restore|*-rerun|*-cancel|delete-*|create-*|edit-*|set-*|add-*|remove-*|update-*|\
+    item-*|field-*|link|unlink|mark-template|set-default) return 0 ;;
     *) return 1 ;;
   esac
 }

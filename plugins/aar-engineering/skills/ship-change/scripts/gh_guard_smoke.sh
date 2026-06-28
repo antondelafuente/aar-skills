@@ -91,6 +91,13 @@ for w in "repo delete o/r" "repo create x" "release delete v1" "secret set FOO" 
   : > "$FAKE_GH_LOG"
   if ! guard $w >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $w' blocked (mutating)"; else fail "'gh $w' should be blocked"; fi
 done
+for w2 in "release delete-asset v1 a.zip" "codespace stop" "codespace rebuild"; do
+  : > "$FAKE_GH_LOG"
+  if ! guard $w2 >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $w2' blocked (mutating)"; else fail "'gh $w2' should be blocked"; fi
+done
+# `gh repo clone` is a READ (local clone) and must NOT be blocked despite `label clone` being a write
+: > "$FAKE_GH_LOG"
+if guard repo clone o/r >/dev/null 2>&1 && grep -q 'repo clone' "$FAKE_GH_LOG"; then pass "'gh repo clone' passes (read)"; else fail "'gh repo clone' should pass"; fi
 for r in "repo view o/r" "repo list" "release view v1" "release download v1" "secret list" "run list" "run view 5" "workflow list" "workflow view deploy.yml"; do
   : > "$FAKE_GH_LOG"
   if guard $r >/dev/null 2>&1 && grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $r' passes (read)"; else fail "'gh $r' should pass"; fi
