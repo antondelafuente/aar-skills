@@ -3,7 +3,8 @@
 # additions. Behavior the deterministic JSON/syntax checks can't catch: the monotonic state machine,
 # fail-closed is-desired-active, atomic writes, the update-vs-stop/close race (Finding 1 from the
 # child-1 design review), and the child-3 needs-relaunch request + opaque session-handle (request/clear,
-# fail-closed is-relaunch-requested, request cleared by stop/close).
+# fail-closed is-relaunch-requested, request cleared by stop/close); plus the #188 finding-2 rule that
+# request-relaunch requires a bound handoff_path (fail-closed without one; --handoff binds it atomically).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -160,6 +161,24 @@ run create q5 --handoff /art/q5/TEMP.md >/dev/null
 run request-relaunch q5 >/dev/null
 run close q5 >/dev/null
 if requested q5; then no close-clears-request; else ok close-clears-request; fi
+
+# --- #188 finding 2: request-relaunch REQUIRES a bound handoff_path (the successor fallback needs it) ---
+# (a) a record with NO handoff bound -> request-relaunch fails closed, and the request is NOT recorded
+run create h1 >/dev/null
+if run request-relaunch h1 >/dev/null 2>&1; then no request-no-handoff-failclosed; else ok request-no-handoff-failclosed; fi
+[ "$(jget h1 relaunch_requested)" = False ] && ok request-no-handoff-no-write || no request-no-handoff-no-write
+# (b) request-relaunch --handoff binds the handoff atomically AND sets the request in one call
+run request-relaunch h1 --handoff /art/h1/TEMP.md --reason "policy-block" >/dev/null
+if requested h1; then ok request-handoff-binds-and-sets; else no request-handoff-binds-and-sets; fi
+[ "$(jget h1 handoff_path)" = "/art/h1/TEMP.md" ] && ok request-handoff-recorded || no request-handoff-recorded
+run clear-relaunch h1 >/dev/null
+# (c) a record that ALREADY has a handoff -> plain request-relaunch (no --handoff) succeeds
+run create h2 --handoff /art/h2/TEMP.md >/dev/null
+if run request-relaunch h2 >/dev/null 2>&1; then ok request-existing-handoff-ok; else no request-existing-handoff-ok; fi
+if requested h2; then ok request-existing-handoff-sets; else no request-existing-handoff-sets; fi
+# (d) empty --handoff value rejected (caller bug)
+run create h3 --handoff /art/h3/TEMP.md >/dev/null
+if run request-relaunch h3 --handoff "" >/dev/null 2>&1; then no request-empty-handoff-rejected; else ok request-empty-handoff-rejected; fi
 
 # --- surplus-arg / unknown-arg fail-closed on the new commands ---
 run create q6 >/dev/null

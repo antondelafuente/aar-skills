@@ -33,10 +33,12 @@
       executor turn alive is controller-supervised, not autonomous detached.
       (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + box-side idle-teardown watchdog).  ev:
 - ☐ [BLOCK] Resume contract armed (so a model-free supervisor can relaunch a dead run): standing successor
-      handoff (`TEMP.md`) current; run-supervision record written and **desired-active**
-      (`run_supervision_record.sh create <run-id> --handoff <TEMP.md>`); and EACH live pod registered for
-      reaping — satisfied by a `gpu-job` pod lease once that lands, OR (transitional) by the per-pod
-      idle-teardown `watchdog.sh` scoped to the pod id.                                              ev:
+      handoff (`TEMP.md`) current; run-supervision record written and **desired-active** with a session handle
+      bound (`run_supervision_record.sh create <run-id> --handoff <TEMP.md> --session-handle <opaque>`) — the
+      `<opaque>` handle RESOLVED to a concrete instance value by the dispatch/launcher (a tmux name, systemd
+      unit, pid-file path), NOT left as the literal placeholder, so the supervisor can find this run's session;
+      and EACH live pod registered for reaping — satisfied by a `gpu-job` pod lease once that lands, OR
+      (transitional) by the per-pod idle-teardown `watchdog.sh` scoped to the pod id.                ev:
 - ☐ Read the consuming instance's feedback/gotcha guidance, or the `FEEDBACK_INSTANCE_GUIDANCE`
       target when using feedback-loop (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample

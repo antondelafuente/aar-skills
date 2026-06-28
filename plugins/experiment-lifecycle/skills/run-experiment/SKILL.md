@@ -122,8 +122,11 @@ Three obligations, maintained continuously (not at close):
   > instance-owned handle that binds this run-id to your session — a tmux name / systemd unit / pid-file path; the
   > product never interprets it). At each checkpoint: `update <run-id> --handoff <path> --lease-pod <id>…` (refresh
   > the handoff + link the pod ids the run holds — these link to `gpu-job`'s pod leases by id). If you hit a case you
-  > can't resume in place (a usage-policy block, a corrupted session): `request-relaunch <run-id> [--reason …]` — a
-  > positive "recover me" signal the supervisor acts on (it is auto-cleared if you later `stop`/`close`). The
+  > can't resume in place (a usage-policy block, a corrupted session): `request-relaunch <run-id> [--handoff
+  > <path>] [--reason …]` — a positive "recover me" signal the supervisor acts on (it is auto-cleared if you later
+  > `stop`/`close`). This needs a **bound `handoff_path`** (the successor fallback points the fresh successor at
+  > it): if you bound one at `create`/`update` it's already there, else pass `--handoff <path>` to bind it
+  > atomically — `request-relaunch` fails closed if no handoff is bound. The
   > supervisor branches on `is-desired-active` / `is-relaunch-requested` / `session-handle`. The concrete relaunch
   > commands + the supervisor wiring are instance, not this helper.
 

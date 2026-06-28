@@ -63,13 +63,24 @@ with the request-set and can't race a concurrent `update`. This keeps the same-s
 unaffected — that path is the crash branch, which does not depend on `request-relaunch` at all — while
 closing the gap for the successor-fallback path that does.
 
-**Finding 3 — add an instance-filled `--session-handle` placeholder to the templates.** Update the
-`create` invocation in `START_TEMPLATE.md` (the Resilience section) and `CHECKLIST_TEMPLATE.md` (the
-resume-contract BLOCK gate) to `create <run-id> --handoff <TEMP.md path> --session-handle <opaque session
-handle>`, with a one-line note that the handle is instance-owned and opaque (a tmux session name, a systemd
-unit, a pid-file path — whatever the instance launcher owns). These are substrate-neutral skeletons the
-instance fills, so the placeholder is the right shape: it makes a generated brief bind a probeable session by
-default without putting any instance command into the product.
+**Finding 3 — add an instance-filled `--session-handle` placeholder to the templates, and name who resolves
+it.** Update the `create` invocation in `START_TEMPLATE.md` (the Resilience section) and
+`CHECKLIST_TEMPLATE.md` (the resume-contract BLOCK gate) to `create <run-id> --handoff <TEMP.md path>
+--session-handle <opaque session handle>`, with a one-line note that the handle is instance-owned and opaque
+(a tmux session name, a systemd unit, a pid-file path — whatever the instance launcher owns). Because the
+concrete value is launcher-owned, the note also names *who resolves the placeholder*: the consuming instance's
+dispatch/launcher provides the concrete handle (either injecting it into the generated brief or pre-creating /
+updating the run-supervision record), and the `CHECKLIST_TEMPLATE.md` resume-contract gate gains an evidence
+requirement that the `<opaque session handle>` placeholder was **resolved to a concrete instance value, not
+left literal** — so a brief that ships with the placeholder unfilled fails the gate. This keeps the product
+substrate-neutral (no instance command enters the repo) while closing the seam the reviewer flagged: the
+contract now says the handle must be resolved and points at the dispatch/profile as the resolver.
+
+**Document the `request-relaunch [--handoff P]` API at its canonical points of need (design-review finding).**
+The finding-2 API change is documented where zero-context agents and hook authors actually read — not only in
+the helper header: the `RELAUNCH_SUPERVISOR.md` record-API table row for `request-relaunch` gains `[--handoff
+P]` and the fail-closed "must have a bound handoff" rule, and the `run-experiment` `SKILL.md` resume-contract
+prose mentioning `request-relaunch` is updated to match.
 
 The helper's smoke (`run_supervision_record_smoke.sh`) gains coverage for the finding-2 behaviour: a
 `request-relaunch` on a no-handoff record fails closed; one with `--handoff` succeeds and binds the handoff;
@@ -92,19 +103,32 @@ one on a record that already has a handoff succeeds without re-passing it.
   a later `update`, and the field defaults to null by design). The gap is that the *generated brief* didn't
   prompt for it; fixing the template is the right altitude. Making it a hard helper requirement is a separate,
   larger decision the #170 design deliberately did not take.
+- **Design-review finding 1: define the dispatch/profile mechanism that resolves `session_handle` in this
+  PR.** Accepted in part. The *who resolves it* and the *evidence-it-was-resolved* gate belong in the product
+  contract and are added here (the template note + the CHECKLIST gate). But the concrete resolution mechanism
+  (how a launcher injects a tmux name / systemd unit / pid-file path) is instance machinery per the #54 blast
+  radius and the releasability rule — the product names the operation, the instance names the command. Building
+  that mechanism into this repo would be the instance→product leak the #170 design explicitly avoided, so the
+  PR closes the seam at the contract level (resolver named, resolution required-with-evidence) rather than by
+  shipping the dispatch implementation.
 
 ## Blast radius
 
 **Product (this repo):**
 - **Edit:** `plugins/experiment-lifecycle/skills/run-experiment/references/RELAUNCH_SUPERVISOR.md` — move
-  `clear-relaunch` into the `relaunch(run)` expansion (finding 1, doc-only).
+  `clear-relaunch` into the `relaunch(run)` expansion (finding 1, doc-only); document `request-relaunch
+  [--handoff P]` + the bound-handoff rule in the record-API table (design-review finding 2).
 - **Code:** `plugins/experiment-lifecycle/skills/run-experiment/scripts/run_supervision_record.sh` —
   `cmd_request_relaunch` gains `--handoff`; the locked writer fails closed unless a handoff is bound after the
-  request (finding 2). Header usage/state-machine comment updated to match.
+  request (issue finding 2). Header usage/state-machine comment updated to match.
 - **Edit:** `plugins/experiment-lifecycle/skills/run-experiment/scripts/run_supervision_record_smoke.sh` —
   finding-2 coverage.
+- **Edit:** `plugins/experiment-lifecycle/skills/run-experiment/SKILL.md` — update the resume-contract prose
+  that names `request-relaunch` to include `[--handoff P]` (design-review finding 2).
 - **Edit:** `plugins/experiment-lifecycle/skills/design-experiment/templates/START_TEMPLATE.md` and
-  `.../CHECKLIST_TEMPLATE.md` — add the `--session-handle <opaque>` placeholder (finding 3).
+  `.../CHECKLIST_TEMPLATE.md` — add the `--session-handle <opaque>` placeholder + name the dispatch/launcher
+  as its resolver, and add a CHECKLIST evidence requirement that the placeholder was resolved, not left
+  literal (issue finding 3 + design-review finding 1).
 - **Bump:** `plugins/experiment-lifecycle/.claude-plugin/plugin.json` version + a `CHANGELOG.md` entry
   (required by `.aar-ci/checks.sh` for any non-manifest change in the plugin).
 
