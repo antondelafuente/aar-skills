@@ -79,6 +79,21 @@ scaffold-engineer identity. The neutral interface is the seam that lets both con
 in; the helper's family-keyed *minting + opposite-family enforcement* logic is shared, the *seam names* are the
 consumer's.
 
+**Concrete shell API (final-diff FINDING 2).** The identity provider is a small fixed contract the helper reads,
+so #156/#157 and `wf.sh` implement against a stable shape, not a vague "object": for each family `<fam>` the
+consumer exports a **token-minting command** and an **author string** under helper-namespaced names —
+`GHL_IDENTITY_TOKEN_CMD_<FAM>` (a shell command the helper `eval`s to mint a fresh token; fail closed if the
+command is unset-when-required, errors, or prints empty) and `GHL_IDENTITY_AUTHOR_<FAM>` (a validated `Name
+<email>`). The helper's existing `engineer_token` / `engineer_git_author` logic reads these neutral names; each
+consumer ships a tiny **adapter** that populates them — `wf.sh`'s adapter maps `WF_ENGINEER_TOKEN_CMD_<FAM>` /
+`WF_ENGINEER_GIT_AUTHOR_<FAM>` → the `GHL_*` names; experiment-lifecycle's adapter maps the #153
+`[github.identity.<fam>]` profile fields → the same `GHL_*` names. Validation semantics (required fields,
+fail-closed-on-empty, `Name <email>` shape) live in the helper so both adapters inherit them. **Adapter smokes**
+(one per consumer) assert the mapping resolves a usable identity — the implementable proof the neutral interface
+works for both seam vocabularies. The exact env-name spellings are the extraction child's to finalize, but the
+*shape* — neutral `GHL_*` names + per-consumer adapter + helper-side validation + adapter smokes — is settled
+here.
+
 **PR open (MERGE-AUTHORITY) + body rendering (split).** Opening a draft PR for a branch chooses the repo/branch
 it targets and acts under a privileged identity, so the *open* path is merge-authority. PR-body generation is
 **split** (design-review round 2, FINDING 1): the body emits the `Closes #N` **closing reference** that
@@ -157,8 +172,9 @@ The split (the full assignment is in decision 1's function surface; the principl
   merge-authority code (e.g. force `count_high` to return 0, or rewrite `opposite_family` to return the author's
   own family), the loader, and the driver/launcher copies — run the gate, and assert the gate used the
   trusted-base copy at every link (no poison took effect). The split + the base-entrypoint rule are proven
-  together; it is a deliverable of the extraction child, run by `.aar-ci/checks.sh`. (Detailed in the
-  trusted-entrypoint subsection below.)
+  together; it is a deliverable of the extraction child, run from a **base-owned harness** (not the branch's own
+  `.aar-ci/checks.sh`, which is itself branch-controlled — final-diff FINDING 1; see the trusted-entrypoint
+  subsection below).
 
 #### The trusted loader — resolving the bootstrap circularity (FINDING 2)
 
@@ -222,11 +238,23 @@ all.** The rule:
   link (no poisoned link executed; the branch copies did not become the boundary). This is strictly stronger
   than poisoning the helper alone (final-review FINDING 4): proving the library is base-sourced is not enough if
   the loader or launcher that *reaches* it could be branch-sourced.
+- **The check/smoke harness itself is base-owned, and branch checks run credential-scrubbed (final-diff
+  FINDING 1).** `finish` runs `<repo>/.aar-ci/checks.sh` — *branch-controlled shell* — during the credentialed
+  merge workflow, and this doc proposes hosting the trust-chain smoke there. That is a hole: a poisoned branch
+  could rewrite `checks.sh` to make its own trust-chain smoke pass falsely, or to abuse the credentials in scope.
+  So the **merge-authority smokes (the trust-chain smoke, `locate_audit_smoke`) run from a trusted/base-owned
+  harness** — materialized from the base ref like every other merge-authority link, not from the branch copy of
+  `checks.sh` — and **any branch-supplied check profile runs in a credential-scrubbed environment** (no engineer
+  token, no `gh` auth in its env), so branch code can neither skip the gate that proves branch code is untrusted
+  nor reach a credential. The branch's *own* deterministic checks still run (they must, to validate the diff),
+  but credential-scrubbed and unable to substitute for the base-owned merge-authority smoke. This closes the
+  recursion: the harness that proves the chain is trusted is not itself branch-suppliable.
 - **Scope/cost note.** The base-launcher entry is needed only for the merge-authority *commands* (those that can
   merge/approve/select-closing-ref/mint a privileged write/push/post/run-a-reviewer), not for static
   credential-free subcommands (help/usage, purely-local diagnostics). The extraction child decides the exact set of
   base-entry commands, but the rule — *no merge-authority command's security boundary is branch-resident; it
-  enters through the installed/base launcher* — is settled here.
+  enters through the installed/base launcher, and the smokes that prove this run from a base-owned harness* — is
+  settled here.
 
 The chain that terminates **entirely outside the reviewed worktree**: installed/base launcher → base-materialized
 driver → base-sourced loader → base-sourced merge-authority library; the worktree driver is data, a refusing
@@ -393,6 +421,10 @@ The boundary is: helper enforces family on what it runs; #154 enforces it on wha
   runtime-readable dependency contract, present in the install cache); `.aar-ci/checks.sh` gains a validator for
   it and `.aar-ci/fake_home_smoke.sh` gains a cross-plugin install assertion that reads each consumer's packaged
   `.aar-deps` (each consumer + its declared helper dependency resolves in a virgin HOME).
+- **Check harness:** the merge-authority smokes (trust-chain smoke, `locate_audit_smoke`) move to a base-owned
+  harness materialized from the base ref, and `finish`'s execution of the branch `.aar-ci/checks.sh` runs
+  credential-scrubbed (decision 2, final-diff FINDING 1) — so the branch's own checks can validate the diff but
+  cannot substitute for, or skip, the base-owned merge-authority smoke, nor reach a credential.
 - **`aar-engineering` / `wf.sh`** is refactored to source the shared library instead of carrying its own copies
   of the extracted primitives, *and* to route its merge-authority subcommands through the installed/base
   launcher (decision 2 — the worktree driver becomes a refusing stub for those). This is the one cross-cutting
