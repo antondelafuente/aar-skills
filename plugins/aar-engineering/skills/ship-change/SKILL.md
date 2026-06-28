@@ -174,7 +174,7 @@ Same as the research audits: triage as a **peer**, not a patcher. **ACCEPT** (re
 commit), **DISPUTE** (say why it's wrong / moot — respond on the PR), **DEFER** (real but out of scope →
 reason on the PR). Post PR responses via `wf.sh comment <WORKTREE> <author>` so they carry the author
 engineer identity, not the human owner's token. A HIGH must be fixed or genuinely refuted before merge; the driver blocks on any HIGH.
-(The cross-family reviewer is *told* to find the next thing, so it won't self-converge — don't chase it past
+(The cross-family reviewer is adversarial and fresh each round, so it may surface a new angle — don't chase it past
 HIGH=0 into endless polish; the merge bar is HIGH=0 + checks green.)
 
 ### Disposition-aware merge gate (#137/#139) — for broad changes that won't converge
