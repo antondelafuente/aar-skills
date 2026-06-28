@@ -169,7 +169,13 @@ def delete_pod_now(pod_id):
                                  headers={"Authorization": f"Bearer {KEY}", "User-Agent": "gpu-job"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
-            return r.status in (200, 204)
+            return r.status in (200, 201, 202, 204)   # same accepted set as the reaper/teardown contract
+    except urllib.error.HTTPError as e:
+        # a 404 means the pod is already gone (an accepted outcome for "make it not exist")
+        if e.code == 404:
+            return True
+        print(f"[lease] emergency DELETE of {pod_id} -> HTTP {e.code}", flush=True)
+        return False
     except Exception as e:
         print(f"[lease] emergency DELETE of {pod_id} errored: {e}", flush=True)
         return False

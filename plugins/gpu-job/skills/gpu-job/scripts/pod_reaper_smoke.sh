@@ -316,6 +316,42 @@ EOF
 bash "$REAPER" >/dev/null 2>&1
 deleted pod-fresh2 && no fresh-reaping-reaped || ok fresh-reaping-protected
 
+# === round-10 Finding 2: TWO active leases on the same pod id -> report-only, never reap (a fresh
+#     sibling lease still protects the pod) ===
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+D1=$(mk_lease pod-dupid -1 RUNPOD_API_KEY)   # expired lease on pod-dupid
+D2=$(lease intent RUNPOD_API_KEY --expiry-min 120); lease provisional "$D2" pod-dupid >/dev/null  # fresh sibling on SAME pod
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-dupid $D1
+EOF
+DUPOUT=$(bash "$REAPER" 2>&1)
+deleted pod-dupid && no dupid-deleted || ok dupid-not-reaped
+echo "$DUPOUT" | grep -q "DUPLICATE active leases" && ok dupid-reported || no dupid-reported
+
+# === round-10 Finding 3: a PENDING INTENT (no pod) under an UNRESOLVED key_ref is reported, not hidden ===
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+lease intent UNRESOLVABLE --expiry-min -1 >/dev/null   # pending intent, key won't resolve
+: > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt"
+UROUT=$(bash "$REAPER" 2>&1)
+echo "$UROUT" | grep -q "unresolved key_ref 'UNRESOLVABLE'" && ok pending-unresolved-key-reported || no pending-unresolved-key-reported
+
+# === round-10 Finding 1: the verify verdict is GONE only on 404 / explicit terminal status; a 200 with
+#     MISSING desiredStatus (envelope/changed shape) is INCONCLUSIVE, never gone (unit check of the logic) ===
+VV='import json,sys
+raw=sys.stdin.read(); lines=raw.splitlines(); http=lines[-1].strip() if lines else ""; payload="\n".join(lines[:-1])
+if http=="404": print("gone"); sys.exit(0)
+if http in ("200","201"):
+    try: d=json.loads(payload)
+    except Exception: print("inconclusive"); sys.exit(0)
+    if not isinstance(d,dict): print("inconclusive"); sys.exit(0)
+    ds=d.get("desiredStatus")
+    print("present" if ds=="RUNNING" else ("gone" if ds in ("TERMINATED","EXITED","REMOVED","DELETED") else "inconclusive"))
+else: print("inconclusive")'
+[ "$(printf '{"data":{"x":1}}\n200' | python3 -c "$VV")" = inconclusive ] && ok verify-missing-status-inconclusive || no verify-missing-status-inconclusive
+[ "$(printf '{"desiredStatus":"TERMINATED"}\n200' | python3 -c "$VV")" = gone ] && ok verify-terminal-gone || no verify-terminal-gone
+[ "$(printf '{"desiredStatus":"RUNNING"}\n200' | python3 -c "$VV")" = present ] && ok verify-running-present || no verify-running-present
+[ "$(printf '\n404' | python3 -c "$VV")" = gone ] && ok verify-404-gone || no verify-404-gone
+
 # === round-9 Finding 3: a MALFORMED lease record is REPORTED by the sweep, not silently skipped ===
 : > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
 printf 'not json{' > "$GPU_JOB_LEASE_DIR/gpujob-corrupt.json"

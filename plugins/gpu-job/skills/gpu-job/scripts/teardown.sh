@@ -63,7 +63,17 @@ if http in ("200", "201"):
         d = json.loads(payload)
     except Exception:
         print("inconclusive"); sys.exit(0)
-    print("present" if (isinstance(d, dict) and d.get("desiredStatus") == "RUNNING") else "gone")
+    if not isinstance(d, dict):
+        print("inconclusive"); sys.exit(0)
+    ds = d.get("desiredStatus")
+    # gone ONLY on an explicit terminal status; RUNNING -> present; missing/unknown -> inconclusive
+    # (round-10 Finding 1 — an envelope/changed-shape 200 must not close a still-billing pod lease).
+    if ds == "RUNNING":
+        print("present")
+    elif ds in ("TERMINATED", "EXITED", "REMOVED", "DELETED"):
+        print("gone")
+    else:
+        print("inconclusive")
 else:
     print("inconclusive")
 ' 2>/dev/null || echo inconclusive)

@@ -125,13 +125,19 @@ verify_gone(){ # <key> <pod-id>
   case "$http" in
     404) return 0 ;;                       # pod absent -> gone
     200|201)
-      # parseable 200 -> gone iff NOT RUNNING; a non-JSON 200 (error page) is inconclusive
+      # parseable 200 -> gone ONLY on an EXPLICIT terminal/deleted desiredStatus; RUNNING -> present;
+      # a MISSING/unknown desiredStatus, a non-dict, or a non-JSON body is INCONCLUSIVE (exit 2), never
+      # treated as gone (round-10 Finding 1 — an envelope/error/changed-shape 200 must not close a lease
+      # while the pod may still exist).
       printf '%s' "$body" | python3 -c '
 import json,sys
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(2)
-ds=(d.get("desiredStatus") if isinstance(d,dict) else None)
-sys.exit(1 if ds=="RUNNING" else 0)' 2>/dev/null
+if not isinstance(d,dict): sys.exit(2)
+ds=d.get("desiredStatus")
+if ds=="RUNNING": sys.exit(1)            # present
+if ds in ("TERMINATED","EXITED","REMOVED","DELETED"): sys.exit(0)   # explicit terminal -> gone
+sys.exit(2)' 2>/dev/null              # missing/unknown -> inconclusive
       return $? ;;
     *) return 2 ;;                         # any other HTTP status -> inconclusive
   esac
@@ -154,7 +160,7 @@ keepalive_state(){ # <ssh-endpoint> <pod-id>
 
 # Build: nonce -> "<pod_id> <state> <expiry_at>" and pod_id -> nonce, from the lease registry.
 declare -A LEASE_POD LEASE_STATE
-declare -A POD_TO_NONCE
+declare -A POD_TO_NONCE POD_ACTIVE_COUNT
 while read -r nonce state pod exp; do
   [ -n "${nonce:-}" ] || continue
   LEASE_POD["$nonce"]="$pod"
@@ -164,7 +170,10 @@ while read -r nonce state pod exp; do
   # orphan — leaving it out of POD_TO_NONCE makes step 2 REPORT it (an unknown live pod), not skip it.
   case "$state" in
     intent|provisional|enriched|reaping)
-      [ "$pod" != "-" ] && [ -n "$pod" ] && POD_TO_NONCE["$pod"]="$nonce" ;;
+      if [ "$pod" != "-" ] && [ -n "$pod" ]; then
+        POD_TO_NONCE["$pod"]="$nonce"
+        POD_ACTIVE_COUNT["$pod"]=$(( ${POD_ACTIVE_COUNT["$pod"]:-0} + 1 ))
+      fi ;;
   esac
 done < <(bash "$LEASE" list)
 
@@ -225,6 +234,11 @@ consider_lease(){ # <nonce>
   # A lease with no bound pod id (a pending INTENT) is handled in step 2 by matching its nonce against
   # the LIVE pod list — we never DELETE a placeholder id here.
   [ -n "$pod" ] && [ "$pod" != "-" ] || return
+  # FAIL CLOSED on a duplicated pod id (round-10 Finding 2): if >1 ACTIVE/REAPING lease binds this pod,
+  # an expired duplicate must NOT delete a pod a fresh sibling lease still protects. Report, don't reap.
+  if [ "${POD_ACTIVE_COUNT[$pod]:-0}" -gt 1 ]; then
+    log "report-only (DUPLICATE active leases on pod $pod — registry ambiguity, NOT reaping): nonce=$nonce"; reported=$((reported+1)); return
+  fi
   # A `reaping` lease skips the is-reapable gate (its expiry was already past when claimed); reap_lease's
   # claim-reaping decides whether it's a reclaimable STALE claim or a live reaper's fresh claim.
   if [ "$state" != reaping ]; then
@@ -274,7 +288,14 @@ for nonce in "${!LEASE_POD[@]}"; do
   [ -n "${SEEN_KEY[$kr]:-}" ] && continue
   SEEN_KEY["$kr"]=1
   key=$(resolve_key "$kr")
-  [ -n "$key" ] && KEY_FOR_REF["$kr"]="$key"
+  if [ -n "$key" ]; then
+    KEY_FOR_REF["$kr"]="$key"
+  else
+    # Report an UNRESOLVED key_ref here, in the key-collection pass (round-10 Finding 3): consider_lease
+    # only reaches its unresolved-key report for leases that HAVE a pod, so a no-pod PENDING INTENT (the
+    # created-but-id-never-returned case) under a missing key config would otherwise be silently hidden.
+    log "report (unresolved key_ref '$kr' — pods under this key can't be swept; check key config)"; reported=$((reported+1))
+  fi
 done
 
 # List each resolved key's live pods ONCE, capturing success/failure (round-5 Finding 3): a list call
