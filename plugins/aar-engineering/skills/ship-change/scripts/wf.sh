@@ -1050,7 +1050,10 @@ doctor_token(){  # doctor_token <family> <repo> <label>; returns 0 ok, 1 missing
   if is_clean_repo_slug "$repo"; then apirepo=$repo
   elif is_github_remote_url "$repo"; then apirepo=$(github_repo_slug "$repo"); fi
   if [ -z "$apirepo" ]; then
-    echo "  $label token: minted (skipped repo-access check — target is not a bare owner/repo: $(redact_userinfo "$repo"))"; return 0
+    # can't verify repo access against a non-clean/non-GitHub target -> do NOT count the token as verified
+    # (return 2 = configured-but-unverified, so plain doctor doesn't read READY without a real access check —
+    # #166 code-review F2 r18g).
+    echo "  $label token: minted but repo-access NOT verified (target is not a bare owner/repo: $(redact_userinfo "$repo"))"; return 2
   fi
   if full=$(GH_TOKEN="$tok" real_gh api "repos/$apirepo" --jq .full_name 2>/dev/null); then
     echo "  $label token: ok (repo access=$full)"; return 0
@@ -1081,8 +1084,13 @@ doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 i
 # ============================================================================================================
 
 # redact_userinfo <string> — strip a `user:secret@` userinfo segment from any URL-shaped value so a
-# credential-bearing remote (https://user:TOKEN@host/…) never leaks its token into doctor/CI logs (#166 F1 r13).
-redact_userinfo(){ printf '%s' "$1" | sed -E 's#(://)[^/@[:space:]]+@#\1<redacted>@#g'; }
+# credential-bearing remote never leaks its token into doctor/CI logs (#166 F1 r13). Covers BOTH the `://…@`
+# URL form AND the scp-style `[user[:secret]@]host:path` form (no scheme — #166 code-review F1 r18g).
+redact_userinfo(){
+  printf '%s' "$1" \
+    | sed -E 's#(://)[^/@[:space:]]+@#\1<redacted>@#g' \
+    | sed -E 's#(^|[[:space:]])[^/@:[:space:]]+:[^/@[:space:]]+@([^/[:space:]]+:)#\1<redacted>@\2#g'
+}
 
 # url_host <url> — extract the TRUE authority host from a remote URL, correctly (not a glob). The authority is
 # the segment after `://` up to the first `/`, `?`, or `#`; userinfo is everything up to the LAST `@` WITHIN

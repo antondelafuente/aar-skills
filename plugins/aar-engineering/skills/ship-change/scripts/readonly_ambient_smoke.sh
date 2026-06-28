@@ -546,10 +546,16 @@ done
 # only (derived if needed) and redacts userinfo in the skip message; it never prints/sends a raw tokenized repo.
 if grep -q 'is_clean_repo_slug "$repo"; then apirepo=$repo' "$WF" \
    && grep -q 'gh api "repos/$apirepo"' "$WF" \
-   && grep -q 'target is not a bare owner/repo: $(redact_userinfo "$repo")' "$WF"; then
-  pass "F3 r18f: doctor_token uses a clean slug for gh api + redacts userinfo (no token in API call/output)"
+   && grep -q 'repo-access NOT verified (target is not a bare owner/repo: $(redact_userinfo "$repo"))' "$WF"; then
+  pass "F3 r18f/g: doctor_token uses a clean slug for gh api, redacts userinfo, and does NOT count an unverified token as OK"
 else
-  fail "F3 r18f: doctor_token may still send/print a raw URL-shaped repo"
+  fail "F3 r18f/g: doctor_token may still send/print a raw repo or count an unverified token OK"
+fi
+# F1 r18g (structural): redact_userinfo covers the scp-style [user:secret@]host:path form too (not just ://).
+if grep -q "s#(\^|\[\[:space:\]\])\[\^/@:\[:space:\]\]+:\[\^/@\[:space:\]\]+@" "$WF"; then
+  pass "F1 r18g: redact_userinfo redacts scp-style credential-bearing remotes too"
+else
+  fail "F1 r18g: redact_userinfo does not cover scp-style remotes"
 fi
 
 # F1 r18e: a worktree with an HTTPS GitHub origin must STILL probe the synthesized SSH surface — so an ambient
