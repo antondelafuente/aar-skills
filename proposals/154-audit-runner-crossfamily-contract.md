@@ -67,9 +67,10 @@ Two inputs per rung, with identical semantics across both scripts:
   `AUDIT_VERIFIER_CMD` (`*claude*` → claude, `*codex*` → codex, else `custom`). `verify_claim.sh` uses a
   *different* variable today (`VERIFIER_CMD`); this doc makes it apply the **same inference** to whatever
   verifier variable it reads (see decision 3 for the naming reconciliation).
-- **`AUDIT_VERIFIER_FAMILY`** (optional) — an explicit auditor-family declaration for a verifier command
-  that does not identify its own family (a wrapper / shim). Required only in that unidentifiable case;
-  ignored when the command already matches `*claude*`/`*codex*`. See decision 5.
+- **`AUDIT_VERIFIER_FAMILY`** (optional) — an explicit auditor-family declaration. **Authoritative when
+  set** (allowlisted to `claude|codex`): it wins over the command-string inference, so it is the right way
+  to declare a wrapper / shim verifier's family. When unset, the command falls to `*claude*`/`*codex*`
+  substring inference, and an unidentifiable command BLOCKs. See decision 5.
 
 The two rules, applied uniformly to every model-judged rung:
 
@@ -156,10 +157,10 @@ longer prove "genuinely different family." A `custom` pass is only safe when the
 distinct third family; the inference cannot tell a genuine third-family CLI from a same-family wrapper.
 
 **Decision: an unidentifiable verifier (inferred `custom`) BLOCKs unless its family is *explicitly
-declared*.** Add an optional `AUDIT_VERIFIER_FAMILY` env var (the auditor's family, when the command is not
-self-identifying). The resolution is: if the command matches `*claude*`/`*codex*`, use that; else if
-`AUDIT_VERIFIER_FAMILY` is set to an exact `claude|codex|<named-third-family>`, use it; else BLOCK with "the
-verifier command does not identify its family — set `AUDIT_VERIFIER_FAMILY`." Then the same-family check
+declared*.** Add an optional `AUDIT_VERIFIER_FAMILY` env var (the auditor's family). The resolution is: if `AUDIT_VERIFIER_FAMILY` is set
+(allowlisted to `claude|codex`), it is **authoritative** — use it; else if the command matches
+`*claude*`/`*codex*`, use that inference; else BLOCK with "the verifier command does not identify its family
+— set `AUDIT_VERIFIER_FAMILY`." Then the same-family check
 runs on the resolved family as before: a declared family that equals the subject BLOCKs; a declared distinct
 family passes. This preserves genuine third-family / wrapper support **without** letting an opaque command
 silently claim cross-family status. The subject family (`AAR_SUBSTRATE`) must still be exactly
@@ -169,6 +170,18 @@ silently claim cross-family status. The subject family (`AAR_SUBSTRATE`) must st
 `claude|codex` for now, so a typo (`claud`) BLOCKs rather than becoming a passing "distinct family." A real
 third-family registry/config is a deliberate future extension, out of scope here — until it exists, a
 declared family that is neither `claude` nor `codex` BLOCKs.
+
+**Explicit declaration is authoritative when set; substring inference is the fallback, not an override.**
+The `*claude*`/`*codex*` substring match is a known approximation — a wrapper whose *path* happens to
+contain a family token (e.g. `/opt/claude-shim/run-codex`) would mis-infer. So the resolution order makes
+the **declaration win**: if `AUDIT_VERIFIER_FAMILY` is set (allowlisted), it is authoritative and the
+substring inference is skipped entirely; only when it is *unset* does the command fall to substring
+inference, and an unidentifiable command (no token match, no declaration) BLOCKs. This means an operator
+running any opaque/wrapped verifier should *always* declare the family rather than rely on the token in the
+command string. (Tightening the substring matcher itself — anchoring it to known direct-CLI basenames so a
+misleading path token can't auto-satisfy the contract — is a worthwhile hardening of the shared matcher;
+it is folded into the decision-4 helper child as a smoke case, but the authoritative-declaration rule above
+is what closes the contract gap regardless of how sharp the fallback inference is.)
 
 **Scope: the `AUDIT_VERIFIER_FAMILY` declaration applies to the rungs whose family `verify-claims`
 resolves** — the four read-only/close rungs plus the `--scaffold`/`--code` resolution *inside*
