@@ -226,6 +226,27 @@ if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-c
   else
     err "wf.sh changed but issue_verbs_smoke.sh missing — cannot verify the narrow maintainer verbs (#164)"
   fi
+  # gh write-guard bypass STATIC check (#165): every internal `gh` call in wf.sh MUST carry the WF_GH_INTERNAL
+  # marker (route through real_gh / gh_author / git_push_author) so the guard never intercepts an engineer
+  # call. An unmarked call would silently break the SWE pipeline under the wrapper — fail the build on it.
+  GG_STATIC="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/gh_guard_static_check.sh"
+  if [ -f "$GG_STATIC" ]; then
+    echo "[checks] gh write-guard bypass static check" >&2
+    bash "$GG_STATIC" "$ROOT" >&2 && ok "gh_guard static" || err "gh write-guard bypass static check FAILED (an unmarked internal gh call in wf.sh)"
+  else
+    err "wf.sh changed but gh_guard_static_check.sh missing — cannot verify the gh write-guard bypass contract (#165)"
+  fi
+fi
+
+# gh write-guard behavior smoke (#165): runs when the guard wrapper, the static check, or wf.sh changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/aar-engineering/skills/ship-change/scripts/(gh-guard\.sh|gh_guard_static_check\.sh|gh_guard_smoke\.sh|wf\.sh)$'; then
+  GG_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/gh_guard_smoke.sh"
+  if [ -f "$GG_SMOKE" ]; then
+    echo "[checks] gh write-guard behavior smoke" >&2
+    bash "$GG_SMOKE" >&2 && ok "gh_guard smoke" || err "gh write-guard behavior smoke FAILED"
+  else
+    err "gh write-guard changed but gh_guard_smoke.sh missing — cannot verify the guard's read/write/bypass behavior (#165)"
+  fi
 fi
 
 # 8. disposition structural-gate smoke (#138): the deterministic gate that validates .aar-ci/dispositions.json
