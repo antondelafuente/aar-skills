@@ -253,14 +253,12 @@ redaction_marker = "[[redacted: %s]]"            # format; default as shown
 #       so repo privacy is never load-bearing for payload confidentiality.
 
 # The mechanical-trigger inputs THIS contract owns (not #153's [github]/[recipes]): the lists the
-# `standard`-verification trigger and the artifact-index resolver check against.
+# `standard`-verification trigger checks against.
 prerelease_model_ids   = ["..."]                 # model IDs whose presence forces effective sensitivity=sensitive
 private_dataset_handles = ["..."]                # dataset handle prefixes that force sensitive
-[record_visibility.artifact_index]               # the immutable handle→URI resolver (Finding-4)
-resolver_cmd_env = "AAR_ARTIFACT_INDEX_RESOLVER_CMD"  # SEAM NAME (env var naming a credentialed resolve command),
-                                                 #   NEVER a raw URI — so the snapshot/trail carry the seam name, not r2://… (Finding-2)
-schema_version   = 1                             # the resolver-contract version (handle namespace, map, private hashes, tombstone/rotation)
-config_sha256    = "<hex>"                        # content hash of the resolver config the run resolved against (drift/audit; not a payload hash)
+# NOTE: the handle ISSUER/RESOLVER (the immutable handle→URI map, private hashes, tombstone/rotation) is NOT
+#       owned here — it is the artifact-store seam #153 already defines ([recipes.artifact_store]); this
+#       contract consumes only the opaque POINTER SHAPE + the visibility rules (Finding-2 / DRY).
 ```
 
 **Per-experiment visibility, merged with the instance floor (most-restrictive wins).** Sensitivity is *not*
@@ -294,6 +292,17 @@ inputs and the trigger *rule* (closed, mechanical, fail-closed: an unparseable m
 sensitive). This makes
 the gate enforce consistency against a *checked* assertion, and keeps the public-default safe without flipping
 the product floor to private-by-default (see the decision note).
+
+**Why the trigger set is complete for what it gates (Finding-3).** `sensitive` names three classes —
+pre-release model, private data, and block-prone elicitation — but the trigger only mechanically checks the
+first two. That is *sufficient*, because the trigger exists to gate the one thing a `standard` misdeclaration
+could leak: **aggregate `standard` content** (the T2 RESULTS narrative + aggregate metrics that go inline). The
+**block-prone elicitation class only ever lives in raw payload** (rollout/transcript text), which is **T0 —
+always pointer-only regardless of sensitivity**, so it never reaches an inline aggregate and a `standard`
+misdeclaration cannot expose it. The triggers therefore cover exactly the surfaces a misdeclaration could leak;
+block-prone content is already confined by its T0 tier, not by the sensitivity flag. (If a future record type
+put elicited text into an inline aggregate, it would be T0/T1 by the table and caught at the tier layer, not
+the trigger.)
 
 **On a public trail, `standard` requires a RESOLVABLE trigger inventory (Finding-2).** The `[record_visibility]`
 block is *optional* for an instance that publishes only non-sensitive work — but the verification above only
@@ -366,14 +375,18 @@ authoritative verdict; missing/garbled → BLOCK):
    is *itself* a published surface (#130: "that long-lived draft PR is the in-flight visibility surface"), so
    the real publish boundary is **`git push` / PR-update**, not merge. The validator runs over the **exact tree
    being pushed** before it reaches the remote — a hand-edited or bypassed-produce-time commit is caught *here*,
-   not only at merge. **This is made server-authoritative, not trusted to a client hook (Finding-1):** a local
+   not only at merge. **This must be made server-authoritative, not trusted to a client hook (Finding-1):** a local
    pre-push hook is only a convenience pre-check (an unhooked or raw `git push` would bypass it, and the
-   scaffold ships no pre-push hook today). Authority comes from **restricting `run/*` branch updates on the
-   research repo to the validated helper (#150) identity** via branch protection — a push from any other
-   identity is rejected by the server, and the helper validates the tree before it pushes. So the gate does not
-   depend on the pusher running a hook; raw pushes by a non-helper identity simply cannot update `run/*`. (This
-   reuses the same identity-restricted-push posture #153/`wf.sh` already use for engineer identities; the
-   `[github.protection]` block #153 defines declares the expectation, and the close-gate pre-checks it.)
+   scaffold ships no pre-push hook today). Authority requires **restricting `run/*` branch updates on the
+   research repo to the validated helper (#150) identity** — a push from any other identity is server-rejected,
+   and the helper validates the tree before it pushes. **This server-side enforcement does not exist yet:**
+   #153's `[github.protection]` declares only `require_pr_review` + `enforce_admins`, not a `run/*`
+   push-restriction ruleset. So this contract **defines the requirement** (a `run/*` ruleset that restricts
+   push to the research-helper identity, declared in `[github.protection]` and set out-of-band per the RUNBOOK,
+   the same way the engineer-identity branch protection is configured) and the **push-gate wiring is
+   `blocked-by` that server-side enforcement landing** — it is not claimed as already-provided. Until the
+   ruleset exists, the contract's other gates (produce/post/merge) still hold; the push gate's *primacy*
+   depends on this prerequisite, so the wiring child carries it explicitly.
 4. **Merge-time (the close gate, re-check — defense-in-depth).** The merge gate re-runs the validator over the
    **full tree being merged** so a bypassed push gate still cannot land a T0 body, a free-form T1 body, or
    un-redacted T1 payload on `main`. This mirrors ship-change's "re-review the final diff" property — but it is
@@ -392,15 +405,15 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
   run-experiment artifact-store seam (reached via #153's typed `[recipes.artifact_store]` pointer). It **does**
   define the **immutable artifact-index/resolver** the trail's opaque handles require (Finding-4: a handle
   namespace, an immutable handle→URI mapping, private hash storage, resolver discovery, tombstone/rotation) —
-  owned here because it is part of the trail contract, and **declared via a credentialed seam, not a raw URI
-  (Finding-2):** `[record_visibility.artifact_index]` carries a `resolver_cmd_env` (an env-var *name* holding a
-  command that resolves a handle privately, exactly #153's identity-by-reference pattern) plus a
-  `schema_version` + `config_sha256` — all snapshot-safe. The raw resolver URI / credentials are **never
-  snapshotted and never on the trail** (that would be the very leak F4 fixes for pointers, and #153 snapshots
-  every non-secret field — so a raw URI here would hit the trail). The executor resolves a handle live via the
-  snapshotted seam name (the one narrow live step #153 already permits for credentials), never by re-reading the
-  live profile. The contract fixes the **pointer shape** (opaque `handle` on the trail; integrity hash resolved
-  privately) and the resolver *seam*; the store behind it is the existing artifact-store seam. The contract only
+  **owned by the artifact-store seam #153 already defines, not duplicated here (Finding-2 / DRY):** #153's
+  required `[recipes.artifact_store]` typed pointer is the canonical home for handle issuance/resolution (the
+  immutable handle→URI map, private hashes, tombstone/rotation). This contract does **not** add a second
+  resolver under `[record_visibility]`; it **consumes only the opaque pointer shape + the visibility rules**.
+  The requirement it places on the artifact-store seam is that handle resolution is **credentialed and private**
+  (resolved via a seam-name command, #153's identity-by-reference pattern — never a raw URI on the
+  snapshot/trail, since #153 snapshots every non-secret field). The contract fixes the **pointer shape** (opaque
+  `handle` on the trail; integrity hash resolved privately) and *requires* the artifact-store seam to be the
+  private resolver; it owns neither the store nor the index. The contract only
   fixes the **pointer shape** the trail
   uses.
 - It does not implement the validator or wire it into the skills — the validator *library* is the `ready`
@@ -435,9 +448,9 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
 ## Blast radius
 
 - **No code in this PR.** Doc-only design; the deliverable is the contract above. Two `ready` children (the
-  dependency-free validator *library*; the `verify-claims` structured *finding-schema* emitter) and two
-  `blocked-by` children (the `artifact_ref` materialization; the produce/post/push/merge wiring) are spawned
-  (see Rollout).
+  dependency-free validator *library*; the `verify-claims` structured *finding-schema* emitter) and the
+  `blocked-by` children (the `artifact_ref` materialization; the `run/*` push-restriction prerequisite; the
+  produce/post/push/merge wiring) are spawned (see Rollout).
 - **Unblocks (the umbrella's `blocked-by` wiring):** #155 (canonical-path record layout) consumes the tier
   table to decide which record content is committed vs pointer-ized, **and owns schematizing the free-form
   brief into the safe-field allowlist this contract defines** (until #155 lands, the brief is pointer-only);
@@ -450,11 +463,15 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
   fails closed on a public repo asserted private"), and it adds an **additive, optional `[record_visibility]`
   block** (TOML, fields #146-owned) to #153's `aar-profile.toml` — a minor, backward-compatible schema addition
   under #153's `schema_version` rule, in exactly the seam #153 reserved for "redaction rules #146." That block
-  also carries this contract's own trigger inputs (`prerelease_model_ids`, `private_dataset_handles`) and the
-  `[record_visibility.artifact_index]` typed pointer — owned here, not asked of #153's `[github]`/`[recipes]`.
-  `aar-profile-validate` (a #153 child) gains a #146-supplied check for the block. Coordinated, not
-  contradictory: #153 declares where/who + discovery/snapshot/validate; #146 owns this block's fields, the
-  trigger rule, the pointer shape, and the `private` enforcement.
+  also carries this contract's own trigger inputs (`prerelease_model_ids`, `private_dataset_handles`) — owned
+  here. The **handle issuer/resolver is NOT duplicated here** (Finding-2 / DRY): it is #153's existing
+  `[recipes.artifact_store]` seam, which this contract *requires* to be a credentialed/private resolver and
+  *consumes* only via the opaque pointer shape. This contract also places **two new requirements on #153's
+  `[github.protection]`**: nothing weakens it, but it needs a `run/*` push-restriction ruleset (Finding-1) for
+  the push gate's authority. `aar-profile-validate` (a #153 child) gains a #146-supplied check for the
+  `[record_visibility]` block. Coordinated, not contradictory: #153 declares where/who + discovery/snapshot/
+  validate + the artifact-store resolver + protection; #146 owns this block's fields, the trigger rule, the
+  pointer shape, and the `private` enforcement.
 - **Touches #150 (shared GitHub-lifecycle helper):** the post-time validator runs inside the helper's
   review/PR-body posting path, and the merge-time re-check runs in the helper's merge gate. The helper hosts
   the *enforcement call site* on the rungs it runs (--design, close, post, merge); this contract supplies the
@@ -499,18 +516,25 @@ narrow piece that does not, and files the rest blocked):
   is a pure producer-output-shape change that separates safe fields from payload slots) and it belongs in
   `verify-claims`, its canonical home, not coupled to the GitHub wiring.
 - **`blocked-by` — `artifact_ref` materialization of the payload slots.** Turning each payload slot into a
-  resolvable `artifact_ref` requires the **handle issuer/resolver** (the artifact-index, F-4), which is the
-  artifact-record layer — so materialization is `blocked-by` the artifact-index + #155, *not* `ready`
-  (Finding-3 fix). The schema emitter above ships first with payload-slot placeholders; materialization wires
-  the slots to real handles once the index exists. (This keeps `verify-claims` read-only: it emits the schema +
-  slots; it does not issue handles.)
+  resolvable `artifact_ref` requires the **handle issuer/resolver**, which is the **artifact-store seam #153
+  owns** (`[recipes.artifact_store]`) — not a #146-owned index (Finding-2 / DRY). So materialization is
+  `blocked-by` that artifact-store resolver + #155, *not* `ready`. The schema emitter above ships first with
+  payload-slot placeholders; materialization wires the slots to real handles once the resolver exists. (This
+  keeps `verify-claims` read-only: it emits the schema + slots; it does not issue handles.)
+- **`blocked-by` — the `run/*` server-side push restriction (the push-gate's authority).** The push-time gate
+  is server-authoritative only once `run/*` updates are restricted to the research-helper identity (Finding-1).
+  #153's `[github.protection]` declares only `require_pr_review`/`enforce_admins` today, so this is a **new
+  prerequisite**: a `run/*` push-restriction ruleset declared in `[github.protection]` and configured
+  out-of-band (RUNBOOK), the way engineer-identity branch protection already is. The push-gate primacy is
+  `blocked-by` it.
 - **`blocked-by` — the produce/post/push/merge wiring.** Wiring the validator into `design-experiment` /
   `run-experiment` (produce-time), the helper's review/PR-body post path rendered from the structured record
   (post-time), the **pre-push gate** (push-time, the primary remote boundary), and the merge gate
   (merge-recheck, defense-in-depth). Filed `blocked-by` #150 (helper hosts the post/push/merge call sites),
-  #153 (the `[record_visibility]` block + the `private` enforcement), #155 (record layout + brief schema), the
-  **structured finding-schema emitter** (the post path renders from it), and the **`artifact_ref`
-  materialization** child (pointers must resolve). It cannot land before those seams exist.
+  #153 (the `[record_visibility]` block, the `private` enforcement, the artifact-store resolver, and the
+  `run/*` push-restriction ruleset), #155 (record layout + brief schema), the **structured finding-schema
+  emitter** (the post path renders from it), and the **`artifact_ref` materialization** child (pointers must
+  resolve). It cannot land before those seams exist.
 
 Rollback is a normal revert of the validator + wiring; with the contract reverted, the umbrella's `blocked-by`
 pieces are simply un-authorized again — no data loss, since no experiment-PR path ships before this contract's
