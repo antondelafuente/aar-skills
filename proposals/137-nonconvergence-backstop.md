@@ -41,13 +41,15 @@ that the author *cannot* exit by choice — the one the gate itself drives.
 
 The load-bearing decisions:
 
-1. **What a "round" is, and when it increments.** A round is *one completed merge-gate reviewer pass whose
-   output was incorporated into the canonical state* — the unit that actually spends a review credit. The
-   `finish` merge gate already re-seeds the disposition state from its final review (the `fd_seed` +
-   `fd_save` at the end of the disposition-aware branch). The counter increments there, and **only there** —
-   not on `start`, not on interim `code-review`/`design-review`, not on a `finish` that failed before the
-   merge review ran (structural gate block, fresh-eyes failure, reviewer crash). So the count tracks real
-   reviewer passes, not `finish` invocations.
+1. **What a "round" is, and when it increments.** A round is *one completed merge-gate reviewer pass that
+   STILL LEFT A BLOCKING HIGH* — the credit-spending unit that did **not** converge. A clean review (no
+   residual HIGH) merges, so it is not a non-convergence round and never increments the counter; this keeps
+   `round` an honest count of "rounds with a residual HIGH" (the field's contract). The `finish` merge gate
+   already re-seeds the disposition state from its final review (the `fd_seed` + `fd_save` at the end of the
+   disposition-aware branch). The counter increments there, and **only there** — not on `start`, not on
+   interim `code-review`/`design-review`, not on a `finish` that failed before the merge review ran
+   (structural-gate block, fresh-eyes failure, reviewer crash). So the count tracks real *blocking* reviewer
+   passes, not `finish` invocations.
 
 2. **Idempotent increment (no inflation, no undercount).** Re-running `finish` without a genuinely new
    reviewer *pass* must not inflate the count — but a real new pass on a changed commit must always count,
@@ -59,17 +61,27 @@ The load-bearing decisions:
    fingerprint → no increment. This counts real reviewer passes and never double-counts an identical retry.
 
 3. **The schema field.** A top-level integer `round` (default `0`, back-compatible: a pre-existing state
-   with no `round` reads as `0`) plus a top-level `last_review_fingerprint` string. Both live alongside the
-   existing `altitude` / `findings`. No per-finding field is added — total completed rounds with a residual
-   HIGH is the right key for "under-scoped", and per-finding age would add machinery without changing the
-   decision.
+   with no `round` reads as `0`), a top-level `last_review_fingerprint` string, and a top-level
+   `last_reviewed_sha` string (the HEAD the last counted round reviewed — read by the pre-review
+   short-circuit in decision 4 to tell a bare retry from a new fix). All live alongside the existing
+   `altitude` / `findings`. No per-finding field is added — total completed rounds with a residual HIGH is
+   the right key for "under-scoped", and per-finding age would add machinery without changing the decision.
 
-4. **The trip condition.** After the merge-gate model review, if `REVIEW_HIGH > 0` **and** `round >= N`
-   (default `N=4` — the initial review plus three convergence attempts, enough to tell normal iteration from
-   scope leak; env-overridable `WF_NONCONVERGENCE_ROUNDS`), the gate emits a **distinct** terminal
-   `BLOCKED:` message and posts a one-time PR comment naming the backstop and recommending a re-split into
-   smaller `ready`/`needs-design` children. Below the threshold, the existing "fix in the worktree + commit,
-   re-run finish" block is unchanged.
+4. **The trip condition (two points).** The backstop fires at the *block*, in two places so it never wastes
+   a review past threshold:
+   - **Pre-review short-circuit.** Before spending the merge review, if `round >= N` **and** HEAD ==
+     `last_reviewed_sha` (nothing committed since the last counted blocking round, i.e. a bare retry of the
+     same loop), the gate blocks immediately with the under-scoped guidance and spends **no** review credit.
+     A NEW commit since then (HEAD moved = a genuine fix attempt) falls through and is allowed one more
+     review.
+   - **Post-review trip.** After the merge-gate model review, if `REVIEW_HIGH > 0` **and** `round >= N`
+     (default `N=4` — the initial review plus three convergence attempts; env-overridable
+     `WF_NONCONVERGENCE_ROUNDS`), the gate emits the same distinct terminal `BLOCKED:` message.
+
+   Both paths post a **one-time** PR comment (guarded by a hidden `<!-- wf:nonconvergence-backstop -->`
+   marker so repeated tripped `finish` runs don't duplicate it) naming the backstop and recommending a
+   re-split into smaller `ready`/`needs-design` children. Below the threshold, the existing "fix in the
+   worktree + commit, re-run finish" block is unchanged.
 
 5. **Still fail-closed, still blocks.** The backstop is purely additive on the *blocking* path — it only
    ever fires *because* HIGH>0 already blocks. It cannot cause a merge; it changes the guidance attached to

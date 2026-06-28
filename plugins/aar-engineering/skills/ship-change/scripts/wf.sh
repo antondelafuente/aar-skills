@@ -512,29 +512,51 @@ fd_high_list(){ jq -r '.findings[]|select(.severity=="HIGH")|"\(.id) HIGH"' "$1"
 # Non-convergence backstop (#137): bound the MERGE-GATE review loop. The gate's final-SHA review re-runs every
 # `finish` and the merge is hard-blocked (enforce_admins ON), so a PR that keeps producing fresh, validly-
 # dispositioned HIGHs round after round (PR #192: 7 CHANGES_REQUESTED rounds) has no human-judgment exit and
-# burns scarce cross-family review credits. After N such ROUNDS the gate stops saying "fix and re-run" and
-# says "this PR is under-scoped — re-split it" (still BLOCKS; never auto-merges). A round = one completed
-# merge-gate reviewer pass whose output we incorporate. fd_bump_round increments `round` IDEMPOTENTLY, keyed
-# on a fingerprint of <reviewed-HEAD-sha>:<sorted residual-HIGH ids>: a new commit (new SHA) or a changed HIGH
-# set => new fingerprint => +1; a bare identical `finish` retry (same SHA, same HIGHs) reproduces the recorded
-# fingerprint => no increment. Keyed on SHA (not HIGH-ids alone) so a recurring SAME blocker across genuinely
-# new commits still counts — that is exactly the #192 under-scoped signature. Args: <cache> <reviewed-sha>
-# <high-ids-file>. Echoes the resulting round number. Back-compat: absent `round` reads as 0.
-fd_bump_round(){  # fd_bump_round <cache> <reviewed-sha> <high-ids-file>
-  local cache=$1 sha=$2 hifile=$3 fp prev cur
+# burns scarce cross-family review credits. After N such BLOCKING ROUNDS the gate stops saying "fix and re-run"
+# and says "this PR is under-scoped — re-split it" (still BLOCKS; never auto-merges). A round = one completed
+# merge-gate reviewer pass that STILL PRODUCED A BLOCKING HIGH (a clean review merges, so it is not a
+# non-convergence round and never increments — this keeps `round` an honest count of "rounds with a residual
+# HIGH", per the field's contract). fd_bump_round increments `round` IDEMPOTENTLY, keyed on a fingerprint of
+# <reviewed-HEAD-sha>:<sorted residual-HIGH ids>: a new commit (new SHA) or a changed HIGH set => new
+# fingerprint => +1; a bare identical `finish` retry (same SHA, same HIGHs) reproduces the recorded fingerprint
+# => no increment. Keyed on SHA (not HIGH-ids alone) so a recurring SAME blocker across genuinely new commits
+# still counts — that is exactly the #192 under-scoped signature. It also records `last_reviewed_sha` so the
+# pre-review short-circuit can tell "nothing committed since the last counted round" (a bare retry) from "a new
+# fix to give one more look". Args: <cache> <reviewed-sha> <high-ids-file> <had-high:0|1>. Echoes the resulting
+# round number. Back-compat: absent `round` reads as 0.
+fd_bump_round(){  # fd_bump_round <cache> <reviewed-sha> <high-ids-file> <had-high:0|1>
+  local cache=$1 sha=$2 hifile=$3 had_high=${4:-0} fp prev cur
   [ -s "$cache" ] || printf '{"altitude":"implementation","findings":[]}\n' > "$cache"
-  # fingerprint = reviewed SHA + the sorted residual-HIGH id set (one id per line in <high-ids-file>; may be empty)
+  cur=$(jq -r '.round // 0' "$cache" 2>/dev/null); case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
+  # A clean review (no residual HIGH) is NOT a non-convergence round — never increments; leave state untouched.
+  if [ "$had_high" != 1 ]; then printf '%s\n' "$cur"; return 0; fi
+  # fingerprint = reviewed SHA + the sorted residual-HIGH id set (one id per line in <high-ids-file>)
   fp=$(printf '%s:%s' "$sha" "$(awk 'NF' "$hifile" 2>/dev/null | sort -u | tr '\n' ',')" | md5sum | cut -c1-16)
   prev=$(jq -r '.last_review_fingerprint // ""' "$cache" 2>/dev/null)
-  cur=$(jq -r '.round // 0' "$cache" 2>/dev/null); case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
   if [ "$fp" != "$prev" ]; then
     cur=$((cur + 1))
-    jq --argjson r "$cur" --arg fp "$fp" '.round=$r | .last_review_fingerprint=$fp' "$cache" > "$cache.tmp" \
+    jq --argjson r "$cur" --arg fp "$fp" --arg sha "$sha" \
+      '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
       && mv "$cache.tmp" "$cache"
   fi
   printf '%s\n' "$cur"
 }
 fd_round(){ jq -r '(.round // 0)' "$1" 2>/dev/null | grep -E '^[0-9]+$' || echo 0; }   # current round; absent => 0
+fd_last_reviewed_sha(){ jq -r '(.last_reviewed_sha // "")' "$1" 2>/dev/null || echo ""; }  # SHA of the last counted round
+# Post the non-convergence backstop PR comment ONCE (#137): a hidden marker makes it idempotent across repeated
+# tripped `finish` runs — if a backstop comment already exists on the PR, skip re-posting. Best-effort (the
+# terminal BLOCK at the call site is the gate, not this comment). Args: <atok> <repo> <pr> <rounds> <detail>.
+NCV_COMMENT_MARKER='<!-- wf:nonconvergence-backstop -->'
+ncv_backstop_comment(){  # ncv_backstop_comment <atok> <repo> <pr> <rounds> <detail>
+  local atok=$1 repo=$2 pr=$3 rounds=$4 detail=$5 existing
+  existing=$(gh_author "$atok" -R "$repo" pr view "$pr" --json comments \
+    --jq '.comments[].body' 2>/dev/null | grep -F "$NCV_COMMENT_MARKER" || true)
+  [ -z "$existing" ] || return 0   # already posted once — don't duplicate
+  printf '%s\nNon-convergence backstop tripped: %s merge-gate review rounds with a blocking HIGH %s.\n\nEvery round has been a legitimate, validly-dispositioned finding, yet a fresh HIGH keeps appearing — the signature of an **under-scoped** PR (the lesson from PR #132/#192), not a single fixable defect. The recommendation now changes from "fix and re-run" to **re-split this change into smaller `ready`/`needs-design` children** and ship them separately, rather than continuing to spend cross-family review credits on a loop that the merge gate itself cannot exit.\n\nThis is advisory guidance attached to the block; the merge stays blocked (no auto-merge). If you judge this a genuine multi-round false-positive on a cohesive change, raise `WF_NONCONVERGENCE_ROUNDS` for the next `finish` run.\n' \
+    "$NCV_COMMENT_MARKER" "$rounds" "$detail" \
+    | gh_author "$atok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
+    || note "WARN: could not post the non-convergence backstop PR comment (non-fatal; terminal BLOCK stands)"
+}
 # TRUSTED findings list (reviewer-derived, not author-editable) from a review output file: "<fid> HIGH" per
 # HIGH finding, ids computed the same way fd_seed does. Used as the gate's findings list so deleting/downgrading
 # a prior disposition entry can't bypass the deterministic backstop (the deleted id has no entry -> BLOCK).
@@ -1737,6 +1759,21 @@ Split into one design PR per doc."
        ( cd "$WT" && bash "$(dirname "$0")/disposition_gate.sh" "$FD" "$FDLIST" ) \
          || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
   esac
+  # 1d. Non-convergence backstop — PRE-REVIEW short-circuit (#137). The post-review block below still spends a
+  #     cross-family review credit; if the PR is ALREADY at the round threshold AND nothing has been committed
+  #     since the last counted blocking round (HEAD == last_reviewed_sha), a re-run is a bare retry of the same
+  #     loop — refuse to spend another review and emit the under-scoped block now. A NEW commit since then
+  #     (HEAD moved) is a genuine fix attempt and is allowed one more review (it falls through). This is the
+  #     "pre-review block at threshold, env-overridable" the design review asked for: raise
+  #     WF_NONCONVERGENCE_ROUNDS to spend another review on the same SHA.
+  if [ -n "$FD" ]; then
+    NCV_N=${WF_NONCONVERGENCE_ROUNDS:-4}; case "$NCV_N" in ''|*[!0-9]*) NCV_N=4 ;; esac
+    NCV_PRIOR=$(fd_round "$FD"); NCV_PRIOR_SHA=$(fd_last_reviewed_sha "$FD")
+    if [ "${NCV_PRIOR:-0}" -ge "$NCV_N" ] 2>/dev/null && [ -n "$NCV_PRIOR_SHA" ] && [ "$NCV_PRIOR_SHA" = "$LOCAL_SHA" ]; then
+      ncv_backstop_comment "$ATOK" "$REPO" "$PR" "$NCV_PRIOR" "(unchanged since last round)"
+      die "non-convergence backstop: already $NCV_PRIOR merge-gate rounds with a blocking HIGH (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) and nothing committed since the last review — NOT spending another review. This PR appears UNDER-SCOPED; re-split it into smaller ready/needs-design children. Commit a genuine fix to get one more review, or raise WF_NONCONVERGENCE_ROUNDS to override."
+    fi
+  fi
   # 2. the authoritative merge gate, fail-closed, NO HIGH. approving=1 -> clean review posts a native APPROVE.
   #    --design: gate on --scaffold over the design DOC (the doc IS the deliverable). else: --code over the diff.
   if [ "$DESIGN_MODE" = 1 ]; then
@@ -1761,7 +1798,10 @@ Split into one design PR per doc."
       # HIGH set => new fingerprint => round +1; a bare identical re-run reproduces it => no increment.
       NCV_HI="${TMPDIR:-/tmp}/wf_ncv_high_${BR//\//_}.txt"
       fd_review_high_list "$REVF" | awk '{print $1}' > "$NCV_HI"
-      NCV_ROUND=$(fd_bump_round "$FD" "$LOCAL_SHA" "$NCV_HI")
+      # had_high=1 only when THIS merge review left a blocking HIGH — a clean review is not a non-convergence
+      # round and must not increment the counter (keeps `round` an honest "rounds with a residual HIGH").
+      NCV_HADHI=0; [ "$REVIEW_HIGH" != 0 ] && NCV_HADHI=1
+      NCV_ROUND=$(fd_bump_round "$FD" "$LOCAL_SHA" "$NCV_HI" "$NCV_HADHI")
       fd_save "$WT" "$REPO" "$PR" "$ATOK" || note "WARN: could not update canonical disposition comment (cosmetic — gates already evaluated)"
     fi
   fi
@@ -1771,10 +1811,7 @@ Split into one design PR per doc."
     NCV_N=${WF_NONCONVERGENCE_ROUNDS:-4}
     case "$NCV_N" in ''|*[!0-9]*) NCV_N=4 ;; esac
     if [ -n "$FD" ] && [ "${NCV_ROUND:-0}" -ge "$NCV_N" ] 2>/dev/null; then
-      # One-time PR comment naming the backstop (best-effort; the terminal BLOCK is the gate).
-      printf 'Non-convergence backstop tripped: %s merge-gate review rounds, still %s blocking HIGH.\n\nEvery round has been a legitimate, validly-dispositioned finding, yet a fresh HIGH keeps appearing — the signature of an **under-scoped** PR (the lesson from PR #132/#192), not a single fixable defect. The recommendation now changes from "fix and re-run" to **re-split this change into smaller `ready`/`needs-design` children** and ship them separately, rather than continuing to spend cross-family review credits on a loop that the merge gate itself cannot exit.\n\nThis is advisory guidance attached to the block; the merge stays blocked (no auto-merge). If you judge this a genuine multi-round false-positive on a cohesive change, raise `WF_NONCONVERGENCE_ROUNDS` for the next `finish` run.\n' \
-        "$NCV_ROUND" "$REVIEW_HIGH" | gh_author "$ATOK" -R "$REPO" pr comment "$PR" --body-file - >/dev/null 2>&1 \
-        || note "WARN: could not post the non-convergence backstop PR comment (non-fatal; terminal BLOCK below stands)"
+      ncv_backstop_comment "$ATOK" "$REPO" "$PR" "$NCV_ROUND" "(still $REVIEW_HIGH blocking HIGH)"
       die "non-convergence backstop: $REVIEW_HIGH HIGH after $NCV_ROUND merge-gate rounds (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) — this PR appears UNDER-SCOPED. Re-split it into smaller ready/needs-design children rather than iterating further. (Raise WF_NONCONVERGENCE_ROUNDS to override for a genuine false-positive loop.)"
     fi
     die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
