@@ -408,13 +408,22 @@ git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args..
   local remote_url owner_repo push_url
   remote_url=$(git -C "$wt" remote get-url --push origin 2>/dev/null) || die "git_push_author: no origin remote in $wt"
   case "$remote_url" in
-    https://github.com/*|https://*@github.com/*|git@github.com:*|ssh://git@github.com/*|ssh://github.com/*)
+    https://github.com/*|https://*@github.com/*|https://github.com:*|https://*@github.com:*|\
+    git@github.com:*|git@ssh.github.com:*|\
+    ssh://git@github.com/*|ssh://github.com/*|ssh://git@github.com:*|ssh://git@ssh.github.com*|ssh://ssh.github.com*)
       # A real GitHub remote (HTTPS, scp-style SSH, or ssh:// SSH): FORCE the engineer credential. Askpass
       # alone is bypassable by a stored owner HTTPS helper or an SSH remote/key, so we NORMALIZE any of these
       # forms to an explicit tokenized HTTPS URL AND clear credential helpers for THIS push
       # (-c credential.helper=) so no ambient owner credential (stored helper or SSH key) can win. Callers
       # pass the remote name `origin`; swap the first literal `origin` for the URL.
-      owner_repo=$(printf '%s' "$remote_url" | sed -E 's#(git@github\.com:|ssh://git@github\.com/|ssh://github\.com/|https://[^/]*github\.com/)##; s#\.git$##')
+      # Strip every supported scheme/host/port/userinfo prefix down to <owner>/<repo>. scp-style uses ':'
+      # before the path; URL forms use '/'. Cover github.com and ssh.github.com, optional :port, optional
+      # user@/x-access-token@ userinfo.
+      owner_repo=$(printf '%s' "$remote_url" | sed -E '
+        s#^git@(ssh\.)?github\.com:##;
+        s#^ssh://([^@/]+@)?(ssh\.)?github\.com(:[0-9]+)?/##;
+        s#^https://([^@/]+@)?github\.com(:[0-9]+)?/##;
+        s#\.git$##')
       case "$owner_repo" in
         */*) push_url="https://x-access-token:${tok}@github.com/${owner_repo}.git" ;;
         *)   die "git_push_author: could not derive owner/repo from origin url '$remote_url'" ;;
@@ -431,7 +440,10 @@ git_push_author(){  # git_push_author <author-token-or-empty> <worktree> <args..
         args+=("$a")
       done
       [ "$swapped" = 1 ] || die "git_push_author: expected an 'origin' remote arg to replace with the tokenized URL"
-      WF_GH_INTERNAL=1 GH_TOKEN="$tok" git -C "$wt" -c credential.helper= push "${args[@]}"
+      # Return the push's status IMMEDIATELY on failure, BEFORE the upstream bookkeeping below — otherwise the
+      # function's exit status would be the trailing `git config`'s (0) and a caller's `… || die` would never
+      # fire on a failed push (#165 review). set -e does not stop inside a function used in a `|| die` context.
+      WF_GH_INTERNAL=1 GH_TOKEN="$tok" git -C "$wt" -c credential.helper= push "${args[@]}" || return $?
       if [ "$want_upstream" = 1 ]; then
         # set upstream to the NAMED origin remote (never the tokenized URL). The branch arg is the worktree's
         # current branch; configure branch.<b>.remote=origin + .merge=refs/heads/<b> directly so nothing

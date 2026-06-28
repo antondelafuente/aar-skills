@@ -214,6 +214,21 @@ if printf '%s' "$PUSH_OUT_U" | grep -q 'ENGINEER_TOKEN'; then fail "-u push PERS
 CURBR=$(git -C "$GITTEST/work" rev-parse --abbrev-ref HEAD)
 if printf '%s' "$PUSH_OUT_U" | grep -q "branch.${CURBR}.remote=origin"; then pass "-u push sets upstream to the NAMED origin remote (not a URL)"; else fail "-u push did not set upstream to named origin: $PUSH_OUT_U"; fi
 
+echo "[smoke] git_push_author returns non-zero on a FAILED push (does not mask via upstream bookkeeping, review F1)"
+# a FRESH repo with origin -> github url whose insteadOf redirects to a NON-EXISTENT local repo so the push
+# FAILS; the function must return non-zero (a caller's `… || die` must fire) even though it does -u bookkeeping.
+FAILDIR="$TMP/faildir"; mkdir -p "$FAILDIR"
+( cd "$FAILDIR"; git init -q work; cd work; git config user.email e@x; git config user.name n; echo x>f; git add f; git commit -qm init; git remote add origin https://github.com/fail/repo.git ) >/dev/null 2>&1
+FAILRC=$(PATH="$GBIN:$PATH" GIT_TERMINAL_PROMPT=0 bash -c '
+  set -uo pipefail
+  WT="'"$FAILDIR/work"'"
+  git -C "$WT" config url."'"$TMP"'/definitely-nonexistent-bare.git".insteadOf "https://x-access-token:ENGINEER_TOKEN@github.com/fail/repo.git"
+  eval "$(sed -n "/^real_gh()/,/^}/p; /^git_push_author()/,/^}/p" "'"$WF"'")"
+  git_push_author ENGINEER_TOKEN "$WT" -q -u origin "$(git -C "$WT" rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1
+  echo "rc=$?"
+' 2>&1)
+if printf '%s' "$FAILRC" | grep -qE 'rc=[1-9]'; then pass "git_push_author returns non-zero on a failed push ($FAILRC)"; else fail "git_push_author masked a failed push ($FAILRC)"; fi
+
 echo "[smoke] git_push_author only treats real github.com as a github remote (review F2)"
 # a look-alike host (suffix github.com) must NOT be rewritten to a tokenized github.com URL. Point origin at
 # a local bare repo via an https://evilgithub.com/... url + insteadOf; the non-github branch pushes as-is.
