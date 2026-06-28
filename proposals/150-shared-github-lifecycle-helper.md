@@ -244,11 +244,16 @@ all.** The rule:
   could rewrite `checks.sh` to make its own trust-chain smoke pass falsely, or to abuse the credentials in scope.
   So the **merge-authority smokes (the trust-chain smoke, `locate_audit_smoke`) run from a trusted/base-owned
   harness** — materialized from the base ref like every other merge-authority link, not from the branch copy of
-  `checks.sh` — and **any branch-supplied check profile runs in a credential-scrubbed environment** (no engineer
-  token, no `gh` auth in its env), so branch code can neither skip the gate that proves branch code is untrusted
-  nor reach a credential. The branch's *own* deterministic checks still run (they must, to validate the diff),
-  but credential-scrubbed and unable to substitute for the base-owned merge-authority smoke. This closes the
-  recursion: the harness that proves the chain is trusted is not itself branch-suppliable.
+  `checks.sh`. And **any branch-supplied check profile runs in a credentialless SANDBOX, not merely a scrubbed
+  env** (final-diff round-3 FINDING 1): scrubbing env-style tokens is insufficient because branch checks can read
+  credential *files* from `HOME` (e.g. `~/.claude/.credentials.json`, `~/.git-credentials`). The sandbox is a
+  **fresh credentialless `HOME` / `XDG_CONFIG_HOME` / `GH_CONFIG_DIR`** with the host credential stores
+  unavailable (no token in env *and* no credential files on disk reachable). Any credentialed install/smoke work
+  moves into the **base-owned harness** with explicit minimal credentials; the branch's *own* deterministic
+  checks still run (they must, to validate the diff) but in that credentialless sandbox, unable to substitute for
+  the base-owned merge-authority smoke or to reach a credential by any path. This closes the recursion: the
+  harness that proves the chain is trusted is not itself branch-suppliable, and branch checks cannot touch a
+  credential by env or by file.
 - **Scope/cost note.** The base-launcher entry is needed only for the merge-authority *commands* (those that can
   merge/approve/select-closing-ref/mint a privileged write/push/post/run-a-reviewer), not for static
   credential-free subcommands (help/usage, purely-local diagnostics). The extraction child decides the exact set of
@@ -422,9 +427,11 @@ The boundary is: helper enforces family on what it runs; #154 enforces it on wha
   it and `.aar-ci/fake_home_smoke.sh` gains a cross-plugin install assertion that reads each consumer's packaged
   `.aar-deps` (each consumer + its declared helper dependency resolves in a virgin HOME).
 - **Check harness:** the merge-authority smokes (trust-chain smoke, `locate_audit_smoke`) move to a base-owned
-  harness materialized from the base ref, and `finish`'s execution of the branch `.aar-ci/checks.sh` runs
-  credential-scrubbed (decision 2, final-diff FINDING 1) — so the branch's own checks can validate the diff but
-  cannot substitute for, or skip, the base-owned merge-authority smoke, nor reach a credential.
+  harness materialized from the base ref, and `finish`'s execution of the branch `.aar-ci/checks.sh` runs in a
+  **credentialless sandbox** — fresh `HOME`/`XDG_CONFIG_HOME`/`GH_CONFIG_DIR` with host credential files
+  unavailable, not just a scrubbed env (decision 2, final-diff FINDINGs 1+round-3) — so the branch's own checks
+  can validate the diff but cannot substitute for, or skip, the base-owned merge-authority smoke, nor reach a
+  credential by env or by file.
 - **`aar-engineering` / `wf.sh`** is refactored to source the shared library instead of carrying its own copies
   of the extracted primitives, *and* to route its merge-authority subcommands through the installed/base
   launcher (decision 2 — the worktree driver becomes a refusing stub for those). This is the one cross-cutting
