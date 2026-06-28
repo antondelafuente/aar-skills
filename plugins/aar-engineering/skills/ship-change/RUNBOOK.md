@@ -123,10 +123,19 @@ hang.
 
 ## Token / identity rotation
 
-- **`GH_TOKEN`** (author/driver auth). Rotate: mint a new fine-grained PAT (repo: contents + pull_requests),
-  replace it wherever your environment provides `GH_TOKEN` *(this instance: `~/.env`, re-`source`)*. `wf.sh`
-  sources no env file itself. This can be a small ambient-gh env for ordinary CLI use; it does not satisfy the
-  engineer identity seams. NEVER print it; scrub from captured output (`sed "s/${GH_TOKEN}/***/g"`).
+- **`GH_TOKEN`** (ambient READ-ONLY driver auth). The ambient agent credential MUST be read-only (#149): mint a
+  new fine-grained PAT with **read-only** repo scopes (contents:read + metadata:read; pull_requests:read /
+  issues:read for the reads the workflow inspection needs — **no write scope**), and supply it via the
+  instance's `WF_READONLY_TOKEN_CMD` (paired with `WF_READONLY_TOKEN_INFO_CMD` so `wf.sh doctor --readonly` can
+  authoritatively confirm it). Replace it wherever your environment provides `GH_TOKEN` *(this instance:
+  `~/.env`, re-`source`)*. `wf.sh` sources no env file itself. This ambient-gh env does NOT satisfy the engineer
+  identity seams (writes go through `WF_ENGINEER_TOKEN_CMD_*`). NEVER print it; scrub from captured output
+  (`sed "s/${GH_TOKEN}/***/g"`).
+- **Verify the ambient credential is read-only** after any rotation: `wf.sh doctor <claude|codex> <owner/repo>
+  --readonly` probes `GH_TOKEN`, `GITHUB_TOKEN`, and the stored `gh auth` credential independently plus the
+  ambient `git push` surface (all non-mutating), and **exits non-zero** if any is not authoritatively read-only
+  (a write-capable or unattested token FAILS — fail closed). Plain `wf.sh doctor` prints the same section as a
+  labeled reporter alongside the engineer-identity readiness.
 - **Engineer Apps** (author/reviewer identities). Rotate the App's private key in the App settings and replace
   the matching `~/.config/<family>-engineer/key.pem`; the minter picks it up. Revoking an App stops that
   identity immediately.

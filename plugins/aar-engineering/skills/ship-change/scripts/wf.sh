@@ -29,10 +29,14 @@
 # Usage: run `wf.sh help` (or `-h` / no args) for the lifecycle short-list; SKILL.md is the full runbook.
 # (The command list lives in ONE place — the usage() function below — not duplicated here.)
 #
-# Auth: authenticate gh (gh auth login) OR export GH_TOKEN for ordinary ambient GitHub access.
+# Auth: the ambient agent GitHub credential MUST be read-only (writes go through the engineer token path).
+#      Authenticate gh (gh auth login) OR export GH_TOKEN for ordinary ambient READ access only.
 #      Protected workflow mutations that name an author are strict by default: they use the engineer
 #      identity seams below, or fail before falling back to ambient auth.
 #      wf.sh sources NO env file itself.
+#      WF_READONLY_TOKEN_CMD prints the ambient READ-ONLY token; WF_READONLY_TOKEN_INFO_CMD reads its
+#      token (on stdin) and prints that token's canonical GitHub permissions JSON so `wf.sh doctor
+#      --readonly` can authoritatively confirm read-only-ness (it FAILS CLOSED on an unattested token).
 #      WF_ENGINEER_TOKEN_CMD_CLAUDE / _CODEX print GitHub tokens for engineer identities.
 #      WF_ENGINEER_GIT_AUTHOR_CLAUDE / _CODEX are "Name <email>" strings for strict open commits.
 #      WF_REVIEWER_TOKEN_CMD remains a legacy alias for WF_ENGINEER_TOKEN_CMD_CODEX.
@@ -64,6 +68,7 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh finish <worktree> <author> --design   two-phase DESIGN merge: gate on --scaffold (doc-only PR), spawn ready issues after
   wf.sh doctor <author> [repo-or-worktree] report ambient + engineer identity readiness without printing tokens
+  wf.sh doctor <author> [repo-or-worktree] --readonly  STRICT read-only-ambient detector: exits non-zero if the ambient credential is not authoritatively read-only (API + git-push, per-source, non-mutating)
   wf.sh locate-audit [repo]               print the verify-claims reviewer that would run (introspection/test)
   wf.sh dispositions                       print close-gate disposition labels (one per line)
   wf.sh install-gh-guard [bindir] [--force]  install the gh write-guard wrapper ahead of gh on PATH (default ~/.local/bin; --force replaces a non-guard gh)
@@ -1052,6 +1057,221 @@ doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 i
   echo "  author git identity: ok ($(git_author_name "$val") <$(git_author_email "$val")>)"; return 0
 }
 
+# ============================================================================================================
+# READ-ONLY-AMBIENT DETECTOR (#166, child #2 of #149) — is the AMBIENT GitHub credential read-only?
+#
+# Certifies a PASS only by PROVENANCE (authoritative granted-permissions with no write/admin category), never
+# by enumerating probes (a finite probe set can't prove "no reachable write scope" for an opaque token). Any
+# uninspectable/unattested token FAILS CLOSED. An empirical 403/422 denial probe is ADVISORY ONLY — it can
+# turn a PASS into a FAIL (422 = definitely write-capable) but a 403 floor never UPGRADES an unattested token
+# to PASS. Covers the gh/API surface AND the ambient `git push` surface, per credential SOURCE, and NEVER
+# performs a real mutation (the contents probe carries no sha+content; the git probe is --dry-run only).
+# ============================================================================================================
+
+readonly_token_cmd(){ echo "${WF_READONLY_TOKEN_CMD:-}"; }            # the instance read-only minter seam
+readonly_token_info_cmd(){ echo "${WF_READONLY_TOKEN_INFO_CMD:-}"; }  # its paired machine-verifiable perms
+
+# perms_has_write <json> — true (returns 0) if a GitHub-permissions JSON object contains ANY value that is a
+# write/admin category. GitHub permission values are read|write|admin (a few are read|write only); a token is
+# read-only iff EVERY value is exactly "read" (or "none"). We scan the VALUES, not keys, so an unknown future
+# permission key still trips if its value is write/admin. Fails toward write (returns 0) on unparseable input.
+perms_has_write(){
+  local json=$1
+  command -v python3 >/dev/null 2>&1 || { return 0; }   # can't parse -> can't certify read-only -> treat as write
+  python3 - "$json" <<'PY'
+import json,sys
+raw=sys.argv[1]
+try:
+    obj=json.loads(raw)
+except Exception:
+    sys.exit(0)  # unparseable -> cannot certify read-only -> "has write" (fail toward write)
+perms = obj.get("permissions", obj) if isinstance(obj, dict) else obj
+if not isinstance(perms, dict):
+    sys.exit(0)
+for v in perms.values():
+    if isinstance(v,str) and v.lower() in ("write","admin"):
+        sys.exit(0)   # found a write/admin category
+sys.exit(1)           # every value read/none -> read-only
+PY
+}
+
+# readonly_provenance_verdict <token> — classify a token's read-only-ness AUTHORITATIVELY. Prints a one-word
+# verdict on stdout: "readonly" | "write" | "unprovable". Uses, in order:
+#   (1) GitHub App installation-token permissions — `gh api installation/repositories`? No: the granted set is
+#       on the token itself. We read it via `gh api -H 'Authorization: token <t>' rate_limit`? No — the
+#       authoritative source is the installation token's own metadata, exposed at the `/installation` resource
+#       for the App-auth context. We fetch the App installation permissions the token carries.
+#   (2) the read-only minter's paired token-info command (machine-verifiable perms tied to THIS token).
+# Anything else -> "unprovable" (FAIL CLOSED). Never mutates (all GETs).
+readonly_provenance_verdict(){
+  local tok=$1 info_cmd perms_json
+  # (1) GitHub App installation token: its granted permissions are returned by GET /installation? The
+  #     canonical authoritative read is the App installation's permissions object. For an installation token,
+  #     `gh api /installation/permissions`-style endpoints are not public, but the installation's permissions
+  #     are echoed on the token-mint response. We can't re-mint here; instead we read the permissions the
+  #     INSTANCE attests via the paired info command (the only machine-verifiable provenance available to a
+  #     detector that did not itself mint the token). So provenance flows through the info-command seam.
+  info_cmd=$(readonly_token_info_cmd)
+  if [ -n "$info_cmd" ]; then
+    # the info command emits canonical permissions JSON for the token on its stdin (so it can verify the perms
+    # are tied to THIS token, not a generic claim). Fail closed if it errors or emits nothing.
+    if perms_json=$(printf '%s' "$tok" | eval "$info_cmd" 2>/dev/null) && [ -n "$perms_json" ]; then
+      if perms_has_write "$perms_json"; then echo write; else echo readonly; fi
+      return 0
+    fi
+    echo unprovable; return 0
+  fi
+  # No paired info command: try the GitHub App installation-token self-describing path. A `gh api` GET that
+  # echoes the token's own granted permissions is `GET /` with the token? GitHub does NOT return granted scope
+  # for an opaque PAT, and a fine-grained PAT's scope is not machine-readable via the API. So with no info
+  # seam we cannot authoritatively confirm read-only-ness -> FAIL CLOSED.
+  echo unprovable
+}
+
+# readonly_advisory_probe <token> <repo> — ADVISORY ONLY. Sends a PATCH /repos/{owner}/{repo} with an EMPTY
+# JSON object body ({}). PROVEN non-mutating against a live disposable repo (see proposals/166 PR evidence):
+# with an empty object GitHub validates permission and returns 200 echoing the repo object WITHOUT changing any
+# field (updated_at unchanged), so a write-capable token -> 200 ("writable" signal) and a read-only / no-access
+# token -> 403 or 404 ("denied"); NEITHER mutates the repo. Prints "denied" | "writable" | "inconclusive".
+# NEVER the certifier — provenance is the gate; this only sharpens the message (a "writable" can turn a PASS
+# into a FAIL, a "denied" never UPGRADES an unattested token to PASS).
+readonly_advisory_probe(){
+  local tok=$1 repo=$2 code
+  # An empty JSON object body is the load-bearing detail (a NO-body PATCH returns 400 = inconclusive; a body
+  # with a -f field could MUTATE). We pipe '{}' via --input - so no settable field is ever supplied. real_gh
+  # marker so the guard (if installed) passes this internal call through. Capture only the HTTP status line.
+  code=$(printf '{}' | GH_TOKEN="$tok" real_gh api -X PATCH "repos/$repo" --input - -i 2>/dev/null \
+           | awk 'NR==1{print $2; exit}') || code=""
+  case "$code" in
+    2*)      echo writable ;;     # GitHub ACCEPTED the (empty, non-mutating) write attempt -> write-capable
+    403|404) echo denied ;;       # forbidden / not-visible -> no reachable write on this floor
+    *)       echo inconclusive ;; # 400/5xx/garbled -> advisory says nothing (provenance still gates)
+  esac
+}
+
+# readonly_probe_source <label> <token-or-empty> <repo> — probe ONE credential source in ISOLATION. Prints a
+# report line and returns: 0 = authoritatively read-only (PASS), 1 = source absent (skipped), 2 = NOT read-only
+# (write-capable or unprovable -> FAIL). The advisory probe only sharpens the message; provenance is the gate.
+readonly_probe_source(){
+  local label=$1 tok=$2 repo=$3 verdict advisory
+  if [ -z "$tok" ]; then echo "    $label: absent (not set)"; return 1; fi
+  verdict=$(readonly_provenance_verdict "$tok")
+  advisory=""
+  if [ -n "$repo" ]; then advisory=$(readonly_advisory_probe "$tok" "$repo" 2>/dev/null) || advisory=inconclusive; fi
+  case "$verdict" in
+    readonly)
+      # provenance says read-only; if the advisory probe loudly says writable, that's a contradiction -> FAIL.
+      if [ "$advisory" = writable ]; then
+        echo "    $label: FAIL (provenance=readonly but advisory probe accepted a write — investigate the attesting seam)"; return 2
+      fi
+      echo "    $label: read-only (authoritative provenance; advisory=${advisory:-skipped})"; return 0 ;;
+    write)
+      echo "    $label: FAIL (authoritative provenance shows a write/admin permission; advisory=${advisory:-skipped})"; return 2 ;;
+    *)  # unprovable -> FAIL CLOSED. Note the advisory hint but never let a 403 floor upgrade it to PASS.
+      echo "    $label: FAIL-CLOSED (read-only-ness not authoritatively confirmable — no WF_READONLY_TOKEN_INFO_CMD provenance; advisory=${advisory:-skipped}, advisory NEVER certifies a PASS)"; return 2 ;;
+  esac
+}
+
+# readonly_probe_git_push <repo> — probe the AMBIENT git-push surface, non-mutating. `git push --dry-run` to a
+# disposable ref with ALL credential prompts disabled and the engineer credential explicitly absent, so only
+# the AMBIENT git credential is exercised. --dry-run performs auth/negotiation but does NOT update the remote.
+# Accepted -> an ambient owner credential can push -> FAIL; auth-rejected -> read-only -> PASS. Returns 0 PASS,
+# 2 FAIL, 3 inconclusive.
+readonly_probe_git_push(){
+  local repo=$1 tmp out rc url
+  url="https://github.com/$repo.git"
+  tmp=$(mktemp -d) || { echo "    ambient git push: inconclusive (mktemp failed)"; return 3; }
+  # an empty repo with one commit so there is a ref to (dry-run) push; push to a disposable ref name.
+  (
+    git -C "$tmp" init -q 2>/dev/null
+    git -C "$tmp" commit -q --allow-empty -m probe 2>/dev/null
+  ) || { rm -rf "$tmp"; echo "    ambient git push: inconclusive (could not stage a probe commit)"; return 3; }
+  # Disable EVERY interactive/ambient-helper path EXCEPT the ambient credential we're testing: no terminal
+  # prompt, no askpass, SSH BatchMode. We clear GH_TOKEN/GITHUB_TOKEN-as-engineer? No — the AMBIENT token IS
+  # what we test on the git surface, so we leave the ambient env as-is and only ensure no ENGINEER cred leaks
+  # in (the engineer path is never on the ambient env). Credential helpers stay enabled (a stored owner helper
+  # is part of the ambient surface we must catch).
+  out=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
+        git -C "$tmp" -c core.askPass= -c core.sshCommand='ssh -o BatchMode=yes' \
+        push --dry-run "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" 2>&1) ; rc=$?
+  rm -rf "$tmp"
+  if [ "$rc" = 0 ]; then
+    echo "    ambient git push: FAIL (--dry-run was ACCEPTED — an ambient credential can push; --dry-run did NOT update the remote)"; return 2
+  fi
+  # rejected: distinguish an auth rejection (PASS) from an unrelated error (inconclusive).
+  case "$out" in
+    *[Aa]uthentication*|*[Pp]ermission\ denied*|*403*|*[Cc]ould\ not\ read\ Username*|*terminal\ prompts\ disabled*|*[Ff]atal:\ could\ not\ read*)
+      echo "    ambient git push: read-only (--dry-run auth-rejected — no ambient push credential)"; return 0 ;;
+    *)
+      echo "    ambient git push: inconclusive (--dry-run failed for a non-auth reason; treat as unverified)"; return 3 ;;
+  esac
+}
+
+# doctor_readonly_section <repo> — print the read-only-ambient report for ALL sources + the git surface.
+# Returns 0 iff EVERY present API source is authoritatively read-only AND the git surface is read-only (or
+# inconclusive is treated as NOT-PASS under strict). Sets DOCTOR_RO_FAIL=1 on any FAIL/FAIL-CLOSED.
+DOCTOR_RO_FAIL=0
+doctor_readonly_section(){
+  local repo=$1 any_present=0 rc gitrc minted minted_verdict
+  DOCTOR_RO_FAIL=0
+  echo "  read-only ambient credential (#166):"
+  # --- API surface, per SOURCE in isolation -------------------------------------------------------------
+  # GH_TOKEN
+  if [ -n "${GH_TOKEN:-}" ]; then
+    any_present=1
+    rc=0; readonly_probe_source "GH_TOKEN" "${GH_TOKEN:-}" "$repo" || rc=$?
+    [ "$rc" = 2 ] && DOCTOR_RO_FAIL=1
+  else
+    echo "    GH_TOKEN: absent (not set)"
+  fi
+  # GITHUB_TOKEN
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    any_present=1
+    rc=0; readonly_probe_source "GITHUB_TOKEN" "${GITHUB_TOKEN:-}" "$repo" || rc=$?
+    [ "$rc" = 2 ] && DOCTOR_RO_FAIL=1
+  else
+    echo "    GITHUB_TOKEN: absent (not set)"
+  fi
+  # stored `gh auth` credential: read its token via the real gh (marker bypasses the guard), in ISOLATION
+  # from the env tokens (clear GH_TOKEN/GITHUB_TOKEN for this read so we get the STORED credential, not env).
+  local stored_tok
+  stored_tok=$(env -u GH_TOKEN -u GITHUB_TOKEN WF_GH_INTERNAL=1 gh auth token 2>/dev/null || true)
+  if [ -n "$stored_tok" ]; then
+    any_present=1
+    rc=0; readonly_probe_source "stored gh auth" "$stored_tok" "$repo" || rc=$?
+    [ "$rc" = 2 ] && DOCTOR_RO_FAIL=1
+  else
+    echo "    stored gh auth: absent (no gh auth login credential)"
+  fi
+  # --- the read-only minter seam itself (if wired): confirm it yields an authoritative read-only token -----
+  if [ -n "$(readonly_token_cmd)" ]; then
+    if minted=$(eval "$(readonly_token_cmd)" 2>/dev/null) && [ -n "$minted" ]; then
+      minted_verdict=$(readonly_provenance_verdict "$minted")
+      case "$minted_verdict" in
+        readonly) echo "    WF_READONLY_TOKEN_CMD: ok (mints an authoritatively read-only token)" ;;
+        write)    echo "    WF_READONLY_TOKEN_CMD: FAIL (mints a WRITE-capable token)"; DOCTOR_RO_FAIL=1 ;;
+        *)        echo "    WF_READONLY_TOKEN_CMD: FAIL-CLOSED (minted token's read-only-ness not authoritatively confirmable — wire WF_READONLY_TOKEN_INFO_CMD)"; DOCTOR_RO_FAIL=1 ;;
+      esac
+    else
+      echo "    WF_READONLY_TOKEN_CMD: FAIL (configured but produced no token)"; DOCTOR_RO_FAIL=1
+    fi
+  else
+    echo "    WF_READONLY_TOKEN_CMD: not configured (instance has not wired the read-only minter seam)"
+  fi
+  # --- ambient git-push surface --------------------------------------------------------------------------
+  if [ -n "$repo" ]; then
+    gitrc=0; readonly_probe_git_push "$repo" || gitrc=$?
+    [ "$gitrc" = 2 ] && DOCTOR_RO_FAIL=1
+    [ "$gitrc" = 3 ] && DOCTOR_RO_FAIL=1   # strict: inconclusive is NOT a PASS
+  else
+    echo "    ambient git push: skipped (no repo target)"
+  fi
+  if [ "$any_present" = 0 ]; then
+    echo "    (no ambient API credential present in this shell — nothing to certify; that is itself read-only-by-absence on the API surface)"
+  fi
+  [ "$DOCTOR_RO_FAIL" = 0 ]
+}
+
 # render_pr_body <worktree> <doc-relpath> <issue> — the PR body as a generated VIEW of the committed
 # design doc (#24): a self-describing, plain-language PR with zero duplicate authoring. The visible body
 # uses the first paragraphs of Problem + Approach; the full design record stays under details. Re-rendered
@@ -1339,13 +1559,33 @@ uninstall-gh-guard)  # wf.sh uninstall-gh-guard [bindir] — remove the gh write
 locate-audit)  # wf.sh locate-audit [context-repo] — print the verify-claims reviewer wf.sh would run (introspection/test)
   locate_audit "${1:-}" ;;
 
-doctor)  # wf.sh doctor <author> [repo-or-worktree] — report lifecycle identity readiness without printing tokens
-  need_gh; AUTHOR=${1:?usage: wf.sh doctor <claude|codex> [repo-or-worktree]}; TARGET=${2:-$ORIGIN_REPO}
+doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report lifecycle identity readiness without printing tokens.
+  # --readonly: run ONLY the read-only-ambient detector (#166) and EXIT NON-ZERO on any FAIL/FAIL-CLOSED —
+  # the machine-consumable form rollout + CI invoke. Plain `doctor` prints the read-only section as a labeled
+  # reporter but does not fold it into the identity-readiness exit code (one explicit gate, not two semantics).
+  need_gh
+  RO_ONLY=0; DARGS=()
+  for a in "$@"; do case "$a" in --readonly) RO_ONLY=1 ;; *) DARGS+=("$a") ;; esac; done
+  set -- "${DARGS[@]}"
+  AUTHOR=${1:?usage: wf.sh doctor <claude|codex> [repo-or-worktree] [--readonly]}; TARGET=${2:-$ORIGIN_REPO}
   check_author "$AUTHOR"
   if [ -d "$TARGET" ]; then
     DREPO=$(gh_repo "$TARGET" 2>/dev/null) || die "doctor target is a directory but not a git repo/worktree with an origin remote: $TARGET (pass owner/repo instead)"
   else
     DREPO=$TARGET
+  fi
+  # --readonly: the strict, machine-consumable detector. Run ONLY the read-only-ambient section and exit
+  # non-zero on any FAIL/FAIL-CLOSED — the form rollout + CI invoke (#166 design-review F1).
+  if [ "$RO_ONLY" = 1 ]; then
+    echo "wf.sh doctor --readonly"
+    echo "  repo: $DREPO"
+    if doctor_readonly_section "$DREPO"; then
+      echo "READONLY-PASS: the ambient credential is authoritatively read-only on every probed source + surface"
+    else
+      echo "READONLY-FAIL: the ambient credential is NOT authoritatively read-only (see FAIL/FAIL-CLOSED lines above) — demote the ambient credential / wire WF_READONLY_TOKEN_CMD+WF_READONLY_TOKEN_INFO_CMD"
+      exit 1
+    fi
+    exit 0
   fi
   REVIEWER=$(opposite_family "$AUTHOR")
   echo "wf.sh doctor"
@@ -1392,6 +1632,16 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] — report lifecycle identit
     [ "$git_author_rc" = 0 ] || ready=0
   fi
   [ "$model_rc" = 0 ] || ready=0
+  # Read-only-ambient detector (#166) — printed as a LABELED REPORTER. Deliberately NOT folded into the
+  # identity-readiness exit code (the strict gate is `wf.sh doctor <author> [repo] --readonly`); this keeps a
+  # single exit-code semantics for plain doctor (identity readiness) and one explicit gate for the read-only
+  # contract (#166 design-review F1).
+  doctor_readonly_section "$DREPO" || true
+  if [ "$DOCTOR_RO_FAIL" = 0 ]; then
+    echo "  read-only ambient verdict: PASS (run \`wf.sh doctor $AUTHOR $DREPO --readonly\` for the strict gate)"
+  else
+    echo "  read-only ambient verdict: FAIL — ambient credential is not authoritatively read-only (advisory here; \`wf.sh doctor $AUTHOR $DREPO --readonly\` is the gating form, exits non-zero)"
+  fi
   if [ "$ready" = 1 ]; then
     echo "READY: the full ship-change workflow identity path would proceed under current configuration"
   else

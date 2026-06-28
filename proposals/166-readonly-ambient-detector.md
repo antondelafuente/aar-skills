@@ -60,6 +60,29 @@ self-discovered from what the token can already GET); the contents probe never c
 content (so it cannot create a commit); the git probe is `--dry-run` only. The detector is safe to run
 routinely against the live repo even when the ambient token *is* write-capable.
 
+**A strict, machine-consumable verdict (the routine-check surface).** A reporter that exits 0 on a
+read-only FAIL is useless to CI / the instance rollout. So the read-only check has its own
+machine-consumable status: `wf.sh doctor <author> [target] --readonly` runs ONLY the read-only-ambient
+section and **exits non-zero** when any probed source/surface is not authoritatively read-only (FAIL or
+FAIL-CLOSED). That is the form rollout and CI invoke. Plain `wf.sh doctor` keeps printing the read-only
+section alongside the identity readiness as a labeled reporter; to avoid two exit-code semantics it does
+**not** silently mix the read-only verdict into the identity-readiness exit code — the strict `--readonly`
+form is the single, explicit gate.
+
+**Seam contract documented where it's consumed (no second stale contract).** This child consumes
+`WF_READONLY_TOKEN_CMD` / `WF_READONLY_TOKEN_INFO_CMD`, so it documents them in the canonical wf.sh header
+env block, the ship-change `SKILL.md` Auth note, and the `RUNBOOK.md` doctor note — and updates the
+existing "export `GH_TOKEN`" / "repo: contents + pull_requests" advertisements that would otherwise read
+as a contradicting contract. The *full* codification across `AGENTS.md` is child #3; this child lands only
+the minimal canonical statement needed so the surfaces it touches don't advertise a write-capable ambient
+token as the norm.
+
+**Advisory-probe mutation-freedom proven against a live disposable repo.** Per the parent acceptance, the
+advisory 403/422 denial probe is proven non-mutating on both branches with disposable-repo evidence for
+both token types (a read-only token ⇒ 403, a write-capable token ⇒ 422, and the disposable repo's
+issues/PRs/contents are unchanged after the probe). That evidence is captured on the PR; the fake-`gh`/`git`
+smoke is the committed regression guard, not the proof of external API behavior.
+
 **Smoke (`.aar-ci`).** Three fixtures — an authoritatively-read-only token (PASS), a write-capable token
 (FAIL), and an uninspectable/unattested token (FAIL CLOSED, not PASS) — exercised across the API and Git
 surfaces with a fake `gh`/`git` on PATH (no network), asserting `doctor`'s verdict per source and per
@@ -82,10 +105,12 @@ existing wf.sh smokes (runs when wf.sh or the new smoke changes).
 
 ## Blast radius
 
-- **Product (this repo):** a new read-only-ambient section in `wf.sh doctor` + helper functions; a new
-  `.aar-ci` smoke (`readonly_ambient_smoke.sh`) registered in `checks.sh`; the `WF_READONLY_TOKEN_CMD` /
-  `WF_READONLY_TOKEN_INFO_CMD` seam *consumption* in `doctor` (the seam's canonical contract docs are
-  child #3; this child consumes the seam and documents it in the wf.sh header + RUNBOOK doctor note).
+- **Product (this repo):** a new read-only-ambient section + strict `--readonly` mode in `wf.sh doctor` +
+  helper functions; a new `.aar-ci` smoke (`readonly_ambient_smoke.sh`) registered in `checks.sh`; the
+  `WF_READONLY_TOKEN_CMD` / `WF_READONLY_TOKEN_INFO_CMD` seam *consumption* in `doctor` (the seam's full
+  canonical contract across `AGENTS.md` is child #3; this child consumes the seam and documents it in the
+  wf.sh header env block, the `SKILL.md` Auth note, and the `RUNBOOK.md` doctor note); and the
+  `aar-engineering` plugin version bump required for a `wf.sh` behavior change.
 - **No change to the engineer-token path, the guard wrapper, or the merge gate.** `doctor` stays a
   read-only reporter; the new section adds no new write capability.
 - **Instance:** none in this child. The instance rollout (demoting the ambient token + wiring

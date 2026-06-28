@@ -236,6 +236,14 @@ if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-c
   else
     err "wf.sh changed but gh_guard_static_check.sh missing — cannot verify the gh write-guard bypass contract (#165)"
   fi
+  # read-only-ambient detector smoke (#166): the doctor --readonly provenance gate + git-push/per-source probes.
+  RO_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/readonly_ambient_smoke.sh"
+  if [ -f "$RO_SMOKE" ]; then
+    echo "[checks] read-only-ambient detector smoke" >&2
+    bash "$RO_SMOKE" >&2 && ok "readonly_ambient smoke" || err "read-only-ambient detector smoke FAILED"
+  else
+    err "wf.sh changed but readonly_ambient_smoke.sh missing — cannot verify the read-only-ambient detector (#166)"
+  fi
 fi
 
 # gh write-guard behavior smoke (#165): runs when the guard wrapper, the static check, or wf.sh changed.
