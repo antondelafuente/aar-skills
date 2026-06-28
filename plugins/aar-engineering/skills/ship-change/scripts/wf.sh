@@ -66,7 +66,7 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh doctor <author> [repo-or-worktree] report ambient + engineer identity readiness without printing tokens
   wf.sh locate-audit [repo]               print the verify-claims reviewer that would run (introspection/test)
   wf.sh dispositions                       print close-gate disposition labels (one per line)
-  wf.sh install-gh-guard [bindir]         install the gh write-guard wrapper ahead of gh on PATH (default ~/.local/bin)
+  wf.sh install-gh-guard [bindir] [--force]  install the gh write-guard wrapper ahead of gh on PATH (default ~/.local/bin; --force replaces a non-guard gh)
   wf.sh uninstall-gh-guard [bindir]       remove the gh write-guard wrapper
   wf.sh help                              this message
 
@@ -1092,14 +1092,27 @@ dispositions)  # wf.sh dispositions — print close-gate disposition labels (int
   sed -E 's/^\^\((.*)\)\$/\1/' <<<"$DISPO_RE" | tr '|' '\n'
   ;;
 
-install-gh-guard)  # wf.sh install-gh-guard [bindir] — put the gh write-guard wrapper ahead of gh on PATH (#165)
-  BIND=${1:-$HOME/.local/bin}
+install-gh-guard)  # wf.sh install-gh-guard [bindir] [--force] — put the gh write-guard wrapper ahead of gh on PATH (#165)
+  BIND=""; FORCE=0
+  for a in "$@"; do case "$a" in --force) FORCE=1;; *) [ -z "$BIND" ] && BIND=$a;; esac; done
+  BIND=${BIND:-$HOME/.local/bin}
   GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gh-guard.sh"
   [ -f "$GUARD" ] || die "guard wrapper not found at $GUARD"
   command -v gh >/dev/null || die "no real gh on PATH to guard — install gh first"
   REALGH=$(command -v gh)
   case "$REALGH" in "$BIND"/gh) die "real gh resolves to $REALGH (inside the install dir) — point install-gh-guard at a DIFFERENT bindir that sits EARLIER on PATH than the real gh";; esac
   mkdir -p "$BIND" || die "could not create bindir $BIND"
+  # Refuse to clobber an EXISTING $BIND/gh that isn't already this guard's symlink (it could be a real gh
+  # binary or a different tool the operator put there) — mirror uninstall's safety. --force overrides (#165 review F2).
+  if [ -e "$BIND/gh" ] || [ -L "$BIND/gh" ]; then
+    if [ -L "$BIND/gh" ] && [ "$(readlink -f "$BIND/gh" 2>/dev/null)" = "$(readlink -f "$GUARD" 2>/dev/null)" ]; then
+      : # already our guard symlink — idempotent re-install is fine
+    elif [ "$FORCE" = 1 ]; then
+      note "WARN: --force overwriting existing $BIND/gh (was: $(readlink -f "$BIND/gh" 2>/dev/null || echo "$BIND/gh"))"
+    else
+      die "$BIND/gh already exists and is NOT this guard (it may be a real gh or another tool) — refusing to overwrite. Re-run with --force to replace it, or choose a different bindir."
+    fi
+  fi
   ln -sf "$GUARD" "$BIND/gh" || die "could not symlink the guard into $BIND/gh"
   note "installed gh write-guard: $BIND/gh -> $GUARD"
   case ":$PATH:" in

@@ -20,7 +20,11 @@ fails=0
 pass(){ echo "  ok: $1"; }
 fail(){ echo "  FAIL: $1" >&2; fails=$((fails+1)); }
 
-TMP=$(mktemp -d)
+TMP=$(mktemp -d) || { echo "[smoke] FATAL: mktemp -d failed" >&2; exit 2; }
+# fail closed if TMP is empty / not a dir BEFORE deriving any paths from it — under `set -uo pipefail` (no
+# -e) an empty $TMP would otherwise make `$TMP/bin` resolve to /bin and a later symlink target /bin/gh.
+case "$TMP" in /*) : ;; *) echo "[smoke] FATAL: mktemp -d returned a non-absolute path '$TMP'" >&2; exit 2 ;; esac
+[ -d "$TMP" ] || { echo "[smoke] FATAL: TMP '$TMP' is not a directory" >&2; exit 2; }
 trap 'rm -rf "$TMP"' EXIT
 
 # --- a FAKE real gh: records the args it was called with, always succeeds. The guard resolves it via WF_REAL_GH.
@@ -209,6 +213,20 @@ PUSH_OUT_U=$(PATH="$GBIN:$PATH" GIT_TERMINAL_PROMPT=0 bash -c '
 if printf '%s' "$PUSH_OUT_U" | grep -q 'ENGINEER_TOKEN'; then fail "-u push PERSISTED the engineer token into .git/config (HIGH): $PUSH_OUT_U"; else pass "-u push does NOT persist the token into .git/config"; fi
 CURBR=$(git -C "$GITTEST/work" rev-parse --abbrev-ref HEAD)
 if printf '%s' "$PUSH_OUT_U" | grep -q "branch.${CURBR}.remote=origin"; then pass "-u push sets upstream to the NAMED origin remote (not a URL)"; else fail "-u push did not set upstream to named origin: $PUSH_OUT_U"; fi
+
+echo "[smoke] install-gh-guard refuses to clobber a non-guard gh (review F2)"
+IBIN="$TMP/installbin"; mkdir -p "$IBIN"
+# a pre-existing NON-guard gh in the install dir (e.g. a real binary the operator placed there)
+printf '#!/bin/bash\necho not-the-guard\n' > "$IBIN/gh"; chmod +x "$IBIN/gh"
+# put a real-ish gh elsewhere on PATH so install passes its "real gh exists" check, with the install dir LATER.
+RBIN="$TMP/realbin"; mkdir -p "$RBIN"; printf '#!/bin/bash\necho realgh\n' > "$RBIN/gh"; chmod +x "$RBIN/gh"
+INST_OUT=$(PATH="$RBIN:$PATH" bash "$WF" install-gh-guard "$IBIN" 2>&1); INST_RC=$?
+if [ "$INST_RC" -ne 0 ] && [ "$(cat "$IBIN/gh")" = "$(printf '#!/bin/bash\necho not-the-guard')" ]; then pass "install-gh-guard refuses to overwrite a non-guard gh"; else fail "install-gh-guard should refuse a non-guard gh (rc=$INST_RC): $INST_OUT"; fi
+# --force replaces it (now a symlink to the guard)
+PATH="$RBIN:$PATH" bash "$WF" install-gh-guard "$IBIN" --force >/dev/null 2>&1
+if [ -L "$IBIN/gh" ] && [ "$(readlink -f "$IBIN/gh")" = "$(readlink -f "$GUARD")" ]; then pass "install-gh-guard --force replaces a non-guard gh"; else fail "install-gh-guard --force should replace with the guard symlink"; fi
+# idempotent re-install of our own symlink succeeds
+if PATH="$RBIN:$PATH" bash "$WF" install-gh-guard "$IBIN" >/dev/null 2>&1; then pass "install-gh-guard is idempotent on its own symlink"; else fail "install-gh-guard should be idempotent on its own symlink"; fi
 
 echo "[smoke] static check: passes on real wf.sh, fails on a planted unmarked call"
 if bash "$STATIC" "$ROOT" >/dev/null 2>&1; then pass "static check passes on the real wf.sh"; else fail "static check should pass on the real wf.sh"; fi
