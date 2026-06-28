@@ -37,6 +37,9 @@
 #      WF_READONLY_TOKEN_CMD prints the ambient READ-ONLY token; WF_READONLY_TOKEN_INFO_CMD reads its
 #      token (on stdin) and prints that token's canonical GitHub permissions JSON so `wf.sh doctor
 #      --readonly` can authoritatively confirm read-only-ness (it FAILS CLOSED on an unattested token).
+#      WF_DOCTOR_SKIP_LIVE_PROBES=1 skips the read-only detector's LIVE network probes (advisory API +
+#      git-push) for a hermetic/offline doctor run (provenance still runs); WF_GIT_PROBE_TIMEOUT (default
+#      20s) bounds the git-push --dry-run probe so it can never hang doctor.
 #      WF_ENGINEER_TOKEN_CMD_CLAUDE / _CODEX print GitHub tokens for engineer identities.
 #      WF_ENGINEER_GIT_AUTHOR_CLAUDE / _CODEX are "Name <email>" strings for strict open commits.
 #      WF_REVIEWER_TOKEN_CMD remains a legacy alias for WF_ENGINEER_TOKEN_CMD_CODEX.
@@ -1161,7 +1164,11 @@ readonly_probe_source(){
   if [ -z "$tok" ]; then echo "    $label: absent (not set)"; return 1; fi
   verdict=$(readonly_provenance_verdict "$tok")
   advisory=""
-  if [ -n "$repo" ]; then advisory=$(readonly_advisory_probe "$tok" "$repo" 2>/dev/null) || advisory=inconclusive; fi
+  # The advisory probe is a LIVE network call; skip it under the no-network mode (WF_DOCTOR_SKIP_LIVE_PROBES=1)
+  # so plain `doctor` stays hermetic in smokes. Provenance (the gate) still runs.
+  if [ "${WF_DOCTOR_SKIP_LIVE_PROBES:-0}" != 1 ] && [ -n "$repo" ]; then
+    advisory=$(readonly_advisory_probe "$tok" "$repo" 2>/dev/null) || advisory=inconclusive
+  fi
   case "$verdict" in
     readonly)
       # provenance says read-only; if the advisory probe loudly says writable, that's a contradiction -> FAIL.
@@ -1227,8 +1234,12 @@ readonly_probe_git_push(){
     origin_url=$(git -C "$wt" remote get-url --push origin 2>/dev/null || true)
     [ -n "$origin_url" ] && urls+=("$origin_url")
   fi
-  # always include the synthesized HTTPS url (the baseline ambient HTTPS surface) if we have a real owner/repo.
-  case "$repo" in */*) urls+=("https://github.com/$repo.git") ;; esac
+  # always include BOTH synthesized canonical surfaces for a real owner/repo — HTTPS AND SSH — so an ambient
+  # SSH key that can push is probed even when no worktree origin was supplied (#166 code-review F1 r4: an
+  # owner/repo-only target must never PASS the git surface on HTTPS alone while an ambient SSH key can push).
+  case "$repo" in
+    */*) urls+=("https://github.com/$repo.git") ; urls+=("git@github.com:$repo.git") ;;
+  esac
   if [ "${#urls[@]}" = 0 ]; then echo "    ambient git push: skipped (no probeable remote url)"; return 3; fi
   for u in "${urls[@]}"; do
     readonly_probe_one_push_url "$u"
@@ -1300,7 +1311,9 @@ doctor_readonly_section(){
     echo "    WF_READONLY_TOKEN_CMD: not configured (instance has not wired the read-only minter seam)"
   fi
   # --- ambient git-push surface --------------------------------------------------------------------------
-  if [ -n "$repo" ] || [ -n "$wt" ]; then
+  if [ "${WF_DOCTOR_SKIP_LIVE_PROBES:-0}" = 1 ]; then
+    echo "    ambient git push: skipped (WF_DOCTOR_SKIP_LIVE_PROBES=1 — no-network mode)"
+  elif [ -n "$repo" ] || [ -n "$wt" ]; then
     gitrc=0; readonly_probe_git_push "$repo" "$wt" || gitrc=$?
     [ "$gitrc" = 2 ] && DOCTOR_RO_FAIL=1
     [ "$gitrc" = 3 ] && DOCTOR_RO_FAIL=1   # strict: inconclusive is NOT a PASS

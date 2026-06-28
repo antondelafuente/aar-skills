@@ -227,6 +227,16 @@ fi
 RO_TARGET="$WT" RO_GIT_SSH=rejected run_strict "RO_aaa" "" "" denied rejected || true
 echo "$RO_OUT" | grep -q 'ambient git push: read-only' && pass "F1: SSH+HTTPS both rejected -> read-only" || fail "F1: both-rejected should be read-only"
 
+# fixture 8b (F1 r4): an owner/repo-ONLY target (no worktree) must STILL probe the canonical SSH surface — an
+# ambient SSH key that can push must FAIL even without a worktree origin. SSH accepts, HTTPS rejects -> FAIL.
+: > "$MUTLOG"
+RO_GIT_SSH=accepted run_strict "RO_aaa" "" "" denied rejected
+if [ $? -eq 0 ]; then
+  fail "owner/repo-only target with an accepting SSH surface must FAIL (F1 r4: synthesize SSH url too)"
+else
+  echo "$RO_OUT" | grep -q 'ambient git push: FAIL' && pass "F1 r4: owner/repo target probes canonical SSH url -> FAIL" || fail "F1 r4: SSH url not synthesized for owner/repo target"
+fi
+
 # fixture 9 (F1 r3): a PRE-AUTH transport failure (host key verification failed) must read INCONCLUSIVE ->
 # strict-FAIL, NOT read-only — SSH failed before the credential was ever tested.
 : > "$MUTLOG"
