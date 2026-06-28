@@ -166,13 +166,21 @@ is **reviewer-derived, not author-supplied:**
   (FINDING 2).** A first draft put the round ledger in committed files under `experiments/<exp>/` — but committed
   branch content is **author-mutable**: the author controls the final tree and could edit or omit a prior
   round's file, defeating the union-across-rounds check. So the authoritative round ledger is the set of
-  **reviewer-produced records posted by the gate's own audit invocations** — each round's `audit_experiment`
-  output posted to the PR (as the existing reviews already post) and/or written to the immutable artifact-store,
-  exactly as `audit_experiment` artifacts are produced. The gate reads the `(round, id, severity)` set from
-  **those reviewer-produced records**, never from author-writable tree content. (Committed copies under
-  `experiments/<exp>/close_audit/` are allowed as **browsable mirrors** for the merged record — #130's "committed
-  **or** PR-linked" — but they are mirrors, *not* the gate's trust source; the gate trusts the PR/artifact-store
-  records.)
+  **reviewer-produced records posted by the gate's own audit invocations**, with **one canonical source and a
+  defined precedence (FINDING 1):**
+    1. **The PR review record is canonical** — each round's `audit_experiment` output is posted as a PR review by
+       the reviewer engine (as the existing reviews already post), inherently carrying the **reviewer identity,
+       the reviewed head SHA, and the round id** — the three the gate needs, none author-writable. This is the
+       gate's trust source.
+    2. **The artifact-store copy is the durable backup** — the same record in the immutable artifact-store so the
+       ledger survives branch/PR deletion (#130's after-the-fact reproducibility); it must match the PR record
+       (same reviewer identity + head SHA + round id) or the gate **blocks** on the mismatch.
+    3. **The committed `experiments/<exp>/close_audit/round-<n>.md` is a browsable mirror only** — #130's
+       "committed **or** PR-linked" — *never* the gate's trust source.
+  Precedence is **PR review record > artifact-store > committed mirror**; the gate reads the
+  `(reviewer-identity, head-sha, round, id, severity)` tuples from the canonical PR record, never from
+  author-writable tree content. (Pinning the exact PR-link / artifact-store identifiers is #155's record-layout
+  contract — this schema names the trust contract, #155 fixes the locations.)
 - **The final reviewed SHA is gate-recorded metadata, NOT a committed field (FINDING 1).** A committed
   `close_triage.toml` cannot carry `final_audit_sha` as a field, because the file would need to contain the hash
   of the commit that contains the file — a self-reference. So `final_audit_sha` is **recorded by the merge gate
@@ -374,6 +382,7 @@ state and the close-gate wiring (#157) implements when it constructs the semanti
 | **#145** design-clearance schema | the **shared per-finding grammar** (`FINDING_RESPONSE.md`, decision 6) both gates cite; the two artifacts differ only in container + what they bind to |
 | **#146** record sensitivity/visibility | `reason`/`issue` are committed record content (decision 4): #146 owns the pointer-only/redaction rule for free-text `reason`; the close-gate wiring is `blocked-by` #146 |
 | **#154** audit-runner cross-family contract | the **stable finding-id emission** is a `needs-design` dependency (decision 3): preserving an id across stateless re-review rounds is open design; it lands in the same audit-output surface #154 touches, so it is sequenced with #154 |
+| **`verify-claims`** (owns `audit_experiment`) | the semantic adjudication (layer 2) runs *through* `audit_experiment`'s existing close-audit prompt + untrusted-data framing (FINDING 2): #157's close-gate wiring passes the triage as an additional **untrusted-data** input to the existing audit invocation; the triage schema is **not** duplicated inside `verify-claims` — it stays a `run-experiment`-read contract, and `verify-claims` only gains the triage as audit input, not the schema |
 
 ## Alternatives considered
 
@@ -438,6 +447,12 @@ state and the close-gate wiring (#157) implements when it constructs the semanti
 - **Audit-output format (decision 3, a `needs-design` dependency coordinated with #154):** the close
   `audit_experiment` must emit a stable per-finding id that survives stateless re-review rounds — the
   preservation mechanism is open design; lands in the same audit-runner surface #154 reworks.
+- **`verify-claims` (owns `audit_experiment`, FINDING 2):** the semantic-adjudication layer (decision 4 layer 2)
+  runs through `audit_experiment`'s existing close-audit prompt — #157's wiring passes the triage as an
+  **additional untrusted-data input** to the existing invocation (reusing the untrusted-data framing already
+  there). The triage **schema is not duplicated into `verify-claims`** — it stays a `run-experiment` contract;
+  `verify-claims` only receives the triage as audit input. So the touch on `verify-claims` is an input, not a
+  schema home — the seam #157 implements, not a second schema copy.
 - **Cluster coupling:** **prerequisite** that unblocks the #157 close-gate wiring (it lists the triage schema in
   its `blocked-by`). **Adjacent** to #155 (reserves the committed `close_triage` + the browsable per-round mirror
   path, decision 2b), #152 (the terminal-state seam, decision 4a), #145 (shares `FINDING_RESPONSE.md`,
