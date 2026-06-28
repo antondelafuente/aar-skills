@@ -118,18 +118,23 @@ else:
 PY
 }
 
-# Atomically write the record from a python dict built on stdin-supplied kwargs. Always under the lock.
-# Args after <file>: handoff (or "" = leave), add_pods (newline list), set_stopped, set_closed (each
-# "true"/"false"/""), create (true/false). Preserves existing fields it doesn't touch. On `create` it
-# writes a fresh record (the on-disk state has already been classified + guarded by the caller); for any
-# non-create mutation, malformed existing JSON fails CLOSED (exit 3) rather than being treated as empty.
-# Optional env extras (relaunch supervisor, #54 child 3): SESSION_HANDLE (non-empty -> set the opaque
-# instance-owned handle; "" -> leave), SET_RELAUNCH ("true"/"false"/"" -> set/clear the needs-relaunch
-# request flag; "" -> leave), RELAUNCH_REASON (free-text reason recorded with a request; cleared with it).
-write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create>
+# Atomically write the record from a python dict built on EXPLICIT positional args (never ambient env —
+# so a subcommand only ever mutates the fields IT requested). Always under the lock. Args after <file>:
+#   <handoff>        non-empty -> set handoff_path; "" -> leave
+#   <add_pods>       newline-separated pod ids to additively de-dup into lease_pod_ids; "" -> none
+#   <set_stopped>    "true" -> mark stopped (terminal); else leave
+#   <set_closed>     "true" -> mark closed (terminal); else leave
+#   <create>         "true" -> write a fresh record (caller has already classified+guarded the on-disk state)
+#   <session_handle> non-empty -> set the opaque instance-owned session handle; "" -> leave
+#   <set_relaunch>   "true" -> set the needs-relaunch request; "false" -> clear it; "" -> leave
+#   <relaunch_reason> free-text reason recorded with a set request (cleared with the request)
+# Preserves existing fields it doesn't touch. For any non-create mutation, malformed existing JSON fails
+# CLOSED (exit 3) rather than being treated as empty.
+write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create> [<session_handle> <set_relaunch> <relaunch_reason>]
   local file=$1 handoff=$2 add_pods=$3 set_stopped=$4 set_closed=$5 create=$6
+  local session_handle=${7:-} set_relaunch=${8:-} relaunch_reason=${9:-}
   HANDOFF="$handoff" ADD_PODS="$add_pods" SET_STOPPED="$set_stopped" SET_CLOSED="$set_closed" CREATE="$create" \
-  SESSION_HANDLE="${SESSION_HANDLE:-}" SET_RELAUNCH="${SET_RELAUNCH:-}" RELAUNCH_REASON="${RELAUNCH_REASON:-}" \
+  SESSION_HANDLE="$session_handle" SET_RELAUNCH="$set_relaunch" RELAUNCH_REASON="$relaunch_reason" \
   python3 - "$file" <<'PY'
 import json, os, sys, tempfile, time
 
@@ -261,7 +266,7 @@ cmd_create(){
     invalid) die "create: run '$id' has a malformed record on disk — inspect/remove $file before re-creating";;
     *)       die "create: unexpected record state '$state' for '$id'";;
   esac
-  SESSION_HANDLE="$session_handle" write_record "$file" "$handoff" "" "" "" "true"
+  write_record "$file" "$handoff" "" "" "" "true" "$session_handle" "" ""
   echo "created run-supervision record: $file (desired-active)"
 }
 
@@ -287,7 +292,7 @@ cmd_update(){
     active)  : ;;
     *)       die "update: unexpected record state '$state' for '$id'";;
   esac
-  SESSION_HANDLE="$session_handle" write_record "$file" "$handoff" "$pods" "" "" "false"
+  write_record "$file" "$handoff" "$pods" "" "" "false" "$session_handle" "" ""
   echo "updated run-supervision record: $file"
 }
 
@@ -347,7 +352,7 @@ cmd_request_relaunch(){
     active)  : ;;
     *)       die "request-relaunch: unexpected record state '$state' for '$id'";;
   esac
-  SET_RELAUNCH=true RELAUNCH_REASON="$reason" write_record "$file" "" "" "" "" "false"
+  write_record "$file" "" "" "" "" "false" "" "true" "$reason"
   echo "requested relaunch: $file"
 }
 
@@ -363,7 +368,7 @@ cmd_clear_relaunch(){
     stopped|closed|active) : ;;
     *)       die "clear-relaunch: unexpected record state '$state' for '$id'";;
   esac
-  SET_RELAUNCH=false write_record "$file" "" "" "" "" "false"
+  write_record "$file" "" "" "" "" "false" "" "false" ""
   echo "cleared relaunch request: $file"
 }
 

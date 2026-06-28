@@ -169,6 +169,20 @@ if run session-handle q6 oops >/dev/null 2>&1; then no surplus-sessionhandle-rej
 if run request-relaunch q6 --reason "" >/dev/null 2>&1; then no empty-reason-rejected; else ok empty-reason-rejected; fi
 if run request-relaunch q6 --bogus x >/dev/null 2>&1; then no request-unknown-arg-rejected; else ok request-unknown-arg-rejected; fi
 
+# --- ambient env must NOT leak into write_record (code-review MED): a subcommand only mutates fields it
+#     was asked to. A stray SET_RELAUNCH/SESSION_HANDLE in the caller's env must be ignored by a plain
+#     update/stop that didn't request them. (write_record reads explicit positional args, not env.) ---
+run create e1 --handoff /art/e1/TEMP.md >/dev/null
+SET_RELAUNCH=true SESSION_HANDLE="evil" RELAUNCH_REASON="injected" run update e1 --handoff /art/e1/TEMP2.md >/dev/null
+if requested e1; then no ambient-no-relaunch-leak; else ok ambient-no-relaunch-leak; fi
+if run session-handle e1 >/dev/null 2>&1; then no ambient-no-handle-leak; else ok ambient-no-handle-leak; fi
+# the update DID apply its own requested change (handoff)
+[ "$(jget e1 handoff_path)" = "/art/e1/TEMP2.md" ] && ok ambient-update-still-works || no ambient-update-still-works
+# a plain stop with stray ambient SET_RELAUNCH must still leave no request set
+run create e2 >/dev/null
+SET_RELAUNCH=true run stop e2 >/dev/null
+[ "$(jget e2 relaunch_requested)" = False ] && ok ambient-no-leak-on-stop || no ambient-no-leak-on-stop
+
 # --- backward-compat: a child-1-era record (no new fields) reads as no-request, no-handle, still active ---
 printf '{"run_id":"legacy","desired_active":true,"stopped":false,"closed":false,"handoff_path":"/art/legacy/TEMP.md","lease_pod_ids":[],"created_at":1}\n' > "$TMP/legacy.json"
 if active legacy; then ok legacy-active || true; else no legacy-active; fi
