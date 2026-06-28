@@ -69,11 +69,12 @@ The load-bearing decisions:
 
 4. **The trip condition (two points).** The backstop fires at the *block*, in two places so it never wastes
    a review past threshold:
-   - **Pre-review short-circuit.** Before spending the merge review, if `round >= N` **and** HEAD ==
+   - **Pre-review short-circuit.** Before spending *any* verifier-backed work — placed ahead of **both** the
+     mandatory #140 fresh-eyes sweep AND the merge review — if `round >= N` **and** HEAD ==
      `last_reviewed_sha` (nothing committed since the last counted blocking round, i.e. a bare retry of the
-     same loop), the gate blocks immediately with the under-scoped guidance and spends **no** review credit.
-     A NEW commit since then (HEAD moved = a genuine fix attempt) falls through and is allowed one more
-     review.
+     same loop), the gate blocks immediately with the under-scoped guidance and spends **no** review credit
+     (otherwise the fresh-eyes sweep alone would still burn a credit on a bare retry). A NEW commit since
+     then (HEAD moved = a genuine fix attempt) falls through and is allowed one more review.
    - **Post-review trip.** After the merge-gate model review, if `REVIEW_HIGH > 0` **and** `round >= N`
      (default `N=4` — the initial review plus three convergence attempts; env-overridable
      `WF_NONCONVERGENCE_ROUNDS`), the gate emits the same distinct terminal `BLOCKED:` message.
@@ -82,6 +83,13 @@ The load-bearing decisions:
    marker so repeated tripped `finish` runs don't duplicate it) naming the backstop and recommending a
    re-split into smaller `ready`/`needs-design` children. Below the threshold, the existing "fix in the
    worktree + commit, re-run finish" block is unchanged.
+
+   **Persistence is load-bearing.** The counter lives in the canonical disposition PR comment. When a round
+   actually advances, persisting it is fail-closed: if the `fd_save` to GitHub fails on an advancing pass,
+   `finish` dies (re-run) rather than continuing with only local state — a lost save would undercount and
+   silently defeat the backstop. A non-advancing save (clean review / idempotent retry) stays a cosmetic
+   warning. Idempotence holds across a failed save because the PR comment is the source of truth: a re-run
+   reloads the last *persisted* state and re-increments from there.
 
 5. **Still fail-closed, still blocks.** The backstop is purely additive on the *blocking* path — it only
    ever fires *because* HIGH>0 already blocks. It cannot cause a merge; it changes the guidance attached to

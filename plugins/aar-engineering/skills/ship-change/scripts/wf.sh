@@ -1719,6 +1719,19 @@ Split into one design PR per doc."
   case "$FDRC" in
     2) die "disposition-state lookup failed (GitHub error) — failing closed; re-run finish" ;;
     0) FD=$(fd_load "$WT" "$REPO" "$PR" "$ATOK") || die "canonical disposition state on PR #$PR is corrupt (invalid JSON) — fix the disposition comment and re-run finish"
+       # 1d. Non-convergence backstop — PRE-REVIEW short-circuit (#137). This MUST run before any verifier-backed
+       #      work below (the mandatory #140 fresh-eyes sweep AND the merge review), so a bare retry past threshold
+       #      spends NO review credit at all — the whole point of the backstop. If the PR is already at the round
+       #      threshold AND nothing has been committed since the last counted blocking round (HEAD ==
+       #      last_reviewed_sha = a bare retry of the same loop), refuse to spend another review and emit the
+       #      under-scoped block now. A NEW commit since then (HEAD moved = a genuine fix attempt) falls through
+       #      and is allowed one more review. Env-overridable: raise WF_NONCONVERGENCE_ROUNDS to review the same SHA.
+       NCV_N=${WF_NONCONVERGENCE_ROUNDS:-4}; case "$NCV_N" in ''|*[!0-9]*) NCV_N=4 ;; esac
+       NCV_PRIOR=$(fd_round "$FD"); NCV_PRIOR_SHA=$(fd_last_reviewed_sha "$FD")
+       if [ "${NCV_PRIOR:-0}" -ge "$NCV_N" ] 2>/dev/null && [ -n "$NCV_PRIOR_SHA" ] && [ "$NCV_PRIOR_SHA" = "$LOCAL_SHA" ]; then
+         ncv_backstop_comment "$ATOK" "$REPO" "$PR" "$NCV_PRIOR" "(unchanged since last round)"
+         die "non-convergence backstop: already $NCV_PRIOR merge-gate rounds with a blocking HIGH (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) and nothing committed since the last review — NOT spending another review. This PR appears UNDER-SCOPED; re-split it into smaller ready/needs-design children. Commit a genuine fix to get one more review, or raise WF_NONCONVERGENCE_ROUNDS to override."
+       fi
        # #140 fresh-eyes companion: BEFORE the gate/merge-review, run ONE un-anchored stateless sweep over the
        #      same target and post it. Its wf_fresh_<branch> artifact is auto-handed to the disposition-aware
        #      merge review (run_review) for SEMANTIC adjudication. Candidate-only — it never feeds the
@@ -1759,21 +1772,6 @@ Split into one design PR per doc."
        ( cd "$WT" && bash "$(dirname "$0")/disposition_gate.sh" "$FD" "$FDLIST" ) \
          || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
   esac
-  # 1d. Non-convergence backstop — PRE-REVIEW short-circuit (#137). The post-review block below still spends a
-  #     cross-family review credit; if the PR is ALREADY at the round threshold AND nothing has been committed
-  #     since the last counted blocking round (HEAD == last_reviewed_sha), a re-run is a bare retry of the same
-  #     loop — refuse to spend another review and emit the under-scoped block now. A NEW commit since then
-  #     (HEAD moved) is a genuine fix attempt and is allowed one more review (it falls through). This is the
-  #     "pre-review block at threshold, env-overridable" the design review asked for: raise
-  #     WF_NONCONVERGENCE_ROUNDS to spend another review on the same SHA.
-  if [ -n "$FD" ]; then
-    NCV_N=${WF_NONCONVERGENCE_ROUNDS:-4}; case "$NCV_N" in ''|*[!0-9]*) NCV_N=4 ;; esac
-    NCV_PRIOR=$(fd_round "$FD"); NCV_PRIOR_SHA=$(fd_last_reviewed_sha "$FD")
-    if [ "${NCV_PRIOR:-0}" -ge "$NCV_N" ] 2>/dev/null && [ -n "$NCV_PRIOR_SHA" ] && [ "$NCV_PRIOR_SHA" = "$LOCAL_SHA" ]; then
-      ncv_backstop_comment "$ATOK" "$REPO" "$PR" "$NCV_PRIOR" "(unchanged since last round)"
-      die "non-convergence backstop: already $NCV_PRIOR merge-gate rounds with a blocking HIGH (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) and nothing committed since the last review — NOT spending another review. This PR appears UNDER-SCOPED; re-split it into smaller ready/needs-design children. Commit a genuine fix to get one more review, or raise WF_NONCONVERGENCE_ROUNDS to override."
-    fi
-  fi
   # 2. the authoritative merge gate, fail-closed, NO HIGH. approving=1 -> clean review posts a native APPROVE.
   #    --design: gate on --scaffold over the design DOC (the doc IS the deliverable). else: --code over the diff.
   if [ "$DESIGN_MODE" = 1 ]; then
@@ -1801,8 +1799,19 @@ Split into one design PR per doc."
       # had_high=1 only when THIS merge review left a blocking HIGH — a clean review is not a non-convergence
       # round and must not increment the counter (keeps `round` an honest "rounds with a residual HIGH").
       NCV_HADHI=0; [ "$REVIEW_HIGH" != 0 ] && NCV_HADHI=1
+      NCV_BEFORE=$(fd_round "$FD")
       NCV_ROUND=$(fd_bump_round "$FD" "$LOCAL_SHA" "$NCV_HI" "$NCV_HADHI")
-      fd_save "$WT" "$REPO" "$PR" "$ATOK" || note "WARN: could not update canonical disposition comment (cosmetic — gates already evaluated)"
+      # fd_save persists the disposition state (incl. round / last_reviewed_sha) to the canonical PR comment.
+      # If the round counter actually ADVANCED this pass, that state is load-bearing for the next finish (the
+      # pre-review short-circuit + the trip both read round/last_reviewed_sha from the comment) — a lost save
+      # would UNDERCOUNT and silently defeat the backstop. So fail CLOSED on a save failure that drops a real
+      # increment; a non-advancing save (clean review / idempotent retry) stays a cosmetic WARN.
+      if fd_save "$WT" "$REPO" "$PR" "$ATOK"; then :; else
+        if [ "${NCV_ROUND:-0}" != "${NCV_BEFORE:-0}" ]; then
+          die "could not persist the advanced non-convergence round ($NCV_BEFORE -> $NCV_ROUND) to the canonical PR comment (GitHub write failed) — failing closed so the next finish does not undercount. Re-run finish."
+        fi
+        note "WARN: could not update canonical disposition comment (cosmetic — round unchanged; gates already evaluated)"
+      fi
     fi
   fi
   if [ "$REVIEW_HIGH" != 0 ]; then
