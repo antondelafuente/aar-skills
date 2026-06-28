@@ -423,6 +423,31 @@ PY
   echo "claimed lease $id for reaping"
 }
 
+# would-claim: READ-ONLY predicate mirroring claim-reaping's decision (expired non-terminal OR stale
+# reaping) WITHOUT mutating — for honest dry-run logging (round-8 Finding 2). Exit 0 = a real sweep
+# would claim+reap this lease; exit 1 otherwise.
+cmd_would_claim(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  STALE="$STALE_REAPING_SEC" python3 - "$file" <<'PY'
+import json, os, sys, time
+try:
+    d = json.load(open(sys.argv[1]))
+    if not isinstance(d, dict):
+        raise ValueError
+except Exception:
+    sys.exit(1)
+now = int(time.time()); state = d.get("state"); exp = d.get("expiry_at")
+stale = int(os.environ.get("STALE", "900"))
+if state in ("intent", "provisional", "enriched") and isinstance(exp, int) and exp <= now:
+    sys.exit(0)
+if state == "reaping":
+    ca = d.get("claimed_at")
+    sys.exit(0 if (not isinstance(ca, int) or (now - ca) >= stale) else 1)
+sys.exit(1)
+PY
+}
+
 # unclaim-reaping: revert a `reaping` lease back to a reapable active state (code-review Finding 2) —
 # used when the DELETE could not be verified gone, so the NEXT sweep retries it (a `reaping` lease is
 # skipped by the sweep otherwise). Restores `enriched` if an SSH endpoint is recorded, else `provisional`.
@@ -558,6 +583,10 @@ main(){
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "claim-reaping: unexpected extra argument(s): $*"
       with_lock "$id" cmd_claim_reaping "$id";;
+    would-claim)
+      validate_id "${1:-}"; local id=$1; shift
+      [ $# -eq 0 ] || die "would-claim: unexpected extra argument(s): $*"
+      with_lock "$id" cmd_would_claim "$id";;
     unclaim-reaping)
       validate_id "${1:-}"; local id=$1; shift
       [ $# -eq 0 ] || die "unclaim-reaping: unexpected extra argument(s): $*"
@@ -578,7 +607,7 @@ main(){
     find-nonce)
       [ $# -eq 1 ] || die "usage: pod_lease.sh find-nonce <pod-name>"
       cmd_find_nonce "$1";;
-    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|expire|emergency|reaping|mark-deleted|claim-reaping|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
+    "") die "usage: pod_lease.sh <intent|provisional|enrich|refresh|close|expire|emergency|reaping|mark-deleted|claim-reaping|would-claim|unclaim-reaping|is-reapable|show|list|path|lock-path|find-nonce> ...";;
     *) die "unknown subcommand '$sub'";;
   esac
 }

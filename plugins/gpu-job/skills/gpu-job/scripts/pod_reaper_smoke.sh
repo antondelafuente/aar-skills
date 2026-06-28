@@ -239,6 +239,19 @@ echo "$DOUT" | grep -q "DRY-RUN would bind+reap" && ok dryrun-logs-would-bind ||
 [ "$(lease show "$DRYPEND" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = intent ] \
   && ok dryrun-pending-not-bound || no dryrun-pending-not-bound
 
+# round-8 Finding 2: dry-run reports a STALE reaping lease as would-reap (not silently skipped), and
+# does NOT mutate it
+: > "$DEL_LOG"; rm -f "$TMP"/pods_*.txt
+DSTALE=$(mk_lease pod-dstale -1 RUNPOD_API_KEY); lease claim-reaping "$DSTALE" >/dev/null
+cat > "$TMP/pods_secret-for-RUNPOD_API_KEY.txt" <<EOF
+pod-dstale $DSTALE
+EOF
+DS_OUT=$(GPU_JOB_STALE_REAPING_SEC=0 bash "$REAPER" --dry-run 2>&1)
+echo "$DS_OUT" | grep -q "DRY-RUN would reap: nonce=$DSTALE" && ok dryrun-stale-reaping-would-reap || no dryrun-stale-reaping-would-reap
+deleted pod-dstale && no dryrun-stale-deleted || ok dryrun-stale-not-deleted
+[ "$(lease show "$DSTALE" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')" = reaping ] \
+  && ok dryrun-stale-unmutated || no dryrun-stale-unmutated
+
 # === round-7 Finding 2: a still-LIVE pod whose only lease is CLOSED is reported as unknown, not skipped ===
 : > "$DEL_LOG"; : > "$TMP/delfail"; : > "$TMP/nogone"; rm -f "$TMP"/pods_*.txt
 CLO=$(mk_lease pod-clo 120 RUNPOD_API_KEY); lease close "$CLO" >/dev/null   # lease closed but pod still live

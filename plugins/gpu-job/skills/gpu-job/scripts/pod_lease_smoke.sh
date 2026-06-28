@@ -96,6 +96,15 @@ run mark-deleted "$MD" >/dev/null
 run claim-reaping "$MD" >/dev/null; run unclaim-reaping "$MD" >/dev/null
 [ "$(field "$MD" delete_accepted)" = True ] && ok markdeleted-survives-unclaim || no markdeleted-survives-unclaim
 
+# --- would-claim: read-only predicate mirrors claim-reaping incl. stale reaping (round-8 Finding 2) ---
+WC=$(run intent RUNPOD_API_KEY --expiry-min -1); run provisional "$WC" pod-wc >/dev/null
+if run would-claim "$WC"; then ok wouldclaim-expired-yes || true; else no wouldclaim-expired-yes; fi
+run claim-reaping "$WC" >/dev/null                        # now reaping, fresh claim
+if GPU_JOB_STALE_REAPING_SEC=900 run would-claim "$WC"; then no wouldclaim-fresh-reaping-no; else ok wouldclaim-fresh-reaping-no; fi
+if GPU_JOB_STALE_REAPING_SEC=0 run would-claim "$WC"; then ok wouldclaim-stale-reaping-yes || true; else no wouldclaim-stale-reaping-yes; fi
+# would-claim NEVER mutates
+[ "$(field "$WC" state)" = reaping ] && ok wouldclaim-readonly || no wouldclaim-readonly
+
 # --- emergency: binds a pod id + forces expiry NOW even from an intent-only lease (Finding 3) ---
 EM=$(run intent RUNPOD_API_KEY --expiry-min 600)          # intent only, future expiry
 run emergency "$EM" pod-em >/dev/null

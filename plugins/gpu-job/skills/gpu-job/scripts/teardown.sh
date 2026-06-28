@@ -60,6 +60,11 @@ if http in ("200", "201"):
 else:
     print("inconclusive")
 ' 2>/dev/null || echo inconclusive)
+  # If the DELETE was ACCEPTED, persist the marker BEFORE deciding close-vs-expire (round-8 Finding 1):
+  # an accepted-but-not-yet-verified teardown that then expires the lease must still let the reaper close
+  # it later when the pod is confirmed gone (the reaper's fresh DELETE would 404 — gone — and without
+  # this marker it would refuse to close forever).
+  [ "$del_ok" = 1 ] && bash "$HERE/pod_lease.sh" mark-deleted "$NONCE" >/dev/null 2>&1 || true
   if [ "$del_ok" = 1 ] && [ "$verdict" = gone ]; then
     bash "$HERE/pod_lease.sh" close "$NONCE" >/dev/null && echo "lease $NONCE closed (delete accepted + verified gone)"
   else

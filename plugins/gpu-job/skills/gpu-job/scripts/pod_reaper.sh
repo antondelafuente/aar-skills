@@ -175,8 +175,9 @@ reaped=0; reported=0; kept=0; retried=0
 reap_lease(){ # <nonce> <key> <pod-id>
   local nonce=$1 key=$2 pod=$3
   if [ "$DRY" = 1 ]; then
-    # dry-run still re-checks reapability (read-only) so the would-reap log is honest
-    if bash "$LEASE" is-reapable "$nonce"; then
+    # dry-run uses the read-only would-claim predicate (mirrors claim-reaping incl. STALE reaping
+    # leases) so the would-reap log matches what a real sweep would actually do (round-8 Finding 2).
+    if bash "$LEASE" would-claim "$nonce"; then
       log "DRY-RUN would reap: nonce=$nonce pod=$pod"; reaped=$((reaped+1))
     else
       log "keep (refreshed): nonce=$nonce pod=$pod"; kept=$((kept+1))
