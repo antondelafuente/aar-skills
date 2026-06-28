@@ -48,32 +48,42 @@ posting mechanics, but it does not become a second home for the "is this reviewe
 The primitives below are what #156 and #157 will call. Names are the contract; signatures are
 shell-function-shaped (positional args, stdout result, non-zero = fail-closed) to match how `wf.sh` already
 factors these. The grouping into **runtime** vs **merge-authority** is decision 2; it is shown here so the
-surface and the trust split read together.
+surface and the trust split read together. The line is drawn conservatively (per design-review FINDING 1):
+**a function is merge-authority if it selects the diff/base/repo/SHA, resolves a privileged identity, posts a
+native (merge-satisfying) review, or can merge.** Only *pure text rendering* is runtime. When in doubt, a
+function is merge-authority — the cost of base-sourcing a function that didn't strictly need it is nil; the cost
+of branch-sourcing one that did is a gate bypass.
 
-**Identity + auth (runtime).** Resolve and mint the engineer-bot identity for a given family, fail closed when
-a named identity is required and missing — today `engineer_token`, `engineer_token_cmd`, `engineer_token_seam`,
-`engineer_git_author`, `family_suffix`, `opposite_family`, `reviewer_token`, `author_token_optional`,
-`gh_author`, `git_push_author`. These move verbatim. They are runtime: they decide *who acts*, but the act of
-minting a token from a configured command is not itself merge-gate logic that a branch could subvert.
+**Identity + auth (MERGE-AUTHORITY).** Resolve and mint the engineer-bot identity for a given family, fail
+closed when a named identity is required and missing — `engineer_token`, `engineer_token_cmd`,
+`engineer_token_seam`, `engineer_git_author`, `family_suffix`, `opposite_family`, `reviewer_token`,
+`author_token_optional`, `gh_author`, `git_push_author`. These are merge-authority: they decide *who acts* with
+privileged credentials, and a branch that could rewrite "which family is the reviewer" or "mint the author's
+own token to self-approve" would subvert the cross-family gate. Base-sourced.
 
-**PR open + body rendering (runtime).** Open a draft PR for a branch and render its human-facing body —
-`render_pr_body`, `section_text`, `first_paragraph`, `markdown_details`, `markdown_code_details`. Runtime: a PR
-body is descriptive, not gate-bearing.
+**PR open (MERGE-AUTHORITY) + body rendering (runtime).** Opening a draft PR for a branch chooses the
+repo/branch it targets and acts under a privileged identity, so the *open* path is merge-authority. The PR
+**body rendering** — `render_pr_body`, `section_text`, `first_paragraph`, `markdown_details`,
+`markdown_code_details` — is pure text transformation with no gate effect: runtime.
 
-**Review posting (runtime mechanics over a merge-authority verdict).** Post a review to a PR as the
-opposite-family identity, choosing native-APPROVE vs REQUEST_CHANGES vs COMMENT and binding the review to the
-exact head SHA — the posting half of today's `run_review` plus `review_summary_text`. The *posting* is runtime;
-the *verdict it posts* and the *reviewer it runs* come from merge-authority code (next group). The split inside
-`run_review` is the substance of decision 2 and is spelled out there.
+**Review posting — split inside `run_review`.** The *verdict computation* (locate the reviewer, run it, parse
+`SUMMARY:`, decide APPROVE/REQUEST_CHANGES, the zero-HIGH gate) is merge-authority. The act of **posting a
+native review** (`gh api .../pulls/$pr/reviews` with `event=APPROVE`, bound to the head SHA) is *also*
+merge-authority — a branch that rewrote the posting call could forge the merge-satisfying APPROVE or
+mis-bind the SHA. Only `review_summary_text` and the markdown formatting of the comment body are pure rendering
+(runtime). So in `run_review`, everything except the human-readable text assembly is base-sourced.
 
-**Merge gate (MERGE-AUTHORITY).** Locate the cross-family reviewer from a trusted base ref (`locate_audit`,
-`audit_from_base_ref`), run it under a bounded wait (`run_verifier_bounded`), parse the authoritative
-`SUMMARY:` verdict fail-closed (`require_valid_review`, `count_high/med/low`, `count_all`, `sum_line`), and the
-final-SHA re-review + zero-HIGH merge decision. These are the functions a poisoned branch must not be able to
-supply for itself; they are the merge-authority set (decision 2).
+**Merge gate (MERGE-AUTHORITY).** Locate the cross-family reviewer from a trusted base ref (`locate_audit`),
+run it under a bounded wait (`run_verifier_bounded`), parse the authoritative `SUMMARY:` verdict fail-closed
+(`require_valid_review`, `count_high/med/low`, `count_all`, `sum_line`), and the final-SHA re-review +
+zero-HIGH merge decision. Base-sourced. (`audit_from_base_ref` is the *loader* for these, with the bootstrap
+subtlety resolved in decision 2 — it is not itself loaded as a branch-suppliable merge-authority function.)
 
-**Repo/branch helpers (runtime).** `gh_repo`, `wt_branch`, `base_ref`, `wt_pr`, `require_clean`,
-`main_checkout`, `need_gh`, `need_ambient_gh`. Plumbing both consumers need.
+**Repo/branch + diff/base selection (MERGE-AUTHORITY).** `gh_repo`, `wt_branch`, `base_ref`, `wt_pr`,
+`require_clean`, `main_checkout` — these *select the repo, the branch, the integration base, and the reviewed
+diff*, the exact inputs a poisoned branch would target to make the gate review the wrong thing. Per FINDING 1
+they are merge-authority, base-sourced. Only `need_gh` / `need_ambient_gh` (PATH/auth presence checks with no
+selection effect) are runtime.
 
 What stays in `wf.sh` (NOT extracted): the disposition close-gate (`disposition_gate`, the `ready` /
 `needs-design` issue contract), the finding-disposition state machine (`fd_*`, #137/#139), the classifier
@@ -90,28 +100,51 @@ run its own branch-modified reviewer as its merge gate, because `locate_audit` r
 helper now also carries PR-open and merge-posting authority, so a branch that edited `gh-lifecycle.sh` could, if
 the driver sourced the branch copy, run its own modified open/merge logic as its own gate.
 
-The split:
+The split (the full assignment is in decision 1's function surface; the principle here):
 
-- **Merge-authority functions** (the merge-gate group above) must be resolved from the **trusted base ref /
-  install**, exactly as `locate_audit` already resolves the reviewer — never from the worktree under review. The
-  decision **inside `run_review`** is the precise seam: the *verdict computation* (locate reviewer, run it,
-  parse `SUMMARY:`, the zero-HIGH gate) is merge-authority and loads from trusted source; the *posting*
-  (formatting the comment, calling `gh api .../reviews` as the bot) is runtime and may run from the branch copy.
-  Concretely, the consuming driver sources its merge-gate functions through the same base-ref materialization
-  `audit_from_base_ref` already implements (cache under the git-common-dir keyed by the base commit), so the
-  merged behavior is the reviewed behavior.
-- **Runtime functions** (identity, PR-open, body rendering, posting mechanics, repo helpers) may run from the
-  branch copy. They do not decide whether a PR merges; a branch editing its own PR-body renderer changes only
-  cosmetics, and identity is gated by the configured token-minting command, not by branch code.
+- **Merge-authority functions** — anything that selects the diff/base/repo/SHA, resolves a privileged identity,
+  posts a native (merge-satisfying) review, or can merge — must be resolved from the **trusted base ref /
+  install**, exactly as `locate_audit` already resolves the reviewer, never from the worktree under review. This
+  is the *majority* of the surface (FINDING 1); the conservative default is base-sourced.
+- **Runtime functions** — only pure text rendering (`render_pr_body`, `section_text`, `first_paragraph`,
+  `markdown_details`, `markdown_code_details`, `review_summary_text`) and PATH/auth presence checks (`need_gh`,
+  `need_ambient_gh`) — may run from the branch copy. A branch editing its own PR-body renderer changes only
+  cosmetics and cannot affect what is reviewed, who acts, or whether it merges.
 - **Poisoned-helper smoke.** Ship a smoke test matching `locate_audit_smoke.sh`: construct a branch that edits
-  `gh-lifecycle.sh`'s merge-authority code to a known-bad behavior (e.g. force `count_high` to return 0), run
-  the gate, and assert the gate used the trusted-base copy (the poison did NOT take effect). This is the
-  mechanical proof the split holds, and it is a deliverable of the extraction child, run by `.aar-ci/checks.sh`.
+  `gh-lifecycle.sh`'s merge-authority code to a known-bad behavior (e.g. force `count_high` to return 0, or
+  rewrite `opposite_family` to return the author's own family), run the gate, and assert the gate used the
+  trusted-base copy (the poison did NOT take effect). This is the mechanical proof the split holds, and it is a
+  deliverable of the extraction child, run by `.aar-ci/checks.sh`.
+
+#### The trusted loader — resolving the bootstrap circularity (FINDING 2)
+
+There is a bootstrap problem: the merge-authority functions must be *loaded* from a trusted base ref, but the
+existing base-ref materialization (`audit_from_base_ref`) is itself a function — if it lived in
+`gh-lifecycle.sh` and were sourced from the branch, a poisoned branch could rewrite the very loader meant to
+keep itself honest. The resolution is a **minimal trusted loader that stays outside branch-controlled code**:
+
+- A tiny, self-contained `gh-lifecycle-load.sh` (a few dozen lines: resolve the base ref, `git archive` the
+  trusted `gh-lifecycle.sh` from that ref into the git-common-dir cache keyed by the base commit — the
+  mechanism `audit_from_base_ref` already proved — then source the cached copy). This loader is what each
+  consuming driver invokes; it is **not** part of the materialized library, so it is never the thing being
+  loaded from the branch.
+- **The loader is itself merge-authority and base-sourced** by the *same* mechanism it implements: the consuming
+  driver (`wf.sh`, `run-experiment`) ships only a one-line stub that materializes-and-sources the loader from
+  the base ref before doing anything else. Because the stub is a fixed one-liner with no logic a branch could
+  meaningfully subvert (it only names the base ref and the loader path), the chain terminates: stub (trivial,
+  in-driver) → loader (base-sourced) → merge-authority library (base-sourced). `audit_from_base_ref`'s reviewer
+  resolution remains as-is for the verify-claims reviewer; the loader generalizes the *same* archive-to-cache
+  pattern to the helper library.
+- **Sourcing order + namespacing.** The trusted (base) copy is sourced **last** so a branch copy sourced
+  earlier cannot shadow a merge-authority function (last definition wins in bash). Merge-authority functions
+  carry a distinct name prefix (e.g. `ghl_*`) in the extracted library so the loader can assert post-source that
+  every expected `ghl_*` symbol resolves to the trusted definition (a defensive check the smoke exercises), and
+  so a branch-defined function of a different name can never silently stand in for one.
 
 The split is drawn at the function level rather than file level so the runtime/merge-authority boundary survives
-future edits: a new function lands on one side of the line explicitly. The extraction child (decision: a
-`ready` child, because *this doc settles which functions are merge-authority*) implements the base-ref
-materialization for the merge-authority set and the smoke; the boundary itself is no longer open design.
+future edits: a new function lands on one side of the line explicitly. The extraction child implements the
+loader + the base-ref materialization for the merge-authority set + the smoke; the boundary itself is no longer
+open design (this doc settles which functions are merge-authority).
 
 ### 3. Host — a neutral GitHub-lifecycle runtime helper, not the build plugin, not the audit plugin
 
@@ -127,17 +160,28 @@ materialization for the merge-authority set and the smoke; the boundary itself i
   merge authority would make the read-only plugin own write/merge it has no business owning, and would couple
   the audit engine to GitHub plumbing it is correctly ignorant of today.
 
-**Decision: a new dedicated plugin, `aar-github-lifecycle`, exporting one library `scripts/gh-lifecycle.sh`.**
-A dedicated plugin (rather than folding the library into an existing runtime plugin like `experiment-lifecycle`)
-is chosen because: **(a)** it has exactly one well-scoped job — the GitHub mechanism — and both consumers
-(`aar-engineering`/ship-change *and* `experiment-lifecycle`) sit *above* it, so it must not live *inside* either
-consumer or it recreates the dependency-direction problem from a different angle; **(b)** a standalone plugin
-gives the merge-authority code a clean, independently-versioned home that the trusted-base materialization
-(decision 2) can target by name; **(c)** it makes the rollback (decision 4) a single revertible unit. The
-plugin ships only the library + its smoke + a thin `.aar-ci` hook; it has no skills of its own (it is consumed,
-not invoked by an agent). The exact in-repo path (`plugins/aar-github-lifecycle/`) and how each consumer locates
-it (sourced via a stable relative/install path, with the merge-authority subset re-resolved from base ref per
-decision 2) are settled here as the contract; the extraction child implements them.
+**Decision: a new dedicated plugin, `aar-github-lifecycle`, shaped as a normal skill plugin** —
+`plugins/aar-github-lifecycle/` with `.claude-plugin/plugin.json` + `skills/github-lifecycle/SKILL.md` +
+`skills/github-lifecycle/scripts/` holding `gh-lifecycle.sh`, the trusted loader `gh-lifecycle-load.sh`, and the
+poisoned-helper smoke. A dedicated plugin (rather than folding the library into an existing runtime plugin like
+`experiment-lifecycle`) is chosen because: **(a)** it has exactly one well-scoped job — the GitHub mechanism —
+and both consumers (`aar-engineering`/ship-change *and* `experiment-lifecycle`) sit *above* it, so it must not
+live *inside* either consumer or it recreates the dependency-direction problem from a different angle; **(b)** a
+standalone plugin gives the merge-authority code a clean, independently-versioned home that the trusted-base
+materialization (decision 2) can target by name; **(c)** it makes the rollback (decision 4) a single revertible
+unit.
+
+**It is skill-shaped to satisfy the module convention and the install gate (design-review FINDING 3).** The repo
+convention is `plugins/<name>/` with `.claude-plugin/plugin.json` + `skills/<name>/SKILL.md` +
+`skills/<name>/scripts/` (AGENTS.md "Spec layout"), and the fake-HOME behavior smoke fails any installed plugin
+with **no resolvable `skills/*/SKILL.md`**. A no-skill plugin would be undiscoverable and fail that gate, so the
+helper ships a real (thin) `SKILL.md`. That `SKILL.md` documents the consumed library — what it exports, the
+runtime/merge-authority split, and that it is *sourced by drivers, not invoked by an agent directly* — which is
+also the right home for the contract this doc establishes. Scripts live **inside** the skill dir
+(`skills/github-lifecycle/scripts/`) per the layout rule, so consumers resolve them by the standard
+source-first plugin-skill path (#69's discovery convention), with the merge-authority subset re-materialized
+from the base ref by the trusted loader (decision 2). The exact `plugin.json` version-bump wiring and the
+`.aar-ci` hook are settled here as the contract; the extraction child implements them.
 
 ### 4. The contract for the #130 consumers
 
@@ -181,8 +225,10 @@ identity/posting mechanics and the merge-authority trust split.
 
 ## Blast radius
 
-- **New plugin** `aar-github-lifecycle` (`scripts/gh-lifecycle.sh` + poisoned-helper smoke + thin `.aar-ci`
-  hook). No skills; consumed, not invoked.
+- **New plugin** `aar-github-lifecycle` — skill-shaped (`skills/github-lifecycle/SKILL.md` +
+  `skills/github-lifecycle/scripts/{gh-lifecycle.sh,gh-lifecycle-load.sh,poisoned-helper smoke}` + `.aar-ci`
+  hook), so it passes the module-shape convention and the fake-HOME install gate. The SKILL.md documents the
+  library; the library is *sourced by drivers*, not invoked by an agent.
 - **`aar-engineering` / `wf.sh`** is refactored to source the shared library instead of carrying its own copies
   of the extracted primitives. This is the one cross-cutting edit #130 flagged. `wf.sh`'s public subcommand
   surface (`start`/`open`/`design-review`/`code-review`/`classify`/`finish`/`issue`/`comment`/`doctor`/`fdispo`)
