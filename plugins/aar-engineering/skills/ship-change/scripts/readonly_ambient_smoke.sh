@@ -290,6 +290,12 @@ if grep -q 'GIT_PUSH_ATTEMPT' "$MUTLOG"; then
   else
     pass "every git push attempt carried --dry-run (non-mutating)"
   fi
+  # hook-free: every probe push must carry --no-verify so a pre-push hook can never run (#166 F1 r7).
+  if grep 'GIT_PUSH_ATTEMPT' "$MUTLOG" | grep -vq -- '--no-verify'; then
+    fail "a git push WITHOUT --no-verify was attempted (a pre-push hook could run)"
+  else
+    pass "every git push attempt carried --no-verify (hook-free)"
+  fi
 fi
 if grep -q 'API_WRITE_ATTEMPT' "$MUTLOG"; then
   # the advisory probe must carry an EMPTY {} body and NO -f settable field (no field -> never mutates, proven

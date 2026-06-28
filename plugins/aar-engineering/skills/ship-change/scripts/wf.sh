@@ -1195,16 +1195,21 @@ readonly_probe_one_push_url(){
   tmp=$(mktemp -d) || { RO_PUSH_OUT="mktemp failed"; RO_PUSH_RC=3; return; }
   (
     git -C "$tmp" init -q 2>/dev/null
-    # LOCAL commit identity so the probe commit never depends on a global git user.name/email (#166 F2).
-    git -C "$tmp" -c user.name="wf-doctor" -c user.email="wf-doctor@local" commit -q --allow-empty -m probe 2>/dev/null
+    # LOCAL commit identity so the probe commit never depends on a global git user.name/email (#166 F2), AND
+    # disable HOOKS + SIGNING so a globally-configured core.hooksPath / commit.gpgsign can never run during
+    # this supposedly side-effect-free probe (#166 code-review F1 r7).
+    git -C "$tmp" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+        -c user.name="wf-doctor" -c user.email="wf-doctor@local" \
+        commit -q --no-verify --allow-empty -m probe 2>/dev/null
   ) || { rm -rf "$tmp"; RO_PUSH_OUT="could not stage a probe commit"; RO_PUSH_RC=3; return; }
   # Disable every interactive/ambient-helper PROMPT but keep the AMBIENT credential surface (stored helper /
   # SSH key) live — that is exactly what we must catch. Bound the probe with `timeout` so a DNS/network/helper
   # stall can never hang doctor (#166 code-review F2 / AGENTS.md bounded background waits); a timeout reads as
   # inconclusive (strict-fail at the section level), never an indefinite park.
+  # --no-verify + core.hooksPath=/dev/null so a pre-push hook can never run during the probe (#166 F1 r7).
   RO_PUSH_OUT=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
-        timeout "$to" git -C "$tmp" -c core.askPass= -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
-        push --dry-run "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" 2>&1) ; rc=$?
+        timeout "$to" git -C "$tmp" -c core.askPass= -c core.hooksPath=/dev/null -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
+        push --dry-run --no-verify "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" 2>&1) ; rc=$?
   rm -rf "$tmp"
   if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then RO_PUSH_OUT="timed out after ${to}s: $RO_PUSH_OUT"; RO_PUSH_RC=3; return; fi
   if [ "$rc" = 0 ]; then RO_PUSH_RC=0; return; fi
