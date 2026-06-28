@@ -163,10 +163,13 @@ fd_merge_canonical_round "$mbad" "$(canon_body '{"round":-2}')" 2>/dev/null && n
 # absent canonical round (back-compat) is a clean no-op (rc 0), local untouched.
 fd_merge_canonical_round "$mbad" "$(canon_body '{"findings":[]}')" && ok merge-absent-canonical-rc0 || no "merge-absent-canonical-rc0"
 [ "$(fd_round "$mbad")" = 3 ] && ok merge-absent-canonical-keeps-local || no "merge-absent-canonical-keeps-local ($(fd_round "$mbad"))"
-# no/empty/unparseable canonical -> no-op, local untouched.
+# empty body (no canonical yet) -> clean no-op (rc 0), local untouched.
 mc4="$TMP/mc4.json"; echo '{"round":2,"findings":[]}' > "$mc4"
-fd_merge_canonical_round "$mc4" ""; [ "$(fd_round "$mc4")" = 2 ] && ok merge-empty-canonical-noop || no "merge-empty-canonical-noop ($(fd_round "$mc4"))"
-fd_merge_canonical_round "$mc4" "no json fence here"; [ "$(fd_round "$mc4")" = 2 ] && ok merge-unparseable-canonical-noop || no "merge-unparseable-canonical-noop ($(fd_round "$mc4"))"
+fd_merge_canonical_round "$mc4" "" && ok merge-empty-canonical-rc0 || no "merge-empty-canonical-rc0"
+[ "$(fd_round "$mc4")" = 2 ] && ok merge-empty-canonical-noop || no "merge-empty-canonical-noop ($(fd_round "$mc4"))"
+# PRESENT but unparseable body -> corruption, fail closed (rc nonzero), local untouched (matches the clamp half).
+fd_merge_canonical_round "$mc4" "no json fence here" 2>/dev/null && no "merge-unparseable-canonical-rc" || ok merge-unparseable-canonical-rc
+[ "$(fd_round "$mc4")" = 2 ] && ok merge-unparseable-keeps-local || no "merge-unparseable-keeps-local ($(fd_round "$mc4"))"
 
 # fd_clamp_to_canonical: the round is reviewer-owned — an author save can't publish a round ABOVE canonical.
 # local > canonical -> clamp DOWN to canonical (round + fp/sha), preserving findings.

@@ -663,17 +663,19 @@ fd_load(){  # fd_load <wt> <repo> <pr> <tok> -> echoes cache path (canonical PR 
 # retry would miss the pre-review short-circuit. The only writer of round/sha is fd_bump_round (finish), which
 # always STRICTLY increments — so on equal rounds canonical is always at least as authoritative, and finish's
 # own advancing save still wins (its local round is strictly greater => this branch is skipped => local wins).
-# Args: <cache> <canonical-comment-body>. No-op on empty/unparseable canonical (best-effort; finish's advancing
-# save is independently fail-closed and the gate re-derives findings from GitHub regardless). RETURNS nonzero
-# when fd_save must abort: rc 2 if the canonical comment's round is present-but-malformed (would otherwise be
-# coerced to 0 and reset the counter), or rc 1 if a required adoption (canonical >= local) cannot be written. A
-# no-op (no canonical / lower canonical / unparseable body / absent canonical round) returns 0.
+# Args: <cache> <canonical-comment-body>. RETURNS nonzero when fd_save must abort: rc 2 if a PRESENT canonical
+# body is unparseable OR its round is malformed (would otherwise be coerced to 0 and reset the counter), or rc 1
+# if a required adoption (canonical >= local) cannot be written. A no-op returns 0: a genuinely-empty body (no
+# canonical comment yet), a lower canonical round, or an absent canonical round (back-compat).
 fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
   local cache=$1 cbody=$2 cjson cround lround fp sha
-  [ -n "$cbody" ] || return 0
+  [ -n "$cbody" ] || return 0   # genuinely NO canonical comment yet (empty body) -> legit no-op
+  # A canonical comment EXISTS — it MUST parse. A present-but-unparseable body is corruption: rc 2 so fd_save
+  # aborts (matches fd_clamp_to_canonical). This is the single fail-closed point both the author save AND the
+  # finish/allow_advance save flow through, so finish is protected too.
   cjson=$(printf '%s' "$cbody" | sed -n '/```json/,/```/p' | sed '1d;$d' \
-    | jq -c '{r:(.round // 0), fp:(.last_review_fingerprint // ""), sha:(.last_reviewed_sha // "")}' 2>/dev/null) || return 0
-  [ -n "$cjson" ] || return 0
+    | jq -c '{r:(.round // 0), fp:(.last_review_fingerprint // ""), sha:(.last_reviewed_sha // "")}' 2>/dev/null) || return 2
+  [ -n "$cjson" ] || return 2
   # The canonical comment's `round` is also the load-bearing counter — a PRESENT-but-malformed canonical value
   # must NOT be silently coerced to 0 (that would let a corrupt canonical comment be overwritten/reset). Tell a
   # legitimate ABSENT round (back-compat 0) from a present-but-bad one via the jq->0 input, and fail closed (rc 2)
