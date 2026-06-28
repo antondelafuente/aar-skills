@@ -52,7 +52,10 @@ surface and the trust split read together. The line is drawn conservatively (per
 **a function is merge-authority if it selects the diff/base/repo/SHA, resolves a privileged identity, posts a
 native (merge-satisfying) review, or can merge.** Only *pure text rendering* is runtime. When in doubt, a
 function is merge-authority — the cost of base-sourcing a function that didn't strictly need it is nil; the cost
-of branch-sourcing one that did is a gate bypass.
+of branch-sourcing one that did is a gate bypass. **Note the split is documentation, not the runtime boundary:**
+a *merge-authority command* base-sources the entire helper+driver and sources no worktree shell (round-4
+FINDING 1); the runtime/merge-authority labels record *which functions are gate-bearing*, and the "runtime may
+run from the worktree copy" license applies only to **read-only commands** (decision 2).
 
 **Identity + auth (MERGE-AUTHORITY).** Resolve and mint the engineer-bot identity for a given family, fail
 closed when a named identity is required and missing — `engineer_token`, `engineer_token_cmd`,
@@ -127,9 +130,12 @@ The split (the full assignment is in decision 1's function surface; the principl
   is the *majority* of the surface (FINDING 1); the conservative default is base-sourced.
 - **Runtime functions** — only pure text rendering (`section_text`, `first_paragraph`, `markdown_details`,
   `markdown_code_details`, `review_summary_text`, and the *cosmetic body-assembly* portion of `render_pr_body`
-  once the closing-reference selection is split out per FINDING 1) and PATH/auth presence checks (`need_gh`,
-  `need_ambient_gh`) — may run from the branch copy. A branch editing its own markdown formatter changes only
-  cosmetics and cannot affect what is reviewed, who acts, which issue is closed, or whether it merges.
+  once the closing-reference selection is split out per round-2 FINDING 1) and PATH/auth presence checks
+  (`need_gh`, `need_ambient_gh`). The label means these are **not gate-bearing** — but it does **not** license
+  sourcing branch shell in a merge-authority command (round-4 FINDING 1): in a merge-authority command even
+  these are reached from the base-sourced helper, and branch content they format is passed as **data**. The
+  "may run from the worktree copy" license applies only to **read-only commands** (`doctor`, interim
+  `design-review`), which carry no merge authority.
 - **Poisoned-helper smoke.** Ship a smoke test matching `locate_audit_smoke.sh`: construct a branch that edits
   `gh-lifecycle.sh`'s merge-authority code to a known-bad behavior (e.g. force `count_high` to return 0, or
   rewrite `opposite_family` to return the author's own family), run the gate, and assert the gate used the
@@ -148,11 +154,22 @@ keep itself honest. The resolution is a **minimal trusted loader that stays outs
   mechanism `audit_from_base_ref` already proved — then source the cached copy). This loader is what each
   consuming driver invokes; it is **not** part of the materialized library, so it is never the thing being
   loaded from the branch.
-- **Sourcing order + namespacing.** The trusted (base) copy is sourced **last** so a branch copy sourced
-  earlier cannot shadow a merge-authority function (last definition wins in bash). Merge-authority functions
-  carry a distinct name prefix (e.g. `ghl_*`) in the extracted library so the loader can assert post-source that
-  every expected `ghl_*` symbol resolves to the trusted definition (a defensive check the smoke exercises), and
-  so a branch-defined function of a different name can never silently stand in for one.
+- **For a merge-authority command, NO branch-controlled shell is sourced into the process at all (round-4
+  FINDING 1).** An earlier draft kept runtime/branch-sourced formatters in the same process and relied on
+  "source the trusted copy last" to win the shadowing race — but sourcing *any* branch shell runs its top-level
+  side effects at source time, before the trusted copy loads, so that ordering is not a real boundary. The rule
+  is therefore the simpler, stronger one: **a merge-authority command base-sources the ENTIRE helper + driver
+  (whole files, not a subset) and sources no worktree shell.** The function-level split (decision 1) remains as
+  the *documentation* of which functions are gate-bearing — useful for review and for the rule "a new function
+  lands on one side of the line" — but operationally, in a merge-authority command, the whole helper/driver is
+  trusted-sourced; nothing branch-resident is sourced.
+- **Branch markdown is DATA, never sourced.** The runtime formatters (PR-body cosmetics, comment rendering) that
+  legitimately operate on branch content read it as a **string passed as data**; they do not `source` anything
+  from the worktree. Where a merge-authority command must render text from branch content, it does so via the
+  base-sourced formatters operating on that string, or in a **sanitized output-only subprocess with no
+  credentials in its environment** — so even a malicious branch string cannot reach a token or a `gh` call.
+  (Read-only commands — `doctor`, interim `design-review` comments — may run the worktree copy; they carry no
+  merge authority, so a poisoned formatter there changes only that non-gating output.)
 
 #### The trusted entrypoint — the boundary must terminate in base code, not a branch driver (round-2 FINDING 3)
 
@@ -243,11 +260,17 @@ a fresh machine is a silent install break. The contract:
   verify-claims, with the merge-authority subset re-materialized from base ref by the trusted loader/entrypoint
   (decision 2). The library's location is therefore not hardcoded to one install layout — it is discovered, with
   a fail-closed error if the dependency is absent (never a silent fallback to a missing/forked copy).
+- **Machine-readable dependency declaration (round-4 FINDING 3).** "Declared dependency" must not collapse into
+  README-only discipline. The dependency is declared in a **repo-owned, machine-readable surface** — the
+  consumer plugins' `.claude-plugin/plugin.json` (a `dependencies`/companion field) where the harness supports
+  it, plus a small repo-owned CI manifest the cross-plugin smoke reads — so the smoke and the consumers both
+  resolve the dependency from the *same* declared source, not from prose. A consumer's resolution-failure error
+  prints the **exact companion install command** so a fresh install is self-correcting.
 - **Cross-plugin install smoke (a deliverable).** Today `.aar-ci/fake_home_smoke.sh` installs only the single
-  plugin under test. The extraction child extends the smoke (or adds a companion) to install **each consumer
-  together with its declared `aar-github-lifecycle` dependency** in a virgin HOME and assert the consumer can
-  *resolve and source* the helper — the install-path proof that the dependency contract holds, the same role the
-  existing fake-HOME smoke plays for a single plugin.
+  plugin under test. The extraction child extends the smoke (or adds a companion) to read the dependency
+  manifest above and install **each consumer together with its declared `aar-github-lifecycle` dependency** in a
+  virgin HOME, then assert the consumer can *resolve and source* the helper — the install-path proof that the
+  dependency contract holds, the same role the existing fake-HOME smoke plays for a single plugin.
 - **Codex skill mirror.** The repo mirrors plugins into Codex skill installs; the extraction child updates that
   mirror so the helper is present on the Codex path too (the same surface #69's discovery already spans).
 
@@ -276,9 +299,20 @@ that called identity/posting "runtime" — they are merge-authority; only the co
 
 Both call the *same* base-sourced identity + posting + merge code `wf.sh` uses, so the cross-family attribution
 and SHA-binding are identical to ship-change's by construction. Neither consumer re-implements GitHub plumbing;
-each supplies its own policy gate above the shared mechanism. The cross-family *family check* on the audit rungs
-those consumers run is **not** the helper's job — it is #154's (audit-runner cross-family contract); the helper
-only carries the identity/posting mechanics and the merge-authority trust split.
+each supplies its own policy gate above the shared mechanism.
+
+**Family is a required argument on any helper path that RUNS or posts a review, fail-closed (round-4 FINDING
+2).** The helper does run two of the model-judged rungs (`--design`, close) for #156/#157, so on those paths it
+must carry the same cross-family discipline `wf.sh` already enforces via `require_model_reviewer`: the
+runner/designer family is a **required** helper argument (no silent substrate default), and the helper **fails
+closed before posting or approving** if the family is absent or resolves to the *same* family as the reviewer.
+This is the narrow, correct reading of #130's "the helper enforces the cross-family contract mechanically": the
+helper enforces family **on the rungs it runs** (`--design`, close — exactly as `wf.sh` does for
+`--scaffold`/`--code` today). It is **not** a second home for the read-only-rung family check: the `verify_claim`
+and `--data` rungs run in `verify-claims` / the audit-runner contract, and making *those* require explicit
+family + fail-closed is **#154**'s job. So #156/#157 stay `blocked-by` #154 for the read-only rungs, while the
+helper itself carries the explicit-family, fail-closed contract for the `--design`/close reviews it executes.
+The boundary is: helper enforces family on what it runs; #154 enforces it on what `verify-claims` runs.
 
 ## Alternatives considered
 
