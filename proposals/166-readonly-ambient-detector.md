@@ -36,12 +36,15 @@ would false-pass. So the detector does not try to enumerate every write surface.
 - **FAILS CLOSED on any uninspectable/unattested token.** An opaque PAT with no exposed granted-set and no
   read-only-minter provenance is a FAIL, not a pass — the detector never certifies safety it cannot prove.
   This is what closes the "a finite probe set can't cover every write scope" gap.
-- **Treats the empirical 403/422 denial probe as ADVISORY ONLY.** As an extra alarm (not the gate),
-  `doctor` may send a write-method request GitHub rejects at validation *before* it mutates (an
-  invalid/empty `PATCH` over the `issues`/`pull_requests`/`contents` floor: 403 ⇒ looks read-only, 422 ⇒
-  definitely write-capable; neither mutates). A 422 is a loud "write-capable" signal that can turn a PASS
-  into a FAIL; a 403 floor never *upgrades* an unattested token to PASS. `x-accepted-github-permissions` /
-  rate-limit hints are not used as proof (they describe endpoint requirements, not granted scope).
+- **Treats the empirical denial probe as ADVISORY ONLY.** As an extra alarm (not the gate), `doctor` sends a
+  `PATCH /repos/{owner}/{repo}` with an **empty `{}` body** — proven non-mutating against a live disposable
+  repo (an empty object leaves every field, incl. `updated_at`, unchanged). The observed signal: a
+  write-capable token ⇒ **200** (accepted, "writable"); a read-only / no-access token ⇒ **403/404**
+  ("denied"); anything else (e.g. a 400 from a malformed body) ⇒ inconclusive. (The empty-`{}` form is the
+  load-bearing detail: a *no-body* PATCH returns 400, and a body with a settable `-f` field could mutate.) A
+  "writable" is a loud signal that can turn a PASS into a FAIL; a "denied" never *upgrades* an unattested
+  token to PASS — provenance is the only thing that grants PASS. `x-accepted-github-permissions` / rate-limit
+  hints are not used as proof (they describe endpoint requirements, not granted scope).
 
 **Per credential SOURCE.** `doctor` probes `GH_TOKEN`, `GITHUB_TOKEN`, and the stored `gh auth` credential
 **independently** — isolating the others for each check (a per-source `GH_CONFIG_DIR` + cleared env) — so

@@ -247,6 +247,18 @@ else
   echo "$RO_OUT" | grep -q 'ambient git push: inconclusive' && pass "F1 r3: pre-auth host-key failure -> inconclusive (strict-fail, not read-only)" || fail "F1 r3: pre-auth failure should be inconclusive"
 fi
 
+# fixture 10 (F1 r5): strict --readonly with WF_DOCTOR_SKIP_LIVE_PROBES=1 must NOT emit READONLY-PASS — the
+# git surface was never tested, so strict mode fails closed (the skip is only for the non-gating reporter).
+: > "$MUTLOG"
+RO_OUT=$(PATH="$BIN:$PATH" GH_TOKEN="RO_aaa" WF_DOCTOR_SKIP_LIVE_PROBES=1 \
+  WF_READONLY_TOKEN_CMD="" WF_READONLY_TOKEN_INFO_CMD="$INFOCMD" \
+  bash "$WF" doctor claude "$REPO" --readonly 2>&1); rc=$?
+if [ "$rc" = 0 ]; then
+  fail "strict --readonly with skipped live probes must NOT pass (F1 r5)"
+else
+  echo "$RO_OUT" | grep -q 'NOT-VERIFIED' && pass "F1 r5: strict --readonly + skip-live-probes -> fail closed (NOT-VERIFIED)" || fail "F1 r5: expected NOT-VERIFIED git-push line in strict skip mode"
+fi
+
 # --- MUTATION-FREEDOM: across ALL fixtures, the only write-shaped calls were the advisory PATCH probe and the
 #     --dry-run push; assert the fake never performed a real mutation (it can't, by construction) AND that the
 #     git push calls all carried --dry-run.

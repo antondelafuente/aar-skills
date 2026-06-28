@@ -1264,7 +1264,7 @@ readonly_probe_git_push(){
 # inconclusive is treated as NOT-PASS under strict). Sets DOCTOR_RO_FAIL=1 on any FAIL/FAIL-CLOSED.
 DOCTOR_RO_FAIL=0
 doctor_readonly_section(){
-  local repo=$1 wt=${2:-} any_present=0 rc gitrc minted minted_verdict
+  local repo=$1 wt=${2:-} strict=${3:-0} any_present=0 rc gitrc minted minted_verdict
   DOCTOR_RO_FAIL=0
   echo "  read-only ambient credential (#166):"
   # --- API surface, per SOURCE in isolation -------------------------------------------------------------
@@ -1312,7 +1312,13 @@ doctor_readonly_section(){
   fi
   # --- ambient git-push surface --------------------------------------------------------------------------
   if [ "${WF_DOCTOR_SKIP_LIVE_PROBES:-0}" = 1 ]; then
-    echo "    ambient git push: skipped (WF_DOCTOR_SKIP_LIVE_PROBES=1 — no-network mode)"
+    # In STRICT mode a skipped live probe is NOT a pass (#166 code-review F1 r5): READONLY-PASS must never be
+    # emitted while the git surface went untested. The skip stays available only for the non-gating reporter.
+    if [ "$strict" = 1 ]; then
+      echo "    ambient git push: NOT-VERIFIED (WF_DOCTOR_SKIP_LIVE_PROBES=1 in strict --readonly -> fail closed; unset it to run the live probe)"; DOCTOR_RO_FAIL=1
+    else
+      echo "    ambient git push: skipped (WF_DOCTOR_SKIP_LIVE_PROBES=1 — no-network mode; non-gating reporter)"
+    fi
   elif [ -n "$repo" ] || [ -n "$wt" ]; then
     gitrc=0; readonly_probe_git_push "$repo" "$wt" || gitrc=$?
     [ "$gitrc" = 2 ] && DOCTOR_RO_FAIL=1
@@ -1635,7 +1641,7 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] [--readonly] — report life
   if [ "$RO_ONLY" = 1 ]; then
     echo "wf.sh doctor --readonly"
     echo "  repo: $DREPO"
-    if doctor_readonly_section "$DREPO" "$DWT"; then
+    if doctor_readonly_section "$DREPO" "$DWT" 1; then
       echo "READONLY-PASS: the ambient credential is authoritatively read-only on every probed source + surface"
     else
       echo "READONLY-FAIL: the ambient credential is NOT authoritatively read-only (see FAIL/FAIL-CLOSED lines above) — demote the ambient credential / wire WF_READONLY_TOKEN_CMD+WF_READONLY_TOKEN_INFO_CMD"
