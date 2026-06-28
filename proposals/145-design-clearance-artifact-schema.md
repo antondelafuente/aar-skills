@@ -140,6 +140,8 @@ form is the safe default precisely because it is structurally incapable of satis
   },
   "design_audit": {
     "audit_ref": "https://github.com/<owner>/<repo>/pull/<n>#pullrequestreview-<id>",
+    "audit_event_id": "PRR_kwDO...def456",
+    "audit_event_kind": "pr_review",
     "audit_commit": "9f3a1c4e8b2d6a0f5c7e9b1d3f5a7c9e1b3d5f7a",
     "findings_record": "experiments/<exp>/audits/design-audit.json",
     "findings_sha256": "9b74c9897bac770ffc029102a200c5de...",
@@ -188,10 +190,12 @@ and the surviving responses are `justified`/`deferred`, never `fixed`.
 | `approval.actor` | string | yes | The GitHub login that authored the clearance event. Must be an **authorized approver** (instance-profile policy, #153) — the executor checks the fetched event's author equals this and is authorized; a designer cannot self-clear by writing a string. |
 | `approval.cleared_sha` | 40-hex SHA | yes | The commit the clearance event names (carried in the comment marker / review SHA). Must equal `brief_commit`. |
 | `brief_commit` | 40-hex SHA | yes | The commit carrying the cleared brief — the **final** audited brief (the binding target, #130 decision 2). |
-| `brief_files` | string[] | yes | The brief files present at `brief_commit`; `["DESIGN.md","START.md","CHECKLIST.md"]` (#130), **plus `data_audit_manifest.md` (required on the GitHub path)** — its `#design` block is drift-checked, its generated values are not (see "Data-audit manifest"). Listed so the verifier can assert presence. Drift-coverage differs per file — see `brief_blobs`. |
+| `brief_files` | string[] | yes | The brief files present at `brief_commit`; `["DESIGN.md","START.md","CHECKLIST.md"]` (#130), **plus every `data_audit_manifest*.md` (≥1 required on the GitHub path — one per dataset)** — each manifest's `#design` block is drift-checked, its generated values are not (see "Data-audit manifest"). Listed so the verifier can assert presence. Drift-coverage differs per file — see `brief_blobs`. |
 | `digest_algorithm` | enum (fixed `"sha256"` in v1) | yes | The one digest algorithm for `brief_blobs`/all digests in this schema. Fixed for determinism (#130 F3 fix); a future algorithm is a schema-version bump, not a per-file choice. |
-| `brief_blobs` | object (unit→digest) | yes | `digest_algorithm` digest of each **drift-checked unit** at `brief_commit`: `DESIGN.md` whole, `START.md` whole, `CHECKLIST.md#gates` (gate-definition block only), and `data_audit_manifest.md#design` (the design-intent block; **required on the GitHub path**) — in each case the run-evidence/generated section is excluded so the executor can write it. The integrity anchor the executor compares current content against (brief-integrity rule). |
-| `design_audit.audit_ref` | string (URL) | yes | Pointer to the posted `--design` PR review the verdict arbitrates. Pointer only — never the audit payload (#130 record-sensitivity). |
+| `brief_blobs` | object (unit→digest) | yes | `digest_algorithm` digest of each **drift-checked unit** at `brief_commit`: `DESIGN.md` whole, `START.md` whole, `CHECKLIST.md#gates` (gate-definition block only), and `<path>#design` for **every** `data_audit_manifest*.md` (the design-intent block; **≥1 required on the GitHub path**) — in each case the run-evidence/generated section is excluded so the executor can write it. The integrity anchor the executor compares current content against (brief-integrity rule). |
+| `design_audit.audit_ref` | string (URL) | yes | Human pointer to the posted `--design` PR review the verdict arbitrates. Pointer only — never the audit payload (#130 record-sensitivity). |
+| `design_audit.audit_event_id` | string | yes | The GitHub node-id of the posted `--design` audit event the executor **re-fetches** to read its attested `findings_sha256` — the machine identity (symmetric to `approval.event_id`), so the audit-digest check is an unambiguous lookup, not URL-scraping. |
+| `design_audit.audit_event_kind` | enum `pr_review` \| `pr_comment` | yes | Which surface carries the audit event + its findings-digest marker, so the executor fetches the right one. |
 | `design_audit.audit_commit` | 40-hex SHA | yes | The commit the `--design` audit reviewed. Must equal `brief_commit`; if they differ the executor blocks (the audited design is not the cleared brief). |
 | `design_audit.findings_record` | string (path) | yes | Committed path of the **structured** machine-readable audit finding list (id, severity, text per finding) the responses are validated against — not a copied count. |
 | `design_audit.findings_sha256` | hex | yes | Content hash of `findings_record`, pinning the exact finding set the responses answer (so an edited file is detected). |
@@ -302,11 +306,14 @@ the checklist:
 ... generated paths / hashes / counts: filled by the executor, mutable ...
 ```
 
-`data_audit_manifest.md#design` (the normalized byte range between the markers) is the drift-checked unit pinned
-in `brief_blobs` and included in the attested subdocument; the generated-values section below `END MANIFEST
-DESIGN` stays mutable. The rule is **required + fail-closed on the GitHub path**: a GitHub-path experiment must
-have a manifest, and a **missing `BEGIN/END MANIFEST DESIGN` block, or a present-but-unpinned design block,
-BLOCKs** (so the load-bearing intent/invariants cannot be quietly omitted or silently changed after clearance).
+Each manifest's `#design` (the normalized byte range between its markers) is a drift-checked unit pinned in
+`brief_blobs` and included in the attested subdocument; the generated-values section below `END MANIFEST DESIGN`
+stays mutable. **Manifests are a set, not a singleton** — the scaffold convention is one manifest per distinct
+dataset, so a multi-dataset experiment has several (e.g. `data_audit_manifest.md`,
+`data_audit_manifest.eval.md`, …); **every** `data_audit_manifest*.md`'s design block is listed in `brief_files`
+and pinned in `brief_blobs` (keyed by its path, `<path>#design`). The rule is **required + fail-closed on the
+GitHub path**: a GitHub-path experiment must have at least one manifest, and **any** manifest with a missing
+`BEGIN/END MANIFEST DESIGN` block, or a present-but-unpinned design block, BLOCKs (so the load-bearing intent/invariants cannot be quietly omitted or silently changed after clearance).
 `DATA_AUDIT_MANIFEST_TEMPLATE.md` gains these markers (the producer child's template edit, same shape as the
 checklist one); markerless manifests are allowed **only on the legacy local path**, where they keep today's
 behavior (back-compat, as with the checklist).
@@ -349,9 +356,10 @@ identity and content:
 4. **Brief integrity (the re-clearance trigger) — two-sided, both against `brief_blobs`.** The drift-checked
    units are `DESIGN.md` whole, `START.md` whole, the **gate-definition block of `CHECKLIST.md`** (the static
    gates — *not* the run-evidence section the executor mutates; see "Checklist" above), and the
-   **design-intent block of `data_audit_manifest.md`** (`#design` — required on the GitHub path; *not* the
-   generated paths/hashes/counts the executor fills; see "Data-audit manifest" below). For each unit the
-   executor performs **both** comparisons, and BLOCKs on either mismatch:
+   **design-intent block of every data-audit manifest** (the scaffold convention is one manifest per dataset, so
+   `<each manifest>#design` — required on the GitHub path; *not* the generated paths/hashes/counts the executor
+   fills; see "Data-audit manifest" below). For each unit the executor performs **both** comparisons, and BLOCKs
+   on either mismatch:
    - **(a) `brief_blobs` actually describes the audited commit.** Recompute the unit's digest **from the Git
      tree at `brief_commit`** and require it equals the `brief_blobs` entry. This closes the hole where a
      `brief_blobs` digest is fabricated to match drifted working-tree content while `brief_commit` (the audited
@@ -382,8 +390,9 @@ identity and content:
    committed to *these* responses.)
 7. **Finding-response completeness, validated against the externally-attested findings record.** The executor
    loads `design_audit.findings_record`, verifies `sha256(findings_record) == findings_sha256` **AND that this
-   digest equals the one the posted `--design` audit event attests** (else BLOCK — the findings were edited
-   after the audit GitHub published). It then requires: every HIGH and every MED finding **id present in the
+   digest equals the one attested by the posted `--design` audit event** — fetched unambiguously via
+   `design_audit.audit_event_id`/`audit_event_kind` (the machine identity, #150), not URL-scraping — (else
+   BLOCK — the findings were edited after the audit GitHub published). It then requires: every HIGH and every MED finding **id present in the
    findings record** has exactly one `finding_responses` entry with matching `id` and `severity`; every response
    `id` exists in the record (no phantom responses); every response has non-empty `evidence`; every `deferred`
    has a `followup_issue` that is a **valid issue reference** (`#123` or a GitHub issue URL — the
@@ -515,10 +524,15 @@ generic "not cleared."
 Doc-only design PR: lands the schema on `main` via the `--scaffold` gate, then spawns the implementation
 `ready` child(ren):
 
-0. **Prerequisite: structured `--design` audit output with stable ids** — a thin markdown→JSON parser of the
+0a. **Prerequisite: structured `--design` audit output with stable ids** — a thin markdown→JSON parser of the
    existing audit `FINDING:`/`SUMMARY:` output (id generation + a parser smoke), or a small `verify-claims`
    emit-JSON mode. The `findings_record`/`findings_sha256` rules depend on it, so it lands before (or with) the
    consumer child.
+0b. **Prerequisite: one clearance helper owns the canonicalization** — the JCS serialization, block extraction
+   (`#gates`/`#design`), digesting, and the proceed-rule validation live in **a single product implementation**
+   that both `design-experiment` (write) and `run-experiment` (verify) call — never two copies that could drift
+   and disagree on a byte (the same single-owner discipline `run_supervision_record.sh` follows). The shipped
+   producer/consumer test vector pins its output.
 1. **`design-experiment`: write `CLEARANCE.json` at clearance** — the producer step: after the authorized
    non-merge-satisfying clearance event exists against the final brief commit, record the `approval` block,
    finding responses, `brief_commit`, and `brief_blobs`; commit + a writer-side schema assert. **Includes the
