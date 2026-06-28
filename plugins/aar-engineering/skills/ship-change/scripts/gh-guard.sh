@@ -198,8 +198,17 @@ case "$sub" in
 
   auth)
     case "$verb" in
-      # non-mutating helper forms the workflow needs (git push credential helper, status, token printing)
-      git-credential|status|token) exec_real_gh "$@" ;;
+      status|token) exec_real_gh "$@" ;;            # non-mutating: read auth state / print token
+      git-credential)
+        # the git credential-helper protocol: `get` is READ-ONLY (git asks for a credential, used during a
+        # push). `store`/`erase` MUTATE the stored credential and would re-open the stored-cred hole the
+        # capability layer closes — block them like any other credential mutation (#165 review).
+        next_word $((sub_idx+2)); gcop=$NEXT_WORD   # the op after `git-credential`
+        case "$gcop" in
+          get) exec_real_gh "$@" ;;
+          *)   guard_die "auth git-credential $gcop" ;;   # store|erase|<missing> -> block
+        esac
+        ;;
       # login/refresh/setup-git/logout MUTATE the stored credential -> reopen the stored-cred hole -> block
       *) guard_die "auth $safe_verb" ;;
     esac

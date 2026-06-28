@@ -42,19 +42,20 @@ while IFS= read -r line; do
     heredoc_term=$(printf '%s\n' "$line" | sed -E "s/.*<<-?[[:space:]]*[\"']?([A-Za-z_][A-Za-z0-9_]*).*/\1/")
     # the START line itself can still carry a real `gh` before the `<<`, so fall through and scan it too.
   fi
-  # drop full-line comments and trailing comments (cheap; good enough — a `#gh` inside a string is rare and
-  # would only cause a FALSE POSITIVE that the author resolves by marking, never a false negative).
-  code=${line%%#*}
+  code=$line
   # A `gh` inside a command substitution — `out="$(gh api …)"` / `` `gh …` `` — is a REAL call and must
-  # survive (#165 review F2). So FIRST turn the command-substitution DELIMITERS into spaces (command
-  # boundaries), surfacing the inner `gh` into the surrounding context: `$(` -> space, matching `)` -> space,
-  # backtick -> space. (A bare `$VAR` is left alone — only `$(` opens a substitution.)
+  # survive (#165 review). So FIRST turn the command-substitution DELIMITERS into spaces (command boundaries),
+  # surfacing the inner `gh` into the surrounding context: `$(` -> sentinel, matching `)` -> later, backtick ->
+  # sentinel. (A bare `$VAR` is left alone — only `$(` opens a substitution.)
   code=$(printf '%s\n' "$code" | sed -E 's/[$]\(/ \x01/g; s/`/ \x01/g')
-  # Now blank the CONTENTS of quoted MESSAGE strings so a `gh …` in an echo/note/error text isn't flagged.
-  # A span that contained a substitution carries the \x01 sentinel and is EXEMPT from blanking (its `gh` is a
-  # real call, not message text); a plain message span (incl. one with bare $VARs) is blanked.
+  # Blank the CONTENTS of quoted MESSAGE strings BEFORE stripping comments — so a `#` inside a quoted string
+  # can't truncate the line (which would HIDE a real `gh` later on the same line — #165 review), and a `gh …`
+  # in an echo/note/error text isn't flagged. A span that contained a substitution carries the \x01 sentinel
+  # and is EXEMPT from blanking (its `gh` is a real call, not message text).
   code=$(printf '%s\n' "$code" | sed -E "s/\"[^\"\x01]*\"//g; s/'[^'\x01]*'//g")
-  # drop the now-meaningless quote chars + the sentinel so the inner `gh` sits at a clean token boundary.
+  # NOW strip a trailing/full-line comment — any surviving `#` is outside a quoted string (those are blanked).
+  code=${code%%#*}
+  # drop the now-meaningless quote chars + the sentinel + close-paren so the inner `gh` sits at a clean boundary.
   code=$(printf '%s\n' "$code" | sed -E 's/[\x01")]/ /g')
   # normalize: collapse to detect a `gh` invocation token. Match `gh ` preceded by a command boundary.
   # Boundaries: start-of-line (optional leading ws), `|`, `(`, `&`, `;`, `=` (env-prefix), `{`, backtick.

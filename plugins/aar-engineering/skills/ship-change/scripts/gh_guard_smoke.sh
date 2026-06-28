@@ -131,7 +131,12 @@ if guard auth status >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: auth status' "$
 : > "$FAKE_GH_LOG"
 if guard auth token >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: auth token' "$FAKE_GH_LOG"; then pass "'gh auth token' passes (whitelisted)"; else fail "'gh auth token' should pass"; fi
 : > "$FAKE_GH_LOG"
-if echo | guard auth git-credential get >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: auth git-credential' "$FAKE_GH_LOG"; then pass "'gh auth git-credential' passes (whitelisted)"; else fail "'gh auth git-credential' should pass"; fi
+if echo | guard auth git-credential get >/dev/null 2>&1 && grep -q 'FAKE_GH_CALLED: auth git-credential' "$FAKE_GH_LOG"; then pass "'gh auth git-credential get' passes (read-only helper)"; else fail "'gh auth git-credential get' should pass"; fi
+# git-credential store/erase MUTATE the stored credential -> blocked (review)
+for gc in "auth git-credential store" "auth git-credential erase"; do
+  : > "$FAKE_GH_LOG"
+  if ! echo | guard $gc >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $gc' blocked (mutates stored cred)"; else fail "'gh $gc' should be blocked"; fi
+done
 
 # 4. gh api default-deny on method/body; GET passes
 : > "$FAKE_GH_LOG"
@@ -304,7 +309,7 @@ PLANT="$TMP/plantroot/plugins/aar-engineering/skills/ship-change/scripts"
 mkdir -p "$PLANT"; cp "$WF" "$PLANT/wf.sh"; printf '\ngh pr merge 999 --squash\n' >> "$PLANT/wf.sh"
 if ! bash "$STATIC" "$TMP/plantroot" >/dev/null 2>&1; then pass "static check FAILS on a planted unmarked gh call"; else fail "static check should fail on a planted unmarked gh call"; fi
 # planted unmarked call INSIDE a double-quoted command substitution (review F2) + a non-allowlisted subcommand
-for inj in 'out="$(gh api repos/o/r)"' 'x=`gh pr list`' 'gh secret set FOO'; do
+for inj in 'out="$(gh api repos/o/r)"' 'x=`gh pr list`' 'gh secret set FOO' 'echo "tag #1" && gh pr merge 9'; do
   PR2="$TMP/plant2/plugins/aar-engineering/skills/ship-change/scripts"; rm -rf "$TMP/plant2"; mkdir -p "$PR2"
   cp "$WF" "$PR2/wf.sh"; printf '\n%s\n' "$inj" >> "$PR2/wf.sh"
   if ! bash "$STATIC" "$TMP/plant2" >/dev/null 2>&1; then pass "static check catches: $inj"; else fail "static check MISSED: $inj"; fi
