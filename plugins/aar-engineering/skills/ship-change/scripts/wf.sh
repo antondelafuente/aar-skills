@@ -1600,7 +1600,7 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   while IFS= read -r -d '' item; do audit_env+=("$item"); done < <(review_audit_env "$author" "${AUDIT_CONSTITUTION:-$wt/AGENTS.md}")
   # disposition-aware review (#139): if this PR has finding-disposition state, hand the reviewer the state so
   # it suppresses validly-dispositioned prior findings. No state -> stateless review (today's behavior).
-  if { [ "$mode" = --scaffold ] || [ "$mode" = --code ]; } && [ -n "$pr" ]; then
+  if { [ "$mode" = --scaffold ] || [ "$mode" = --code ] || [ "$mode" = --design ]; } && [ -n "$pr" ]; then
     local fd_repo; fd_repo=$(gh_repo "$wt")
     local fdrc; if fd_active "$fd_repo" "$pr" "$rtok"; then fdrc=0; else fdrc=$?; fi   # if-form: set -e safe on rc 1/2
     # A lookup error on the APPROVING merge-gate review must fail closed (don't silently drop to stateless).
@@ -1634,7 +1634,7 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   # #143: stamp gate-relevant reviewer reviews with a hidden, machine-readable marker so the disposition gate
   # can recover this trusted findings list from GitHub (durable) instead of /tmp. pk = the disposition gate's
   # PRIORREV key (code|scaffold); the fresh-eyes sweep carries a DISTINCT marker so it is never trusted.
-  local pk=""; case "$mode" in --code) pk=code;; --scaffold) pk=scaffold;; esac
+  local pk=""; case "$mode" in --code) pk=code;; --scaffold) pk=scaffold;; --design) pk=design;; esac
   [ -n "$pk" ] && body=$(printf '%s pk=%s sha=%s -->\n%s' "$FD_REVIEW_MARKER" "$pk" "$(git -C "$wt" rev-parse HEAD)" "$body")
   if [ -z "$rtok" ] && ambient_identity_allowed; then
     body=$( { ambient_override_notice "$mode review for PR #$pr"; printf '\n\n%s' "$body"; } )
@@ -1644,7 +1644,7 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   # is a real native APPROVE branch protection accepts. An interim --scaffold (design-review, approving=0)
   # stays a COMMENT via the elif below. Missing reviewer identity reaches the ambient fallback only when
   # WF_ALLOW_AMBIENT_IDENTITY=1 was explicitly set; otherwise reviewer_token failed closed above.
-  if { [ "$mode" = --code ] || { [ "$mode" = --scaffold ] && [ "$approving" = 1 ]; }; } && [ -n "$rtok" ]; then
+  if { [ "$mode" = --code ] || { { [ "$mode" = --scaffold ] || [ "$mode" = --design ]; } && [ "$approving" = 1 ]; }; } && [ -n "$rtok" ]; then
     local event sha; sha=$(git -C "$wt" rev-parse HEAD)
     if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then event=APPROVE              # finish gate, clean -> APPROVE
     elif [ "$REVIEW_HIGH" != 0 ]; then event=REQUEST_CHANGES                           # any blocking finding
@@ -1733,6 +1733,10 @@ EOF
 }
 
 # =================================================================================================
+# Source-guard (#227): sourcing this file (e.g. the experiment-lifecycle PR driver, exp_pr.sh) defines
+# all the helpers above as a function LIBRARY without running the CLI dispatch below. The dispatch runs
+# only when wf.sh is executed directly.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 CMD=${1:-}; shift || true
 case "$CMD" in
 
@@ -2439,3 +2443,4 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code mer
 
 *) echo "BLOCKED: unknown subcommand '${CMD:-}'." >&2; echo >&2; usage >&2; exit 1 ;;
 esac
+fi   # end source-guard (#227)

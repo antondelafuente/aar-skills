@@ -85,6 +85,22 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
   - **EXCEPTION (flexible):** for simple parameter-reruns of an already-audited design, the researcher may tell you to
     triage-and-run yourself. Default to surfacing for genuinely new designs; they'll say when to just go.
 
+### The design-audit runs as the gate on a GitHub design PR (#227)
+
+The design-audit is no longer a loose local file — it is the **merge gate on a design PR in research-lab**, so the
+design, its review, and the clearance are browsable (an experiment = a PR). Drive it with **`exp_pr.sh`** (this skill's
+`scripts/exp_pr.sh`, a thin wrapper over ship-change's `wf.sh` plumbing):
+- `exp_pr.sh open-design <exp-dir> <author>` — branches research-lab, commits `DESIGN.md`/`START.md`/`CHECKLIST.md`, opens the draft design PR. `<author>` = the design agent's family; the OPPOSITE family's engineer bot reviews.
+- `exp_pr.sh design-gate <exp-dir> <author>` — runs the `--design` audit as a **native cross-family approving review**: the opposite-family bot posts **APPROVE** when HIGH=0, **REQUEST_CHANGES** otherwise. On APPROVE it merges → the **cleared-design record** (the milestone handed to the executor in Step 4).
+
+The "audit ONCE → triage → surface → researcher arbitrates" loop above is unchanged — it now runs **on the PR**: triage
+findings with `wf.sh fdispo <design-worktree> <author>` (ACCEPT/DISPUTE/DEFER), and a confound the researcher
+**accepts with a reason** is an honored disposition that *clears* the finding; then re-run `design-gate`. The
+disposition-aware re-review concedes resolved findings and approves. **The researcher is still the convergence stop** —
+their acceptance is what lets an adversarial design-audit converge instead of spiraling into endless ablations. No agent
+bypasses the gate, and **the researcher never manually merges**: they arbitrate, the cross-family bot approves, the
+agent merges. research-lab's require-approval protection is satisfied by that cross-family APPROVE — nothing to relax.
+
 ## Step 3 — Write `START.md` (the thin executor bridge) + the self-sufficiency pass
 
 `DESIGN.md` is the science; `START.md` (in the same dir) is the **operational bridge** that lets a fresh-context
