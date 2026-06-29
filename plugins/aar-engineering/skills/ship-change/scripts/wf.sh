@@ -69,7 +69,6 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh issue   <author> <gh issue args…>  file/comment a GitHub Issue AS the engineer identity (no worktree)
   wf.sh classify      <worktree> <author> classifier on changed paths, post evidence (advisory record)
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
-  wf.sh finish <worktree> <author> --design   two-phase DESIGN merge: gate on --scaffold (doc-only PR), spawn ready issues after
   wf.sh doctor <author> [repo-or-worktree] report ambient + engineer identity readiness without printing tokens
   wf.sh doctor <author> [repo-or-worktree] --readonly  STRICT read-only-ambient detector: exits non-zero if the ambient credential is not authoritatively read-only (API + git-push, per-source, non-mutating)
   wf.sh locate-audit [repo]               print the verify-claims reviewer that would run (introspection/test)
@@ -486,7 +485,7 @@ wt_branch(){ git -C "$1" rev-parse --abbrev-ref HEAD; }                       # 
 base_ref(){ git -C "$1" rev-parse --verify -q origin/main >/dev/null 2>&1 && echo origin/main || echo main; }
 
 # ---- finding-disposition state (#137/#139): PR-local, GitHub-canonical --------------------------------------
-# DISTINCT from disposition_gate() above (the ISSUE close-gate, ready/needs-design). This is the FINDING
+# DISTINCT from disposition_gate() above (the ISSUE close-gate, ready only). This is the FINDING
 # disposition state (fixed/refuted/deferred per review finding) for the disposition-aware merge gate. Canonical
 # copy = a marked PR comment (durable, recoverable by any zero-context agent); local cache = a git-path file,
 # NEVER the committed tree (so it cannot merge to main or leak to a sibling PR). Names are `fd_*`.
@@ -579,7 +578,7 @@ ncv_backstop_comment(){  # ncv_backstop_comment <atok> <repo> <pr> <rounds> <det
   existing=$(gh_author "$atok" -R "$repo" pr view "$pr" --json comments \
     --jq '.comments[].body' 2>/dev/null | grep -F "$NCV_COMMENT_MARKER" || true)
   [ -z "$existing" ] || return 0   # already posted once — don't duplicate
-  printf '%s\nNon-convergence backstop tripped: %s merge-gate review rounds with a blocking HIGH %s.\n\nEvery round has been a legitimate, validly-dispositioned finding, yet a fresh HIGH keeps appearing — the signature of an **under-scoped** PR (the lesson from PR #132/#192), not a single fixable defect. The recommendation now changes from "fix and re-run" to **re-split this change into smaller `ready`/`needs-design` children** and ship them separately, rather than continuing to spend cross-family review credits on a loop that the merge gate itself cannot exit.\n\nThis is advisory guidance attached to the block; the merge stays blocked (no auto-merge). If you judge this a genuine multi-round false-positive on a cohesive change, raise `WF_NONCONVERGENCE_ROUNDS` for the next `finish` run.\n' \
+  printf '%s\nNon-convergence backstop tripped: %s merge-gate review rounds with a blocking HIGH %s.\n\nEvery round has been a legitimate, validly-dispositioned finding, yet a fresh HIGH keeps appearing — the signature of an **under-scoped** PR (the lesson from PR #132/#192), not a single fixable defect. The recommendation now changes from "fix and re-run" to **re-split this change into smaller `ready` children** and ship them separately, rather than continuing to spend cross-family review credits on a loop that the merge gate itself cannot exit.\n\nThis is advisory guidance attached to the block; the merge stays blocked (no auto-merge). If you judge this a genuine multi-round false-positive on a cohesive change, raise `WF_NONCONVERGENCE_ROUNDS` for the next `finish` run.\n' \
     "$NCV_COMMENT_MARKER" "$rounds" "$detail" \
     | gh_author "$atok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
     || note "WARN: could not post the non-convergence backstop PR comment (non-fatal; terminal BLOCK stands)"
@@ -1640,7 +1639,7 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
     body=$( { ambient_override_notice "$mode review for PR #$pr"; printf '\n\n%s' "$body"; } )
   fi
   # The reviewer identity attributes its output to the opposite-family engineer — a NATIVE review for --code,
-  # AND for --scaffold WHEN it is the merge gate (approving=1, i.e. `finish --design`) so the design approval
+  # AND for --scaffold WHEN it is the merge gate (approving=1) so the design approval
   # is a real native APPROVE branch protection accepts. An interim --scaffold (design-review, approving=0)
   # stays a COMMENT via the elif below. Missing reviewer identity reaches the ambient fallback only when
   # WF_ALLOW_AMBIENT_IDENTITY=1 was explicitly set; otherwise reviewer_token failed closed above.
@@ -1670,19 +1669,17 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   fi
 }
 
-# disposition_gate <wt> <author-token> <pr> <design_mode> — the two-phase CLOSE-GATE (#50/#85). Enforces the
-# disposition contract on the issues a PR closes, BEFORE any native APPROVE is posted (a check after the
-# approval would leave a non-conforming PR approved + manually mergeable):
-#   code  (finish):          closes >=1 issue, EVERY closing issue's disposition set == {ready}
-#   design (finish --design): closes EXACTLY ONE issue, its disposition set == {needs-design}
-# Equality over the six-label disposition set (not "contains") fails closed on untriaged (zero) and malformed
-# (multiple) — so an issue mislabelled both ready+needs-design can't sneak through. Closing issues resolved via
-# GitHub's own closingIssuesReferences (Closes/Fixes + manual links). Fail closed on any lookup error. Label
-# reads work under the engineer Apps' existing contents+pull_requests perms on a PUBLIC repo; a private install
-# must add issues:read (RUNBOOK). WF_ALLOW_NONREADY_CLOSE=1 overrides but posts a durable PR comment.
-DISPO_RE='^(ready|needs-design|needs-shaping|blocked|parked|other)$'
+# disposition_gate <wt> <author-token> <pr> — the CLOSE-GATE (#50/#85). Enforces the disposition contract on
+# the issues a PR closes, BEFORE any native APPROVE is posted (a check after the approval would leave a
+# non-conforming PR approved + manually mergeable): a code PR closes >=1 issue, EVERY closing issue's
+# disposition set == {ready}. Equality over the disposition set (not "contains") fails closed on untriaged
+# (zero) and malformed (multiple). Closing issues resolved via GitHub's own closingIssuesReferences
+# (Closes/Fixes + manual links). Fail closed on any lookup error. Label reads work under the engineer Apps'
+# existing contents+pull_requests perms on a PUBLIC repo; a private install must add issues:read (RUNBOOK).
+# WF_ALLOW_NONREADY_CLOSE=1 overrides but posts a durable PR comment.
+DISPO_RE='^(ready|needs-shaping|blocked|parked|other)$'
 disposition_gate(){
-  local wt=$1 tok=$2 pr=$3 design=$4 repo owner name expect closing n labels count=0 bad="" problem=""
+  local wt=$1 tok=$2 pr=$3 repo owner name expect closing n labels count=0 bad="" problem=""
   repo=$(gh_repo "$wt"); owner=${repo%%/*}; name=${repo#*/}
   # Override FIRST (before any lookup): the hatch must rescue a lookup/permission failure too — otherwise a
   # private install missing issues:read would fail closed on every merge with no in-band bypass. So if set, skip
@@ -1694,7 +1691,7 @@ disposition_gate(){
     note "design-gate OVERRIDDEN (WF_ALLOW_NONREADY_CLOSE=1) — checks skipped (best-effort PR comment posted)"
     return 0
   fi
-  [ "$design" = 1 ] && expect=needs-design || expect=ready
+  expect=ready
   # Query the first page (100, GitHub's max) + hasNextPage + each ref's repo. The --jq emits "MORE:<bool>"
   # then "<number> <owner/repo>" per closing ref, so we (a) never silently skip refs beyond the page (fail
   # closed if more exist) and (b) detect cross-repo refs. The MORE: marker is skipped in-loop (no fragile grep
@@ -1722,18 +1719,12 @@ disposition_gate(){
   done <<EOF
 $closing
 EOF
-  if [ "$design" = 1 ]; then
-    [ "$count" = 1 ] || problem="a design PR must close EXACTLY ONE needs-design issue (this closes $count)"
-  else
-    [ "$count" -ge 1 ] || problem="a code PR must close at least one ready issue (this closes 0)"
-  fi
+  [ "$count" -ge 1 ] || problem="a code PR must close at least one ready issue (this closes 0)"
   [ -n "$bad" ] && problem="${problem:+$problem; }closing issue(s) not disposition=={$expect}:$bad"
-  [ -z "$problem" ] && { note "design-gate ok: closes $count issue(s), all disposition=={$expect}"; return 0; }
-  die "design-gate: $problem.
-  Two-phase close contract: code PRs close only 'ready' issues; a 'needs-design' issue is closed by its DESIGN
-  landing (finish --design), which spawns 'ready' children (linked 'design: #<n>') — close a child, not the
-  parent; triage any other non-'ready' close to 'ready' first. Override (best-effort PR comment + logged):
-  WF_ALLOW_NONREADY_CLOSE=1."
+  [ -z "$problem" ] && { note "close-gate ok: closes $count issue(s), all disposition=={$expect}"; return 0; }
+  die "close-gate: $problem.
+  Code PRs close only 'ready' issues; triage any non-'ready' close to 'ready' first (design lives in the PR).
+  Override (best-effort PR comment + logged): WF_ALLOW_NONREADY_CLOSE=1."
 }
 
 # =================================================================================================
@@ -2221,18 +2212,14 @@ classify)       # wf.sh classify <worktree> <author>   — advisory record (neve
   echo "$OUT"
   ;;
 
-finish) # wf.sh finish <worktree> <author> [--design]   — checks + fail-closed merge gate + ready + merge + cleanup
-  # Plain finish gates on --code (the diff). `--design` makes it the DESIGN half of two-phase: the merge gate
-  # is --scaffold on the design doc (opposite-family native APPROVE), the same approval model as a code PR —
-  # for a design-doc-only PR whose implementation lands later as spawned `ready` issues.
-  need_gh; WT=${1:?usage: wf.sh finish <worktree> <author> [--design]}; AUTHOR=${2:?author: claude|codex}
-  # Validate the optional 3rd arg explicitly — a typo (e.g. --desgin) must FAIL, not silently run plain finish
-  # (the wrong merge gate). Only "" or exactly --design are valid.
-  DESIGN_MODE=0
+finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code merge gate + ready + merge + cleanup
+  # finish gates on --code (the diff): a fail-closed cross-family merge review, then merge on a clean gate.
+  need_gh; WT=${1:?usage: wf.sh finish <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
+  # Validate the 3rd arg explicitly — finish takes no mode flag now, so any 3rd arg FAILS (catches typos).
+  # The two-phase --design flow was removed; design now lives in the implementing PR. finish takes no mode flag.
   case "${3:-}" in
     "") ;;
-    --design) DESIGN_MODE=1 ;;
-    *) die "finish: unknown 3rd argument '${3:-}' — only '--design' is valid (or omit it for a code PR)" ;;
+    *) die "finish: unknown 3rd argument '${3:-}' — finish takes no mode flag (the two-phase --design flow was removed; design lives in the PR)" ;;
   esac
   check_author "$AUTHOR"; require_model_reviewer "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
   require_clean "$WT"   # everything must be committed: reviewed == checked == merged, and nothing lost on --force removal
@@ -2242,26 +2229,6 @@ finish) # wf.sh finish <worktree> <author> [--design]   — checks + fail-closed
   BR=$(wt_branch "$WT"); PR=$(wt_pr_required "$WT" "$ATOK")
   mapfile -t PATHS < <(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD — nothing to merge"
-  # FAIL-CLOSED: --design skips --code, so it must NEVER run on a PR that contains code, and the --scaffold
-  # approval must cover the EXACT doc that lands. Require the diff to be (1) design-doc-only (proposals/*.md)
-  # and (2) EXACTLY ONE design doc — else the gate would review only one of several docs (head -1) while the
-  # rest merged un-design-reviewed. Capture that one doc as the gate target.
-  DESIGN_DOC=""
-  if [ "$DESIGN_MODE" = 1 ]; then
-    # Use a RENAME-STABLE path list (--no-renames): with rename detection, a code->proposals/*.md rename shows
-    # only the NEW doc path, so the old code path could masquerade as doc-only and skip --code. --no-renames
-    # decomposes a rename into delete(old)+add(new), so the old code path surfaces in NONDOC and is rejected.
-    mapfile -t RPATHS < <(cd "$WT" && git diff --no-renames --name-only "$(base_ref "$WT")"...HEAD)
-    NONDOC=$(printf '%s\n' "${RPATHS[@]}" | grep -vE '^proposals/.*\.md$' || true)
-    [ -z "$NONDOC" ] || die "finish --design is for design-doc-only PRs; this diff also touches non-doc paths:
-$NONDOC
-Use plain 'wf.sh finish $WT $AUTHOR' (gates on --code) for any PR with code."
-    mapfile -t DESIGN_DOCS < <(printf '%s\n' "${RPATHS[@]}" | grep -E '^proposals/.*\.md$')
-    [ "${#DESIGN_DOCS[@]}" = 1 ] || die "finish --design expects EXACTLY ONE design doc (the --scaffold approval covers one doc); this diff changes ${#DESIGN_DOCS[@]}:
-$(printf '%s\n' "${DESIGN_DOCS[@]}")
-Split into one design PR per doc."
-    DESIGN_DOC="${DESIGN_DOCS[0]}"
-  fi
   # 0a. BASE FRESHNESS: origin/main may have ADVANCED since `start` (a peer PR merged). The merge would land
   #     on that newer main, but checks/review run against this branch's base — so the integrated tree that
   #     actually lands was never checked. Block unless the branch is rebased onto current origin/main (the
@@ -2320,9 +2287,9 @@ Split into one design PR per doc."
   [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
   note "running .aar-ci checks + smoke on branch content…"
   ( cd "$WT" && bash .aar-ci/checks.sh "${PATHS[@]}" ) || die "deterministic checks/behavior-smoke FAILED — fix before merging"
-  # 1.5 the CLOSE-GATE (#50/#85): enforce the two-phase disposition contract on the PR's closing issues, BEFORE
-  #     the native APPROVE below (so a non-conforming PR is never approved/mergeable). Fail-closed.
-  disposition_gate "$WT" "$ATOK" "$PR" "$DESIGN_MODE"
+  # 1.5 the CLOSE-GATE (#50/#85): enforce the disposition contract on the PR's closing issues, BEFORE the
+  #     native APPROVE below (so a non-conforming PR is never approved/mergeable). Fail-closed.
+  disposition_gate "$WT" "$ATOK" "$PR"
   # 2a. disposition-aware deterministic backstop (#139), BEFORE any approving review — so a blocked/malformed
   #     disposition state can never receive a native APPROVE. If this PR has finding-disposition state, the
   #     structural gate over its HIGH entries must pass first (a HIGH left `unresolved` or a malformed
@@ -2345,26 +2312,22 @@ Split into one design PR per doc."
        NCV_PRIOR=$(fd_round "$FD"); NCV_PRIOR_SHA=$(fd_last_reviewed_sha "$FD")
        if [ "${NCV_PRIOR:-0}" -ge "$NCV_N" ] 2>/dev/null && [ -n "$NCV_PRIOR_SHA" ] && [ "$NCV_PRIOR_SHA" = "$LOCAL_SHA" ]; then
          ncv_backstop_comment "$ATOK" "$REPO" "$PR" "$NCV_PRIOR" "(unchanged since last round)"
-         die "non-convergence backstop: already $NCV_PRIOR merge-gate rounds with a blocking HIGH (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) and nothing committed since the last review — NOT spending another review. This PR appears UNDER-SCOPED; re-split it into smaller ready/needs-design children. Commit a genuine fix to get one more review, or raise WF_NONCONVERGENCE_ROUNDS to override."
+         die "non-convergence backstop: already $NCV_PRIOR merge-gate rounds with a blocking HIGH (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) and nothing committed since the last review — NOT spending another review. This PR appears UNDER-SCOPED; re-split it into smaller ready children. Commit a genuine fix to get one more review, or raise WF_NONCONVERGENCE_ROUNDS to override."
        fi
        # #140 fresh-eyes companion: BEFORE the gate/merge-review, run ONE un-anchored stateless sweep over the
        #      same target and post it. Its wf_fresh_<branch> artifact is auto-handed to the disposition-aware
        #      merge review (run_review) for SEMANTIC adjudication. Candidate-only — it never feeds the
        #      deterministic structural gate below, so a rephrased dispositioned finding can't false-block.
-       if [ "$DESIGN_MODE" = 1 ]; then
-         fresh_sweep "$WT" "$AUTHOR" --scaffold "$WT/$DESIGN_DOC" "$PR" >/dev/null || die "fresh-eyes sweep (mandatory #140 backstop) failed — re-run finish (only its PR comment is best-effort)"
-       else
-         FRESHDIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
-         ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$FRESHDIFF"
-         fresh_sweep "$WT" "$AUTHOR" --code "$FRESHDIFF" "$PR" >/dev/null || die "fresh-eyes sweep (mandatory #140 backstop) failed — re-run finish (only its PR comment is best-effort)"
-       fi
+       FRESHDIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
+       ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$FRESHDIFF"
+       fresh_sweep "$WT" "$AUTHOR" --code "$FRESHDIFF" "$PR" >/dev/null || die "fresh-eyes sweep (mandatory #140 backstop) failed — re-run finish (only its PR comment is best-effort)"
        FDLIST="${TMPDIR:-/tmp}/wf_fd_high_${BR//\//_}.txt"
        # TRUSTED findings list (#143): recover the reviewer-derived HIGH ids from the DURABLE GitHub review
        # record (posted under the reviewer-bot identity), NOT a transient/author-writable /tmp file. A
        # deleted/downgraded disposition still can't bypass the gate (the deleted id has no entry -> BLOCK), and
        # the list now survives reboot / fresh worktree / a different agent. FAIL CLOSED if no reviewer identity
        # or no marked reviewer review is recoverable — never fall back to /tmp or to author-only state.
-       PK=code; [ "$DESIGN_MODE" = 1 ] && PK=scaffold
+       PK=code
        # Reviewer-bot login = the opposite family's canonical git-author NAME (== the App's PR comment login).
        RLOGIN=$(git_author_name "$(engineer_git_author "$(opposite_family "$AUTHOR")" 0)")
        [ -n "$RLOGIN" ] || die "disposition-aware finish needs the reviewer identity to anchor the trusted findings list, but WF_ENGINEER_GIT_AUTHOR_$(family_suffix "$(opposite_family "$AUTHOR")") is unset — configure the reviewer engineer identity (wf.sh doctor $AUTHOR) and re-run finish."
@@ -2388,22 +2351,17 @@ Split into one design PR per doc."
          || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
   esac
   # 2. the authoritative merge gate, fail-closed, NO HIGH. approving=1 -> clean review posts a native APPROVE.
-  #    --design: gate on --scaffold over the design DOC (the doc IS the deliverable). else: --code over the diff.
-  if [ "$DESIGN_MODE" = 1 ]; then
-    # $DESIGN_DOC was validated above as the single design doc in the diff — review that exact artifact.
-    run_review --scaffold "$WT" "$AUTHOR" "$WT/$DESIGN_DOC" "$PR" "Final design review (merge gate)" 1
-  else
-    DIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
-    ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
-    run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)" 1
-  fi
+  #    Gate on --code over the diff.
+  DIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
+  ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
+  run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)" 1
   # 2c. record the final review's findings into the disposition state for the NEXT round (non-gating — the
   #     structural gate above and the model verdict below are the gates; this only keeps the canonical record current).
   #     ALSO advance the non-convergence round counter (#137 backstop) IDEMPOTENTLY here — this is the one place a
   #     completed merge-gate reviewer pass is incorporated, so it is the credit-accurate unit to count.
   NCV_ROUND=0
   if [ -n "$FD" ]; then
-    FK=code; [ "$DESIGN_MODE" = 1 ] && FK=scaffold
+    FK=code
     REVF="${TMPDIR:-/tmp}/wf_${FK}_$(wt_branch "$WT" | tr '/' '_').md"
     if [ -f "$REVF" ]; then
       fd_seed "$FD" "$REVF"
@@ -2440,7 +2398,7 @@ Split into one design PR per doc."
     case "$NCV_N" in ''|*[!0-9]*) NCV_N=4 ;; esac
     if [ -n "$FD" ] && [ "${NCV_ROUND:-0}" -ge "$NCV_N" ] 2>/dev/null; then
       ncv_backstop_comment "$ATOK" "$REPO" "$PR" "$NCV_ROUND" "(still $REVIEW_HIGH blocking HIGH)"
-      die "non-convergence backstop: $REVIEW_HIGH HIGH after $NCV_ROUND merge-gate rounds (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) — this PR appears UNDER-SCOPED. Re-split it into smaller ready/needs-design children rather than iterating further. (Raise WF_NONCONVERGENCE_ROUNDS to override for a genuine false-positive loop.)"
+      die "non-convergence backstop: $REVIEW_HIGH HIGH after $NCV_ROUND merge-gate rounds (>= WF_NONCONVERGENCE_ROUNDS=$NCV_N) — this PR appears UNDER-SCOPED. Re-split it into smaller ready children rather than iterating further. (Raise WF_NONCONVERGENCE_ROUNDS to override for a genuine false-positive loop.)"
     fi
     die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
   fi
@@ -2471,11 +2429,7 @@ Split into one design PR per doc."
   git -C "$MAIN_CO" pull --ff-only -q origin main 2>/dev/null || note "WARN: could not ff-only pull main ($MAIN_CO) — reconcile manually"
   local_manifest=0; for p in "${PATHS[@]}"; do case "$p" in */plugin.json|*marketplace.json) local_manifest=1;; esac; done
   [ "$local_manifest" = 1 ] && note "a plugin manifest changed — refresh installs: claude plugin marketplace update automated-researcher && claude plugin update <name>@automated-researcher"
-  if [ "$DESIGN_MODE" = 1 ]; then
-    echo "SHIPPED: design PR #$PR merged (opposite-family --scaffold approval + checks). Worktree cleaned. Next: file the spawned 'ready' issues."
-  else
-    echo "SHIPPED: PR #$PR merged (opposite-family review gate + checks). Worktree cleaned."
-  fi
+  echo "SHIPPED: PR #$PR merged (opposite-family review gate + checks). Worktree cleaned."
   ;;
 
 *) echo "BLOCKED: unknown subcommand '${CMD:-}'." >&2; echo >&2; usage >&2; exit 1 ;;

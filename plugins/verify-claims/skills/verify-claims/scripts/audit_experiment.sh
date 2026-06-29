@@ -383,16 +383,10 @@ fi
 # genuinely-new or invalid-disposition HIGHs. DISPOSITION_FILE unset (research audits, or a first/no-state
 # ship-change review) -> PROMPT unchanged.
 if { [ "$MODE" = scaffold ] || [ "$MODE" = code ]; } && [ -n "${DISPOSITION_FILE:-}" ] && [ -r "${DISPOSITION_FILE:-}" ]; then
-  DISPO_ALTITUDE=$(jq -r '.altitude // "implementation"' "$DISPOSITION_FILE" 2>/dev/null)
-  case "$DISPO_ALTITUDE" in umbrella | implementation) ;; *) DISPO_ALTITUDE=implementation ;; esac
-  if [ "$MODE" = scaffold ]; then
-    DEFERRAL_RULE="A deferral/decomposition (status deferred_to_child_design) is legitimate ONLY IF no ready/landed/authorized work depends on the deferred decision; dependent work must be explicitly marked blocked-by the child. If the change authorizes (marks ready / lands) work whose correctness, review surface, merge authority, or scope depends on a deferred decision, the deferral is INVALID -> surface it as HIGH. Deferring an open sub-design to a needs-design child is legitimate ONLY at umbrella altitude with dependents blocked-by. At umbrella altitude, 'a child interface/schema is not fully designed yet' is EXPECTED, not a finding."
-  else
-    DEFERRAL_RULE="A deferral (status deferred_out_of_scope) is legitimate ONLY for a genuine out-of-scope enhancement or unrelated pre-existing issue, filed as a follow-up, whose absence does NOT make the shipped diff incorrect/unsafe/incomplete. A defect IN THE DIFF being merged (a correctness bug, crash, security hole, weakened test, an unhandled case the new code introduces) is NEVER deferrable -> if it is dispositioned as deferred, surface it as HIGH (it must be fixed or refuted). There is no 'umbrella' code PR."
-  fi
+  DEFERRAL_RULE="A deferral (status deferred_out_of_scope) is legitimate ONLY for a genuine out-of-scope enhancement or unrelated pre-existing issue, filed as a follow-up, whose absence does NOT make the shipped change incorrect/unsafe/incomplete. A defect IN THE CHANGE being merged (a correctness bug, crash, security hole, weakened test, an unhandled case it introduces, a real design flaw) is NEVER deferrable -> if it is dispositioned as deferred, surface it as HIGH (it must be fixed or refuted)."
   PROMPT="=== STATEFUL DISPOSITION-AWARE MERGE-GATE REVIEW ===
 This change has PRIOR review findings, each with the author's machine-readable disposition (JSON below).
-Declared altitude: $DISPO_ALTITUDE. Perform the dimensional review that follows, BUT judge it against the
+Perform the dimensional review that follows, BUT judge it against the
 dispositions:
 - For each prior finding, judge the author's disposition ON THE MERITS: does a 'fixed' actually fix it (check
   the diff/doc)? does a 'refuted' actually rebut it? is a 'deferred_*' legitimate by the rule below?

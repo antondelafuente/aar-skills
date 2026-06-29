@@ -131,7 +131,7 @@ Three obligations, maintained continuously (not at close):
 
   See **`references/RELAUNCH_SUPERVISOR.md`** for the supervisor's side of this contract — the substrate-neutral
   decision tree (`resume_same_session` else `launch_successor(handoff_path)`), the desired-state gating, and what
-  is deliberately out of scope (silent-wedge detection, deferred to the #54 `needs-design` child).
+  is deliberately out of scope (silent-wedge detection, deferred to the #54 `needs-shaping` follow-up).
 
 - **Never leave a pod behind an in-conversation-only note.** A pod's existence and its cost-cap deadline must be
   on disk — the keepalive contract + the standing handoff + the linked pod ids in the record — so a reaper can

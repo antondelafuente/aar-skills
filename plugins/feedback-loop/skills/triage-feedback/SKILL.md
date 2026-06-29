@@ -40,7 +40,6 @@ more disposition labels to one.
 Classify feedback:
 
 - `ready`: actionable now, no unresolved design.
-- `needs-design`: real, but needs a design pass first.
 - `needs-shaping`: too vague to start.
 - `blocked`: gated on a prerequisite; include `blocked-by: #N`.
 - `parked`: real but not now.

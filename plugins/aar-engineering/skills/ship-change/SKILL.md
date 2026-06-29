@@ -125,40 +125,20 @@ wf.sh finish <WORKTREE> <author>
 worktree, commit, and re-run `finish`. Never merge around the driver — the re-review-on-the-final-diff is
 the point.
 
-## Two-phase design (`finish --design`)
+## The close-gate (enforced in `finish`)
 
-For work that's too big or fuzzy to implement directly, split it: a **design PR** lands the design doc on
-main first, then implementation happens as a separate set of `ready` issues spawned from it. The design PR is
-**doc-only** and its merge gate is the cross-family **`--scaffold`** review — the opposite-family engineer
-posts a native APPROVE, the same approval model as a code PR (you steer at authoring time, not at merge).
-
-```
-wf.sh start <N> <slug>            # same as always
-#   → write the design doc (the WHOLE deliverable — no implementation)
-wf.sh open <WORKTREE> claude
-wf.sh design-review <WORKTREE> claude     # iterate the doc to agreement
-wf.sh finish <WORKTREE> <author> --design # gate on --scaffold APPROVE (doc-only); merge
-#   → then FILE the spawned `ready` issues — the design's decomposition into implementable units.
-```
-
-`--design` **fails closed** if the diff contains anything but `proposals/*.md` (so it can never skip `--code`
-on real code — use plain `finish` for any PR with code). The spawned `ready` issues are then implemented as
-normal single-phase ship-change runs.
-
-### The close-gate (enforced in `finish`)
-
-`finish` enforces the two-phase **close contract** on the issues a PR closes (before the merge approval):
-- **code `finish`:** must close **≥1** issue, and **every** closing issue's disposition is `ready`.
-- **`finish --design`:** must close **exactly one** issue, disposition `needs-design`.
+`finish` enforces the **close contract** on the issues a PR closes (before the merge approval):
+- A code PR must close **≥1** issue, and **every** closing issue's disposition is `ready` (the design lives
+  in the PR itself — there is no separate design-PR phase).
 - A **cross-repo** closing ref (a `Closes` of an issue in another repo) fails closed — drop the keyword to a
   plain mention for cross-repo refs.
 
 The disposition vocabulary is packaged for this plugin at `references/DISPOSITIONS.md`; it is synced from the
 canonical product constitution section in `AGENTS.md` and checked for drift by `.aar-ci/checks.sh`.
 
-So you can't merge code that closes a `needs-design` (or untriaged/mislabelled) issue — a `needs-design` issue
-is closed only by its *design* landing, which spawns the `ready` children you actually implement. Violations
-block with guidance; `WF_ALLOW_NONREADY_CLOSE=1` overrides — it bypasses the gate entirely (including a
+So you can't merge code that closes an untriaged/mislabelled issue — triage it to `ready` first (a
+`needs-shaping` issue is scoped into `ready` through conversation, not a design-PR). Violations block with
+guidance; `WF_ALLOW_NONREADY_CLOSE=1` overrides — it bypasses the gate entirely (including a
 lookup/permission failure, so it's also the rollback for a misconfigured install) and leaves a best-effort PR
 comment plus a terminal log.
 
@@ -173,7 +153,7 @@ HIGH=0 into endless polish; the merge bar is HIGH=0 + checks green.)
 
 ### Disposition-aware merge gate (#137/#139) — for broad changes that won't converge
 
-When a review keeps re-raising findings you've already addressed (the convergence trap on a broad/umbrella
+When a review keeps re-raising findings you've already addressed (the convergence trap on a broad
 change), opt the PR into the **disposition-aware** gate. State is **PR-local** (a canonical PR comment,
 recoverable by any agent; cached under the gitdir — never committed). The author maintains a machine-readable
 disposition per finding so the reviewer stops re-litigating resolved ones and the gate blocks only on what's
@@ -184,7 +164,6 @@ wf.sh fdispo <wt> <author> seed     # pull the latest code-review findings into 
                                     #   (prints the cache path)
 $EDITOR <cache>                     # set each finding's status + evidence:
                                     #   fixed (+ commit, an in-PR SHA) | refuted (+ reason)
-                                    #   | deferred_to_child_design (+ child_issue, umbrella altitude only)
                                     #   | deferred_out_of_scope (+ followup_issue) | unresolved (blocks)
 wf.sh fdispo <wt> <author> save     # update the canonical PR comment
 ```
@@ -207,7 +186,7 @@ rounds that *still left a blocking HIGH* (one per fingerprint-distinct blocking 
 merges and does not count, and a bare identical re-run does not re-count). If a PR is still blocked after
 `WF_NONCONVERGENCE_ROUNDS` rounds (default **4**), the gate stops saying "fix and re-run" and instead reports
 the PR as **under-scoped** — the signature (every round a fresh, validly-dispositioned HIGH) means the right
-move is to **re-split into smaller `ready`/`needs-design` children**, not to keep spending review credits on a
+move is to **re-split into smaller `ready` children**, not to keep spending review credits on a
 loop the gate itself cannot exit. Once at threshold, a bare re-run with nothing newly committed is **blocked
 before** spending another review (a new fix commit still earns one more review); the recommendation posts once
 (marker-guarded). It **still BLOCKS** (never auto-merges) — it only changes the guidance. If a run is a

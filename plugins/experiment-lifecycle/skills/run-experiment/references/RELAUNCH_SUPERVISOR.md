@@ -26,7 +26,7 @@ covers exactly the two failure signatures that are unambiguous today:
 It is **NOT** responsible for **silent-wedge detection** — an agent that is *alive but hung*, with no exit and no
 request. A reliable model-free "the agent is healthily inside a long model turn" signal does not exist yet, and a
 wrong probe restarts healthy quiet work (strictly worse than the gap). That harder half is the separate
-`needs-design` follow-up (#54 child 5), deliberately **out of scope here** — a future reader should not mistake
+`needs-shaping` follow-up (#54 child 5), deliberately **out of scope here** — a future reader should not mistake
 "no wedge handling" for a bug to patch with a heuristic.
 
 It is also **NOT** the pod reaper. Pod *deletion* is `gpu-job`'s domain (the pod lease + the box-level reap sweep,
