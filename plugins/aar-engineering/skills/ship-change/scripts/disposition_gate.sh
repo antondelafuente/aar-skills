@@ -12,7 +12,7 @@
 #   <findings-file>: one finding per line, "<ID> <SEVERITY>" (SEVERITY in HIGH|MED|LOW).
 # Output: "DISPOSITION-GATE: PASS" (exit 0) or "DISPOSITION-GATE: BLOCK <reason>" (exit 2).
 #
-# Disposition statuses: fixed | refuted | deferred_to_child_design | deferred_out_of_scope | unresolved
+# Disposition statuses: fixed | refuted | deferred_out_of_scope | unresolved
 set -uo pipefail
 
 block() { echo "DISPOSITION-GATE: BLOCK $*"; exit 2; }
@@ -71,9 +71,6 @@ fi
 # already enforced above for any present file).
 [ -n "$DISP" ] && [ -f "$DISP" ] || block "HIGH findings present but dispositions file missing: ${DISP:-<none>}"
 
-altitude=$(jq -r '.altitude // "implementation"' "$DISP" 2>/dev/null)
-case "$altitude" in umbrella | implementation) ;; *) block "invalid altitude '${altitude:-<none>}' (expected umbrella|implementation)" ;; esac
-
 # Base ref for the `fixed`-in-PR-range check. Explicit override wins; else the merge-base with main.
 # Resolve to a concrete commit up front and FAIL CLOSED if a base is present but does not resolve — an
 # invalid base must never let the range check pass silently (merge-base would just error to "no block").
@@ -96,10 +93,6 @@ for id in "${high_ids[@]}"; do
       block "finding $id is unresolved (HIGH)" ;;
     refuted)
       : ;; # reason is advisory context for the model reviewer; structurally complete
-    deferred_to_child_design)
-      [ "$altitude" = umbrella ] || block "finding $id: deferred_to_child_design only allowed at umbrella altitude (altitude=$altitude)"
-      child=$(printf '%s' "$entry" | jq -r '.child_issue // empty' 2>/dev/null)
-      issue_link_ok "$child" || block "finding $id: deferred_to_child_design requires a child_issue link (#N or a GitHub issue URL), got '${child:-<none>}'" ;;
     deferred_out_of_scope)
       followup=$(printf '%s' "$entry" | jq -r '.followup_issue // empty' 2>/dev/null)
       issue_link_ok "$followup" || block "finding $id: deferred_out_of_scope requires a followup_issue link (#N or a GitHub issue URL), got '${followup:-<none>}'" ;;

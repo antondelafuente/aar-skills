@@ -497,7 +497,7 @@ fd_fid(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' ' ' | 
 # author then dispositions them); existing ids keep their disposition. Closes the omission hole (F2).
 fd_seed(){  # fd_seed <cache> <rev>
   local cache=$1 rev=$2 sev="" issue id
-  [ -s "$cache" ] || printf '{"altitude":"implementation","findings":[]}\n' > "$cache"
+  [ -s "$cache" ] || printf '{"findings":[]}\n' > "$cache"
   while IFS= read -r line; do
     case "$line" in
       FINDING\ *) sev=$(printf '%s' "$line" | sed -nE 's/^FINDING [0-9]+: (HIGH|MED|LOW).*/\1/p') ;;
@@ -533,7 +533,7 @@ fd_high_list(){ jq -r '.findings[]|select(.severity=="HIGH")|"\(.id) HIGH"' "$1"
 # round number. Back-compat: absent `round` reads as 0.
 fd_bump_round(){  # fd_bump_round <cache> <reviewed-sha> <high-ids-file> <had-high:0|1>
   local cache=$1 sha=$2 hifile=$3 had_high=${4:-0} fp prev cur
-  [ -s "$cache" ] || printf '{"altitude":"implementation","findings":[]}\n' > "$cache"
+  [ -s "$cache" ] || printf '{"findings":[]}\n' > "$cache"
   cur=$(jq -r '.round // 0' "$cache" 2>/dev/null); case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
   # A clean review (no residual HIGH) is NOT a non-convergence round — never increments; leave state untouched.
   if [ "$had_high" != 1 ]; then printf '%s\n' "$cur"; return 0; fi
@@ -655,7 +655,7 @@ fd_load(){  # fd_load <wt> <repo> <pr> <tok> -> echoes cache path (canonical PR 
     # A marked comment that exists but yields no valid JSON is CORRUPT state -> fail closed (not empty init).
     jq -e . "$cache" >/dev/null 2>&1 || { echo "BLOCKED: canonical disposition comment on PR #$pr exists but has no valid JSON" >&2; return 1; }
   else
-    printf '{"altitude":"implementation","findings":[]}\n' > "$cache"   # no marker -> legitimately empty state
+    printf '{"findings":[]}\n' > "$cache"   # no marker -> legitimately empty state
   fi
   printf '%s\n' "$cache"
 }
@@ -958,7 +958,8 @@ issue_maintainer_verb(){
       newbody=$(printf '%s\n%s\n' "$newbody" "$bodyline")
       # Set the disposition label AND remove every OTHER disposition label in the same edit, so the
       # "exactly one disposition" invariant holds (a single --add-label could otherwise leave two). Read the
-      # current labels; remove any disposition label that isn't the one we're setting.
+      # current labels; remove any disposition label — active OR retired (DISPO_LEGACY_RE) — that isn't the
+      # one we're setting, so an issue carrying a retired label (e.g. needs-design) doesn't end up with two.
       local -a editargs=(issue edit "$num" -R "$repo" --add-label "$dlabel" --body-file -)
       local curlabels lbl
       curlabels=$(gh_author "$ATOK" issue view "$num" -R "$repo" --json labels -q '.labels[].name' 2>/dev/null) \
@@ -966,7 +967,7 @@ issue_maintainer_verb(){
       while IFS= read -r lbl; do
         [ -n "$lbl" ] || continue
         [ "$lbl" = "$dlabel" ] && continue
-        printf '%s' "$lbl" | grep -qE "$DISPO_RE" && editargs+=(--remove-label "$lbl")
+        printf '%s' "$lbl" | grep -qE "$DISPO_RE|$DISPO_LEGACY_RE" && editargs+=(--remove-label "$lbl")
       done <<< "$curlabels"
       printf '%s' "$newbody" | gh_author "$ATOK" "${editargs[@]}" \
         || die "wf.sh issue dispose: 'gh issue edit' (label + body-line) failed — failing closed"
@@ -1678,6 +1679,10 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
 # existing contents+pull_requests perms on a PUBLIC repo; a private install must add issues:read (RUNBOOK).
 # WF_ALLOW_NONREADY_CLOSE=1 overrides but posts a durable PR comment.
 DISPO_RE='^(ready|needs-shaping|blocked|parked|other)$'
+# Retired dispositions: no longer valid TARGETS (the close-gate and `dispose --label` accept DISPO_RE only),
+# but `dispose` must still STRIP them so re-dispositioning an issue that predates a label's removal ends with
+# exactly one. Extend this set when a disposition is retired.
+DISPO_LEGACY_RE='^(needs-design)$'
 disposition_gate(){
   local wt=$1 tok=$2 pr=$3 repo owner name expect closing n labels count=0 bad="" problem=""
   repo=$(gh_repo "$wt"); owner=${repo%%/*}; name=${repo#*/}
@@ -2070,7 +2075,7 @@ fdispo)         # wf.sh fdispo <worktree> <author> <seed|show|edit|save> — man
       [ -n "$REVF" ] && [ -f "$REVF" ] || die "no review output to seed from — run 'wf.sh code-review $WT $AUTHOR' (or design-review) first"
       fd_seed "$CACHE" "$REVF"
       fd_save "$WT" "$REPO" "$PR" "$ATOK" || die "failed to post the canonical disposition comment to PR #$PR (GitHub error) — state NOT updated"
-      note "seeded $(jq '.findings|length' "$CACHE") finding(s) ($(jq '[.findings[]|select(.status=="unresolved")]|length' "$CACHE") unresolved). Edit $CACHE (set status fixed|refuted|deferred_to_child_design|deferred_out_of_scope + evidence/commit/child_issue/followup_issue), then: wf.sh fdispo $WT $AUTHOR save" ;;
+      note "seeded $(jq '.findings|length' "$CACHE") finding(s) ($(jq '[.findings[]|select(.status=="unresolved")]|length' "$CACHE") unresolved). Edit $CACHE (set status fixed|refuted|deferred_out_of_scope + evidence/commit/followup_issue), then: wf.sh fdispo $WT $AUTHOR save" ;;
     save)
       [ -s "$CACHE" ] || die "no local disposition cache to save ($CACHE) — run 'wf.sh fdispo $WT $AUTHOR seed' first"
       jq -e . "$CACHE" >/dev/null 2>&1 || die "local disposition cache is not valid JSON ($CACHE) — fix it, then save"
