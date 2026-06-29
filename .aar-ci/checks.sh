@@ -273,18 +273,6 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/aar-engineering/skills/ship-
   fi
 fi
 
-# 9. disposition-aware prompt-injection smoke (#139): audit_experiment.sh injects the disposition framing
-#    (and preserves the dimensional review) only when DISPOSITION_FILE is set. Runs when the auditor changed.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/verify-claims/skills/verify-claims/scripts/audit_experiment\.sh$'; then
-  DI_SMOKE="$ROOT/plugins/verify-claims/skills/verify-claims/scripts/disposition_inject_smoke.sh"
-  if [ -f "$DI_SMOKE" ]; then
-    echo "[checks] disposition prompt-injection smoke" >&2
-    bash "$DI_SMOKE" >&2 && ok "disposition_inject smoke" || err "disposition_inject smoke FAILED"
-  else
-    err "audit_experiment.sh changed but disposition_inject_smoke.sh missing — cannot verify the injection"
-  fi
-fi
-
 # 10. run-supervision-record smoke (#168): the monotonic state machine + fail-closed is-desired-active +
 #     atomic writes + the update-vs-stop/close race — behavior the JSON/syntax checks can't cover. Runs
 #     when the helper or its smoke changed.

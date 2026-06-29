@@ -41,7 +41,7 @@ gh issue list -R "$FEEDBACK_PRODUCT_REPO" --state open --limit 100 --search "<te
 
 If an Issue exists, add a recurrence comment instead of duplicating it. If not, file a new Issue with a type label
 (`bug`, `enhancement`, `documentation`, or `onboarding`) and exactly one disposition label when the disposition is
-clear (`ready`, `needs-design`, `needs-shaping`, `blocked`, `parked`, or `other`). If you cannot judge disposition yet,
+clear (`ready`, `needs-shaping`, `blocked`, `parked`, or `other`). If you cannot judge disposition yet,
 leave the disposition off rather than guessing. Read `references/DISPOSITIONS.md` for the label contract.
 
 Use the engineer-safe authoring path when `aar-engineering` is available and the host is configured for it:

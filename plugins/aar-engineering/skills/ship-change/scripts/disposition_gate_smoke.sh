@@ -40,51 +40,39 @@ expect PASS no-high-no-file "$TMP/absent.json" "$(find_ 'F1 MED')"
 #    regardless of origin/main: HEAD is in (HEAD^..HEAD].
 PARENT=$(git rev-parse --verify 'HEAD^' 2>/dev/null || true)
 if [ -n "$PARENT" ]; then
-  d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"description\":\"missing config check\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
+  d=$(disp "{\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"description\":\"missing config check\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
   out=$(DISPOSITION_BASE_REF="$PARENT" "$GATE" "$d" "$(find_ 'F1 HIGH')" 2>&1); rc=$?
   if [ "$rc" -eq 0 ]; then echo "ok   high-fixed-ok"; else echo "FAIL high-fixed-ok: want PASS got BLOCK :: $out"; fails=1; fi
 else
   echo "skip high-fixed-ok: HEAD has no parent"
 fi
 
-# 3. HIGH deferred_to_child_design at umbrella with child_issue -> PASS.
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","description":"open sub-design","status":"deferred_to_child_design","child_issue":"#139"}]}')
-expect PASS high-defer-child-ok "$d" "$(find_ 'F1 HIGH')"
-
 # 4. HIGH refuted -> PASS (structurally complete).
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","description":"alleged bug","status":"refuted","reason":"reviewer wrong"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","description":"alleged bug","status":"refuted","reason":"reviewer wrong"}]}')
 expect PASS high-refuted-ok "$d" "$(find_ 'F1 HIGH')"
 
 # 4b. HIGH entry missing description -> BLOCK (semantic matching depends on it).
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"refuted","reason":"x"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","status":"refuted","reason":"x"}]}')
 expect BLOCK high-no-description "$d" "$(find_ 'F1 HIGH')"
 
 # 5. HIGH with no disposition entry -> BLOCK.
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F2","severity":"HIGH","status":"fixed","commit":"'"$COMMIT"'"}]}')
+d=$(disp '{"findings":[{"id":"F2","severity":"HIGH","status":"fixed","commit":"'"$COMMIT"'"}]}')
 expect BLOCK high-no-entry "$d" "$(find_ 'F1 HIGH')"
 
 # 6. HIGH unresolved -> BLOCK.
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
 expect BLOCK high-unresolved "$d" "$(find_ 'F1 HIGH')"
 
-# 7. deferred_to_child_design at implementation altitude -> BLOCK.
-d=$(disp '{"altitude":"implementation","findings":[{"id":"F1","severity":"HIGH","status":"deferred_to_child_design","child_issue":"#139"}]}')
-expect BLOCK defer-child-impl-altitude "$d" "$(find_ 'F1 HIGH')"
-
-# 8. deferred_to_child_design missing child_issue -> BLOCK.
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"deferred_to_child_design"}]}')
-expect BLOCK defer-child-no-link "$d" "$(find_ 'F1 HIGH')"
-
 # 9. deferred_out_of_scope missing followup_issue -> BLOCK.
-d=$(disp '{"altitude":"implementation","findings":[{"id":"F1","severity":"HIGH","status":"deferred_out_of_scope"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","status":"deferred_out_of_scope"}]}')
 expect BLOCK defer-oos-no-link "$d" "$(find_ 'F1 HIGH')"
 
 # 10. fixed with a bogus commit -> BLOCK.
-d=$(disp '{"altitude":"implementation","findings":[{"id":"F1","severity":"HIGH","status":"fixed","commit":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","status":"fixed","commit":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}]}')
 expect BLOCK fixed-bogus-commit "$d" "$(find_ 'F1 HIGH')"
 
 # 11. invalid status -> BLOCK.
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"wontfix"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","status":"wontfix"}]}')
 expect BLOCK invalid-status "$d" "$(find_ 'F1 HIGH')"
 
 # 12. HIGH present but dispositions file missing -> BLOCK (fail-closed).
@@ -94,28 +82,24 @@ expect BLOCK high-no-file "$TMP/absent.json" "$(find_ 'F1 HIGH')"
 d=$(disp '{not valid json')
 expect BLOCK malformed-json "$d" "$(find_ 'F1 HIGH')"
 
-# 14. invalid altitude -> BLOCK.
-d=$(disp '{"altitude":"whatever","findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
-expect BLOCK invalid-altitude "$d" "$(find_ 'F1 HIGH')"
-
 # 15. `fixed` commit that EXISTS but is NOT an ancestor of HEAD (e.g. an unrelated branch) -> BLOCK.
 #     Guard the setup: a vacuous test (orphan creation failed) must FAIL, not silently "pass".
 ORPHAN=$(printf 'orphan' | git commit-tree "$(git rev-parse 'HEAD^{tree}')" 2>/dev/null || true)
 if [ -n "$ORPHAN" ] && ! git merge-base --is-ancestor "$ORPHAN" HEAD 2>/dev/null; then
-  d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$ORPHAN\"}]}")
+  d=$(disp "{\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$ORPHAN\"}]}")
   expect BLOCK fixed-non-ancestor "$d" "$(find_ 'F1 HIGH')"
 else
   echo "FAIL fixed-non-ancestor: could not create a genuine non-ancestor commit"; fails=1
 fi
 
 # 16. malformed findings line (missing severity) -> BLOCK (fail-closed, never fail-open to zero HIGHs).
-d=$(disp '{"altitude":"implementation","findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
 expect BLOCK malformed-findings-line "$d" "$(find_ 'F1')"
 
 # 17. `fixed` commit in the BASE (ancestor of the merge-base with main), not a fix made in this PR -> BLOCK.
 BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || true)
 if [ -n "$BASE" ]; then
-  d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$BASE\"}]}")
+  d=$(disp "{\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$BASE\"}]}")
   expect BLOCK fixed-in-base "$d" "$(find_ 'F1 HIGH')"
 else
   echo "skip fixed-in-base: no base ref (origin/main or main) available"
@@ -126,16 +110,12 @@ d=$(disp '{not valid json')
 expect BLOCK malformed-file-no-high "$d" "$(find_ 'F1 MED')"
 
 # 19. multi-token / bogus status ("fixed refuted") must NOT slip through to a no-op -> BLOCK.
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"fixed refuted"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","status":"fixed refuted"}]}')
 expect BLOCK status-multi-token "$d" "$(find_ 'F1 HIGH')"
-
-# 20. deferral link that is not an issue ref (JSON true) -> BLOCK.
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"deferred_to_child_design","child_issue":true}]}')
-expect BLOCK defer-child-bad-link "$d" "$(find_ 'F1 HIGH')"
 
 # 21. findings file present but unreadable -> BLOCK (fail-closed, not a silent zero-HIGH pass).
 unreadable="$TMP/unreadable.txt"; printf 'F1 HIGH\n' > "$unreadable"; chmod 000 "$unreadable"
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
 if [ -r "$unreadable" ]; then
   echo "skip findings-unreadable: cannot make file unreadable (running as root?)"
 else
@@ -144,35 +124,31 @@ fi
 chmod 644 "$unreadable" 2>/dev/null || true
 
 # 22. invalid DISPOSITION_BASE_REF must FAIL CLOSED for a `fixed` disposition (not fail open) -> BLOCK.
-d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
+d=$(disp "{\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
 out=$(DISPOSITION_BASE_REF="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$GATE" "$d" "$(find_ 'F1 HIGH')" 2>&1); rc=$?
 if [ "$rc" -ne 0 ]; then echo "ok   base-ref-invalid"; else echo "FAIL base-ref-invalid: want BLOCK got PASS :: $out"; fails=1; fi
 
 # 23. .findings as an OBJECT (not an array) must not slip through -> BLOCK.
-d=$(disp '{"altitude":"umbrella","findings":{"x":{"id":"F1","severity":"HIGH","status":"unresolved"}}}')
+d=$(disp '{"findings":{"x":{"id":"F1","severity":"HIGH","status":"unresolved"}}}')
 expect BLOCK findings-not-array "$d" "$(find_ 'F1 HIGH')"
 
-# 24. deferral link with an invalid GitHub URL (whitespace in owner) -> BLOCK.
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"deferred_to_child_design","child_issue":"https://github.com/a b/c/issues/1"}]}')
-expect BLOCK defer-child-bad-url "$d" "$(find_ 'F1 HIGH')"
-
 # 25. duplicate finding id in the findings list -> BLOCK (ambiguous matching).
-d=$(disp "{\"altitude\":\"implementation\",\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
+d=$(disp "{\"findings\":[{\"id\":\"F1\",\"severity\":\"HIGH\",\"status\":\"fixed\",\"commit\":\"$COMMIT\"}]}")
 printf 'F1 HIGH\nF1 MED\n' > "$TMP/dup.txt"
 expect BLOCK dup-finding-id "$d" "$TMP/dup.txt"
 
 # 26. two disposition entries for the same id -> BLOCK (expected exactly 1).
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","status":"refuted","reason":"a"},{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","status":"refuted","reason":"a"},{"id":"F1","severity":"HIGH","status":"unresolved"}]}')
 expect BLOCK dup-disposition-entry "$d" "$(find_ 'F1 HIGH')"
 
 # 27. committed findings-as-object with NO current HIGH must still BLOCK (structural validity, not just JSON).
-d=$(disp '{"altitude":"umbrella","findings":{"x":1}}')
+d=$(disp '{"findings":{"x":1}}')
 expect BLOCK findings-object-no-high "$d" "$(find_ 'F1 MED')"
 
 # 28. HIGH entry with a whitespace-only / non-string description -> BLOCK (semantic matching needs real text).
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","description":"   ","status":"refuted","reason":"x"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","description":"   ","status":"refuted","reason":"x"}]}')
 expect BLOCK high-blank-description "$d" "$(find_ 'F1 HIGH')"
-d=$(disp '{"altitude":"umbrella","findings":[{"id":"F1","severity":"HIGH","description":123,"status":"refuted","reason":"x"}]}')
+d=$(disp '{"findings":[{"id":"F1","severity":"HIGH","description":123,"status":"refuted","reason":"x"}]}')
 expect BLOCK high-nonstring-description "$d" "$(find_ 'F1 HIGH')"
 
 if [ "$fails" -eq 0 ]; then echo "disposition_gate_smoke: ALL PASS"; else echo "disposition_gate_smoke: FAILURES"; fi

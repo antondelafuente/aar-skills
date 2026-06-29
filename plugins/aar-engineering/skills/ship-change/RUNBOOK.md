@@ -39,7 +39,7 @@ check). Wiring either as a GitHub-required status is a tracked follow-up (needs 
   `pull_requests: write` *alone* it can *post* a review, but it reads as `author_association: NONE` and the
   approval does **not** satisfy the gate (`reviewDecision: REVIEW_REQUIRED`). Grant `contents: write` and
   re-accept the installation's permission request.
-- **`issues: read` — only for PRIVATE installs.** The close-gate (`finish` enforcing the two-phase close
+- **`issues: read` — only for PRIVATE installs.** The close-gate (`finish` enforcing the close
   contract, #50/#85) reads each closing issue's disposition labels. On a **public** repo (like `automated-researcher`)
   this works under the existing `contents`+`pull_requests` perms — no change needed. A **private** install must
   add **`issues: read`** to both engineer Apps (+ re-accept), or the gate fails closed and blocks every merge.
