@@ -85,6 +85,10 @@ Because the writes use the author bot's own token, **an autonomous agent can log
 `gh` credential at all**. Both tokens are minted just-in-time, validated against the repo, fail-closed (no
 token / no access → BLOCK before any mutation), and never printed.
 
+## The audit shows on the PR (browsable, like a code review)
+
+For an **experiment** or **design-stage** PR, the already-run audit is **surfaced on the PR as a thread** — not just a silent approve. The **reviewer** bot posts the audit findings (`AUDIT.md` for a close; `DESIGN_AUDIT.md` + any re-audit chain for a design) as a native PR review COMMENT, the **author** bot posts the triage responses (`AUDIT_RESPONSE.md` / `DESIGN_AUDIT_RESPONSE.md`) as a PR comment, then the reviewer's APPROVE clears the gate. So an experiment PR reads like a code-review PR — the cross-family findings → responses → approve are browsable on GitHub. The audit is **not** re-run (it already ran during design-experiment / run-experiment, with the human in the loop); this posts the captured record. Best-effort: a failed post logs a warning and never blocks the gate or merge. Notes get no thread.
+
 ## Config (instance, env-overridable — never hardcode an instance; fails closed if unset)
 
 - `RESEARCH_REPO` — the research repo (`owner/repo`). **Required — no default**; the input dir's `origin` must match it.

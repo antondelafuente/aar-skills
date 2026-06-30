@@ -186,12 +186,45 @@ GIT_COMMITTER_NAME="$GA_NAME" GIT_COMMITTER_EMAIL="$GA_EMAIL" \
 git -C "$WT" -c credential.helper= push -q "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" "HEAD:refs/heads/$BRANCH"
 HEAD_SHA="$(git -C "$WT" rev-parse HEAD)"   # bind the merge to exactly the reviewed commit
 
+# ---- post the already-run audit onto the PR as a browsable thread (additive, best-effort — NOT a re-run) ----
+# A PR review/comment body caps ~65k chars; truncate large bodies (the full file is committed in the PR diff).
+_clip(){ local b; [ -f "$1" ] || return 1; b="$(cat "$1")"; [ -n "$b" ] || return 1; if [ "${#b}" -gt 60000 ]; then b="${b:0:60000}"$'\n\n…truncated; full file in the PR diff.'; fi; printf '%s' "$b"; }
+post_audit_thread(){
+  local findings=() responses=() f body label
+  case "$KIND" in
+    experiment)   [ -f "$DIR/AUDIT.md" ] && findings=("$DIR/AUDIT.md"); responses=("$DIR/AUDIT_RESPONSE.md") ;;
+    design-stage) for f in "$DIR"/DESIGN_AUDIT.md "$DIR"/DESIGN_AUDIT[0-9]*.md; do [ -f "$f" ] && findings+=("$f"); done
+                  responses=("$DIR/DESIGN_AUDIT_RESPONSE.md") ;;
+    *) return 0 ;;   # notes get no audit thread
+  esac
+  # reviewer (opposite family) posts each findings file as a native PR review COMMENT
+  if [ ${#findings[@]} -gt 0 ]; then
+    for f in "${findings[@]}"; do
+      body="$(_clip "$f")" || continue
+      label="Cross-family ${KIND} audit — \`$(basename "$f")\` (posted by the ${REVIEWER_FAMILY,,}-engineer reviewer):"
+      GH_TOKEN="$TOK" gh pr review "$PR" -R "$RESEARCH_REPO" --comment --body "**${label}**"$'\n\n'"$body" >/dev/null 2>&1 \
+        || note "warn: could not post audit findings ($(basename "$f")) to PR #$PR (gate/merge unaffected)"
+    done
+  fi
+  # author posts the triage responses as a PR comment
+  if [ ${#responses[@]} -gt 0 ]; then
+    for f in "${responses[@]}"; do
+      body="$(_clip "$f")" || continue
+      label="Author triage — \`$(basename "$f")\` (posted by the ${AUTHOR_FAMILY}-engineer author):"
+      GH_TOKEN="$ATOK" gh pr comment "$PR" -R "$RESEARCH_REPO" --body "**${label}**"$'\n\n'"$body" >/dev/null 2>&1 \
+        || note "warn: could not post author triage ($(basename "$f")) to PR #$PR (gate/merge unaffected)"
+    done
+  fi
+  return 0
+}
+
 # ---- PR -> bot approve -> merge ----
 BODY="$(printf '%s\n\nLogged by log-experiment.sh (gate: %s).' "$APPROVAL_BODY" "$KIND")"
 URL="$(GH_TOKEN="$ATOK" gh pr create -R "$RESEARCH_REPO" --head "$BRANCH" --base main \
         -t "Log $KIND: $REL" -b "$BODY")"
 PR="$(echo "$URL" | grep -oE '[0-9]+$')"
 note "opened PR #$PR ($URL)"
+post_audit_thread   # surface the already-run audit as a findings -> responses thread (experiment/design-stage only)
 GH_TOKEN="$TOK" gh pr review "$PR" -R "$RESEARCH_REPO" --approve --body "$APPROVAL_BODY" >/dev/null
 GH_TOKEN="$ATOK" gh pr merge "$PR" -R "$RESEARCH_REPO" --squash --delete-branch --match-head-commit "$HEAD_SHA" >/dev/null
 note "merged PR #$PR (head $HEAD_SHA)"
