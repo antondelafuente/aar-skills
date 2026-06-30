@@ -132,6 +132,7 @@ GH_TOKEN="$ATOK" gh api "repos/$RESEARCH_REPO" -q .full_name >/dev/null 2>&1 \
 gitauthor_var="LOG_EXPERIMENT_GIT_AUTHOR_${AUTHOR_FAMILY^^}"
 GIT_AUTHOR="${!gitauthor_var:-}"
 [ -n "$GIT_AUTHOR" ] || die "no author git identity — set $gitauthor_var to the ${AUTHOR_FAMILY}-engineer 'Name <email>'"
+[[ "$GIT_AUTHOR" =~ ^.+\ \<[^@[:space:]]+@[^@[:space:]]+\>$ ]] || die "$gitauthor_var is malformed (expected 'Name <email>'): $GIT_AUTHOR"
 GA_NAME="${GIT_AUTHOR% <*}"; GA_EMAIL="${GIT_AUTHOR#*<}"; GA_EMAIL="${GA_EMAIL%>}"
 
 # ---- branch in a DEDICATED worktree (never disturbs the shared tree) ----
@@ -150,7 +151,10 @@ mkdir -p "$WT/$(dirname "$REL")"
 cp -r "$DIR" "$WT/$(dirname "$REL")/"
 git -C "$WT" add -- "$REL"                          # respects the dir's .gitignore (large artifacts stay on R2)
 git -C "$WT" diff --cached --quiet && die "nothing to commit for $REL (all gitignored?)"
-git -C "$WT" -c user.name="$GA_NAME" -c user.email="$GA_EMAIL" commit -q -m "Log $KIND: $REL"
+# Force the bot identity via env (overrides any ambient GIT_AUTHOR_*/GIT_COMMITTER_* + config) for author AND committer.
+GIT_AUTHOR_NAME="$GA_NAME" GIT_AUTHOR_EMAIL="$GA_EMAIL" \
+GIT_COMMITTER_NAME="$GA_NAME" GIT_COMMITTER_EMAIL="$GA_EMAIL" \
+  git -C "$WT" commit -q -m "Log $KIND: $REL"
 # Push as the AUTHOR bot via a token-scoped remote, with credential helpers DISABLED so no ambient
 # credential machinery can participate (matches the hardened push convention). URL not persisted as a remote.
 git -C "$WT" -c credential.helper= push -q "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" "HEAD:refs/heads/$BRANCH"
