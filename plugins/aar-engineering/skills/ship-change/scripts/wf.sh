@@ -1999,7 +1999,7 @@ design-review)  # wf.sh design-review <worktree> <author>
   # push so the reviewed doc == what the PR shows (consistency with code-review)
   git_push_author "$ATOK" "$WT" -q origin HEAD || die "push failed — can't review a doc the PR doesn't reflect"
   run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Design review (\`--scaffold\`)"
-  note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings; the PM's design approval is the human gate (recorded, advisory — not a required check). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
+  note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings, triaging as a peer (no separate human design approval — architectural and mechanical changes use the same gate). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
   ;;
 
 code-review)    # wf.sh code-review <worktree> <author>
@@ -2146,6 +2146,11 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
   if [ -n "$ATOK" ]; then note "ran 'gh issue $GHSUB' as the $AUTHOR engineer identity"
   else note "ran 'gh issue $GHSUB' (ambient token — no engineer identity configured for $AUTHOR)"; fi
   fi
+  ;;
+
+classify)       # RETIRED (#248) — the mechanical/architectural classifier was removed; all changes use the same gate.
+  note "wf.sh classify is retired (#248): classification was removed. Just run: wf.sh finish <worktree> <author>."
+  exit 0
   ;;
 
 finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code merge gate + ready + merge + cleanup
