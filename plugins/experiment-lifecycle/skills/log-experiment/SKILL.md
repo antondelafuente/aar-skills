@@ -68,12 +68,17 @@ Because the writes use the author bot's own token, **an autonomous agent can log
 `gh` credential at all**. Both tokens are minted just-in-time, validated against the repo, fail-closed (no
 token / no access → BLOCK before any mutation), and never printed.
 
-## Config (instance, env-overridable — never hardcode an instance; fails closed if unset)
+## Config — the canonical home is the experiment-lifecycle profile
 
-- `RESEARCH_REPO` — the research repo (`owner/repo`). **Required — no default**; the input dir's `origin` must match it.
-- `LOG_EXPERIMENT_AUTHOR_FAMILY` — `claude`|`codex`. Defaults to `$AAR_SUBSTRATE`; **fails closed if neither is set** (a wrong default must not make the review same-family). The reviewer is the **opposite** family.
-- `LOG_EXPERIMENT_TOKEN_CMD_CLAUDE` / `LOG_EXPERIMENT_TOKEN_CMD_CODEX` — each a command taking `<owner/repo>` that mints that family's engineer-bot token. **Both** are used: the author family's (writes) and the opposite family's (approval). **Fail closed if either is unset.**
-- `LOG_EXPERIMENT_GIT_AUTHOR_CLAUDE` / `LOG_EXPERIMENT_GIT_AUTHOR_CODEX` — the `Name <email>` each bot commits as. **Fail closed if the author family's is unset.**
+The instance's GitHub-lifecycle facts live in `${XDG_CONFIG_HOME:-~/.config}/experiment-lifecycle/aar-profile.toml` (schema: `run-experiment/references/SCHEMA.md`), not in the script. log-experiment reads its `[github]` block:
+
+- `[github].research_repo` — the research repo (`owner/repo`); the input dir's `origin` must match it.
+- `[github].base_branch` — the branch records fork from + merge into (default `main`).
+- `[github.identity.<family>].token_cmd_env` / `git_author_env` — these **name** the env vars holding the actual mint command (taking `<owner/repo>`) and the `Name <email>`. The indirection keeps the profile non-secret. Both families are used: the **author** family writes, the **opposite** family approves.
+
+`LOG_EXPERIMENT_AUTHOR_FAMILY` (or `$AAR_SUBSTRATE`) picks the author family — fails closed if unknown.
+
+**Env overrides** (a short-lived migration aid; take precedence over the profile): `RESEARCH_REPO`, `LOG_EXPERIMENT_BASE_BRANCH`, `LOG_EXPERIMENT_TOKEN_CMD_<F>`, `LOG_EXPERIMENT_GIT_AUTHOR_<F>`, `LOG_EXPERIMENT_PROFILE` (profile path). Any unresolved value **fails closed before any mutation**.
 
 ## Composes
 
