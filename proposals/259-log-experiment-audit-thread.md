@@ -9,8 +9,10 @@ log-experiment gates an experiment PR (design or close) by verifying the audit f
 Before the gate's approve, **surface the already-run audit onto the PR as a conversation** (additive — the gate, classification, note path, and merge are all unchanged):
 
 - The **reviewer** (opposite-family engineer bot) posts the audit **findings** as a native PR review COMMENT — close: `AUDIT.md`; design: `DESIGN_AUDIT.md` plus any re-audit chain (`DESIGN_AUDIT2.md`, …).
-- The **author** (author-family engineer bot) posts the **triage responses** as a PR comment — close: `AUDIT_RESPONSE.md`; design: `DESIGN_AUDIT_RESPONSE.md`.
+- The **author** (author-family engineer bot) posts the **triage responses** as a PR comment — close: `AUDIT_RESPONSE.md` (a standard `run-experiment` artifact). **Design has no standard response artifact** (per #244): the design "response" is the *revised* `DESIGN.md` in the diff plus any re-audit in the `DESIGN_AUDIT` chain — so a `DESIGN_AUDIT_RESPONSE.md` is posted only if one happens to be present (best-effort), and the design thread is otherwise the audit chain alone.
 - Then the existing reviewer **APPROVE** clears the gate and the author bot merges.
+
+This change also **tightens the existing design-stage gate**: it must find a real audit output (`DESIGN_AUDIT.md` / `DESIGN_AUDIT<N>.md`), not just any `DESIGN_AUDIT*.md` — so introducing a `DESIGN_AUDIT_RESPONSE.md` name can't let a response-only dir satisfy the gate.
 
 Order on the PR: findings (reviewer) → responses (author) → approve (reviewer) → merge — a browsable reconstruction of the cross-family audit. Content comes verbatim from the already-run files; the audit is **not** re-run (it already ran, with the human in the loop). Notes (the secret-scan path) get no thread. Self-contained — uses `gh pr review` / `gh pr comment` with the family-keyed reviewer/author tokens already resolved by the driver (no wf.sh dependency).
 

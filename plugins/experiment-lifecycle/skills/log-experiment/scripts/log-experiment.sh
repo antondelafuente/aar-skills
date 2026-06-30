@@ -105,10 +105,12 @@ gate_design_stage() {
   # but a KIND=design-stage file bypasses that): a design-stage record IS a pre-registration.
   [ -f "$DIR/DESIGN.md" ]  || die "design-stage dir missing DESIGN.md — a design-stage record is a pre-registration"
   [ -f "$DIR/RESULTS.md" ] && die "design-stage dir unexpectedly has RESULTS.md — should classify as experiment"
-  compgen -G "$DIR/DESIGN_AUDIT*.md" >/dev/null 2>&1 \
-    || die "design-stage dir has DESIGN.md but no DESIGN_AUDIT*.md (design-audit not run) — surface for human"
+  # Require a real design-audit OUTPUT (DESIGN_AUDIT.md or the numbered chain). A DESIGN_AUDIT_RESPONSE.md
+  # shares the DESIGN_AUDIT prefix but is NOT an audit — it must not satisfy the gate on its own.
+  { [ -f "$DIR/DESIGN_AUDIT.md" ] || compgen -G "$DIR/DESIGN_AUDIT[0-9]*.md" >/dev/null 2>&1; } \
+    || die "design-stage dir has DESIGN.md but no design-audit output (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md) — surface for human"
   secret_scan
-  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT*.md) and secret scan clean; pre-launch leg of the two-PR flow."
+  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md) and secret scan clean; pre-launch leg of the two-PR flow."
   note "design-stage gate ok: design-audit present and secret scan clean"
 }
 case "$KIND" in
