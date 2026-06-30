@@ -2149,8 +2149,7 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
   ;;
 
 classify)       # RETIRED (#248) — the mechanical/architectural classifier was removed; all changes use the same gate.
-  note "wf.sh classify is retired (#248): classification was removed. Just run: wf.sh finish <worktree> <author>."
-  exit 0
+  die "wf.sh classify is retired (#248): classification was removed. There is no classify step — just run: wf.sh finish <worktree> <author>."
   ;;
 
 finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code merge gate + ready + merge + cleanup
