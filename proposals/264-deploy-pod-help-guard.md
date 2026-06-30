@@ -8,7 +8,7 @@
 
 ## Approach
 
-Add a minimal argument guard at the very top of `__main__`, in the same lightweight style as the existing `_SELFTEST` check (no `argparse` rewrite, deploy logic untouched). Recognized argv is the closed set `{--selftest, --help, -h}`:
+Classify no-deploy argv **at module level** (alongside the existing `_SELFTEST` flag) and enforce it in `__main__`, in the same lightweight style as `_SELFTEST` (no `argparse` rewrite, deploy logic untouched). The classification (`_HELP`, `_BADARGS`, `_NO_DEPLOY`) sits *before* the module-level required-credential reads (`KEY`/`PUBLIC_KEY`), and those reads are relaxed to `required=not _NO_DEPLOY` — so `--help`/unknown-arg work on a fresh, **unconfigured** install instead of dying at import on missing creds (design-review F1). Recognized argv is the closed set `{--selftest, --help, -h}`:
 
 - `-h` / `--help` → print a concise usage string to **stdout** and exit `0`. The usage makes it unmistakable that a *bare* invocation DEPLOYS a disposable RunPod GPU pod, that the run is configured by env vars in `~/.config/gpu-job/env` (no positional args), and lists the only recognized flags.
 - any **unrecognized** arg (anything not in the closed set) → print usage to **stderr** and exit `2`, **without deploying**. This closes the typo-deploys hazard, not just `--help`.
@@ -25,10 +25,11 @@ The guard runs before the lease-mint/`deploy()` path, so no money-moving call ca
 
 ## Blast radius
 
-One file, `__main__` only (`plugins/gpu-job/skills/gpu-job/scripts/deploy_pod.py`); `deploy()`, lease, and enrich logic untouched. SWE-pipeline/product-scaffold change (the gpu-job skill), no instance-config change. The only behavior change is on argv that previously (wrongly) deployed. Verified by behavior smoke (run with no RunPod creds so a regression would visibly attempt the API):
-- `deploy_pod.py --help` → usage to stdout, exit 0, no deploy.
-- `deploy_pod.py --bogus` → usage to stderr, exit 2, no deploy.
-- `deploy_pod.py --selftest` → offline selftest, exit 0 (unchanged).
+`deploy_pod.py` (`__main__` + the module-level arg classification / cred-read relaxation; `deploy()`, lease, and enrich logic untouched) plus the required **`plugins/gpu-job/.claude-plugin/plugin.json` version bump** (0.2.1 → 0.2.2) for the behavior change (design-review F2). SWE-pipeline/product-scaffold change (the gpu-job skill), no instance-config change. The only behavior change is on argv that previously (wrongly) deployed. Verified by behavior smoke under a **blank HOME with no gpu-job config** (clean env, no RunPod creds — a regression would visibly attempt the API):
+- `deploy_pod.py --help` → usage to **stdout**, exit 0, no deploy. ✓
+- `deploy_pod.py --bogus` → usage to **stderr**, exit 2, no deploy. ✓
+- `deploy_pod.py --selftest` → offline selftest, exit 0 (unchanged). ✓
+- bare invocation (no args) → reaches the cred read (`missing RUNPOD_API_KEY`), i.e. still proceeds to deploy — the entrypoint is preserved (negative control). ✓
 
 ## Rollout + rollback
 

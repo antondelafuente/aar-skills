@@ -24,6 +24,26 @@ import json, os, sys, time, urllib.request, urllib.error
 CFG = os.path.expanduser("~/.config/gpu-job/env")
 _SELFTEST = "--selftest" in sys.argv  # offline unit check — must not require RunPod creds
 
+# The script is ENV-driven: a real deploy takes NO command-line args. Classify help/unknown-arg
+# invocations EARLY — before the required-cred reads below — so they neither require config nor reach
+# deploy(). A `--help` or a typo must never spend money (#264).
+_USAGE = """\
+deploy_pod.py — deploy a disposable RunPod GPU pod and wait for direct SSH.
+
+WARNING: a bare invocation (no args) DEPLOYS A REAL, BILLED GPU POD.
+
+Configured entirely by environment variables in ~/.config/gpu-job/env (API_KEY_ENV / RUNPOD_API_KEY,
+SSH_PUBLIC_KEY, GPU / region / retry settings, ...); it takes NO positional arguments.
+Recognized flags:
+  --help, -h   show this help and exit (no deploy)
+  --selftest   offline self-check, no RunPod creds required (no deploy)
+"""
+_ARGV = sys.argv[1:]
+_HELP = ("-h" in _ARGV) or ("--help" in _ARGV)
+# anything that is not a recognized flag -> refuse (fail-closed; kills the typo-deploys hazard)
+_BADARGS = [a for a in _ARGV if a not in ("--selftest", "--help", "-h")]
+_NO_DEPLOY = _SELFTEST or _HELP or bool(_BADARGS)  # none of these may require creds at import
+
 
 def env(key, default=None, required=False):
     v = os.environ.get(key)
@@ -46,8 +66,8 @@ def env(key, default=None, required=False):
 # silently override the config and deploy to the wrong account (real incident: a research pod
 # billed to a personal account, and teardown-by-the-other-key 404'd, masquerading as deleted).
 KEY_NAME = env("API_KEY_ENV", default="RUNPOD_API_KEY")
-KEY = env(KEY_NAME, required=not _SELFTEST)        # --selftest is offline: don't require creds to import
-PUBLIC_KEY = env("SSH_PUBLIC_KEY", required=not _SELFTEST)
+KEY = env(KEY_NAME, required=not _NO_DEPLOY)        # selftest/help/bad-arg are offline: don't require creds to import
+PUBLIC_KEY = env("SSH_PUBLIC_KEY", required=not _NO_DEPLOY)
 
 # Region coverage is derived LIVE from RunPod's `dataCenters(listed=true)` set (the pod-creatable
 # subset) — a hand-maintained list rots (it drifts out of date AND accretes now-unlisted ids that
@@ -320,6 +340,12 @@ def _selftest():
 if __name__ == "__main__":
     if _SELFTEST:
         _selftest(); raise SystemExit(0)
+    if _HELP:                       # --help/-h: print usage, never deploy
+        print(_USAGE); raise SystemExit(0)
+    if _BADARGS:                    # unrecognized arg: refuse, never deploy (fail-closed)
+        sys.stderr.write(f"deploy_pod.py: unrecognized argument(s): {' '.join(_BADARGS)}\n\n")
+        sys.stderr.write(_USAGE)
+        raise SystemExit(2)
     # INTENT (pre-deploy): mint the lease BEFORE deploy() so even a created-but-id-never-returned pod
     # is covered (the reaper matches it to the pending intent by nonce and reaps it on the intent
     # expiry). The intent records the KEY REFERENCE the reaper resolves on its own (the API_KEY_ENV var
