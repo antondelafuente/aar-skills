@@ -27,7 +27,7 @@ This **supersedes** the earlier #130/#150 "neutral shared GitHub-lifecycle helpe
 
 ## Gate detail (fail-closed)
 
-- **experiment:** BLOCK unless **both** `AUDIT.md` and `AUDIT_RESPONSE.md` are present with no unresolved-HIGH marker. This **verifies the close-audit ran and was triaged** (during `run-experiment`, with the human in the loop); it does not re-derive triage. Today that is presence + a backstop scan; a **machine-readable close-triage contract** (so the gate can *prove* rather than scan) is a deliberate future hardening, tracked separately. An eval-only / anchor-failed run that legitimately has no close-audit is allowed only if `RESULTS.md` records a closed decision (e.g. `ANCHOR_FAILED`, no-go) — otherwise BLOCK and surface.
+- **experiment:** BLOCK unless **both** `AUDIT.md` and `AUDIT_RESPONSE.md` are present. This **verifies the close-audit ran and was triaged** (during `run-experiment`, with the human in the loop); it does not re-derive triage and deliberately does **not** prose-grep `AUDIT_RESPONSE.md` for unresolved HIGHs — that heuristic is unreliable (negation/scope games). A **machine-readable close-triage status** (so the gate can *prove* rather than scan) is a deliberate future hardening, tracked separately. An eval-only / anchor-failed run that legitimately has no close-audit is allowed only if `RESULTS.md` records a closed decision **at line start** (e.g. `Decision: ANCHOR_FAILED`, no-go) — otherwise BLOCK and surface.
 - **note:** BLOCK on any secret-value pattern hit (`ghp_…`, `github_pat_…`, `sk-…`, `AKIA…`, PEM private keys).
 - Any parse failure / missing record → BLOCK (never a silent pass).
 

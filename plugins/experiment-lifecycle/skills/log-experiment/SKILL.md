@@ -48,10 +48,11 @@ A `KIND` file in the dir (containing `experiment` or `note`) is honored as an ex
 
 - **Experiment.** The close-audit already ran during `run-experiment`; this **verifies it was triaged**, it
   does not re-run or re-derive the science. BLOCK unless **both** `AUDIT.md` and `AUDIT_RESPONSE.md` are
-  present with no unresolved-HIGH marker. (A machine-readable close-triage contract is a future hardening;
-  today the gate confirms the audit ran + was triaged, with a backstop scan.) An eval-only / anchor-failed
-  run with no close-audit is allowed **only** if `RESULTS.md` records a closed decision (e.g. `ANCHOR_FAILED`,
-  no-go); otherwise it BLOCKS and you surface it to the researcher.
+  present (the audit ran and every finding was responded to). It deliberately does *not* prose-grep for
+  unresolved HIGHs — that's unreliable; a machine-readable close-triage status the gate could *prove* is a
+  documented future hardening. An eval-only / anchor-failed run with no close-audit is allowed **only** if
+  `RESULTS.md` records a closed decision *at line start* (e.g. `Decision: ANCHOR_FAILED`, no-go); otherwise it
+  BLOCKS and you surface it to the researcher.
 - **Note.** A note has nothing to adversarially audit, so there is **no LLM review** — only a deterministic
   scan for secret-value patterns (`ghp_…`, `github_pat_…`, `sk-…`, `AKIA…`, PEM private keys). A hit BLOCKS.
 

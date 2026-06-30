@@ -59,12 +59,11 @@ gate_experiment() {
     # This VERIFIES the audit ran and was triaged; it does not re-derive triage (a machine-readable
     # close-triage contract is a future hardening — see proposal #240 "Gate detail").
     [ -f "$DIR/AUDIT_RESPONSE.md" ] || die "experiment has AUDIT.md but no AUDIT_RESPONSE.md (close-audit not triaged) — surface for human"
-    # Backstop: block only if an unresolved/open HIGH is ASSERTED and not negated ("no unresolved HIGH").
-    if grep -qiE '\b(unresolved|open|outstanding)\b[^.]{0,24}\bHIGH\b' "$DIR/AUDIT_RESPONSE.md" \
-       && ! grep -qiE '\bno\b[^.]{0,24}\b(unresolved|open|outstanding)\b[^.]{0,24}\bHIGH\b' "$DIR/AUDIT_RESPONSE.md"; then
-      die "experiment AUDIT_RESPONSE.md appears to flag an unresolved HIGH — surface for human"
-    fi
-    APPROVAL_BODY="Experiment record — close-audit ran and was triaged (AUDIT.md + AUDIT_RESPONSE.md present, no unresolved-HIGH marker). Verified per registry convention."
+    # The gate VERIFIES the close-audit ran and was triaged (both artifacts present). It deliberately does
+    # NOT prose-grep AUDIT_RESPONSE.md for unresolved HIGHs — that heuristic is unreliable (negation/scope
+    # games) and not a real proof. Per-finding HIGH-resolution verification needs a machine-readable triage
+    # status (a documented future hardening); the actual triage is done with discipline in run-experiment's close.
+    APPROVAL_BODY="Experiment record — close-audit ran and was triaged (AUDIT.md + AUDIT_RESPONSE.md present). Verified per registry convention."
     note "experiment gate ok: close-audit present and triaged"
   else
     if grep -qiE '^[^A-Za-z0-9]*((decision|status|outcome|result)[^A-Za-z0-9]+)?(ANCHOR_FAILED|NO[ _-]?GO|GATE[ _]PASS=FALSE|GATE[ _]FAILED?|NULL RESULT|DIAGNOSTIC ONLY|STOPPED AT [A-Za-z0-9 _-]*GATE)' "$DIR/RESULTS.md"; then
@@ -76,9 +75,12 @@ gate_experiment() {
   fi
 }
 gate_note() {
-  local hits
-  # -l: report only the FILES that match, never the matched secret text (no value leak into logs)
-  hits="$(grep -rlaIE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)' "$DIR" 2>/dev/null || true)"
+  local hits rc
+  # -l: report only matching FILES, never the matched secret text. Capture grep's status: 0=match, 1=clean,
+  # >1=error (unreadable file/traversal) -> fail closed (an incomplete scan must not read as clean).
+  # The `if` keeps `set -e` from exiting on grep's normal exit 1.
+  if hits="$(grep -rlaIE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)' "$DIR" 2>/dev/null)"; then rc=0; else rc=$?; fi
+  [ "$rc" -le 1 ] || die "secret scan failed (grep exit $rc) — scan incomplete, refusing to log"
   [ -z "$hits" ] || { echo "secret-value pattern found in (values redacted):" >&2; echo "$hits" >&2; die "note contains secret-value patterns"; }
   APPROVAL_BODY="Record — deterministic secret scan clean; no experiment, so no audit."
   note "note gate ok: secret scan clean"
