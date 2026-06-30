@@ -69,12 +69,9 @@ never printed.
 
 ## Config (instance, env-overridable — never hardcode an instance; fails closed if unset)
 
-- `RESEARCH_REPO` — the research repo (`owner/repo`). **Required — no default target.**
-- `LOG_EXPERIMENT_AUTHOR_FAMILY` — `claude`|`codex` (default `claude`). The reviewer is the **opposite** family.
-- `LOG_EXPERIMENT_REVIEWER_TOKEN_CMD` — *optional* override: a command printing a repo-scoped bot token
-  (receives `<owner/repo>`). By default the opposite-family token command is derived from the instance
-  engineer seam (`WF_ENGINEER_TOKEN_CMD_<family>`), so no new config is required on a box that already runs
-  ship-change.
+- `RESEARCH_REPO` — the research repo (`owner/repo`). **Required — no default**; the input dir's `origin` must match it.
+- `LOG_EXPERIMENT_AUTHOR_FAMILY` — `claude`|`codex`. Defaults to `$AAR_SUBSTRATE`; **fails closed if neither is set** (a wrong default must not make the review same-family). The reviewer is the **opposite** family.
+- `LOG_EXPERIMENT_TOKEN_CMD_CLAUDE` / `LOG_EXPERIMENT_TOKEN_CMD_CODEX` — each a command taking `<owner/repo>` that mints that family's engineer-bot token. The **reviewer's** family's command is used; **fail closed if unset**. (A single `LOG_EXPERIMENT_REVIEWER_TOKEN_CMD` override is also honored.)
 
 ## Composes
 

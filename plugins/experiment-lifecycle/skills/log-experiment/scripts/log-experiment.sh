@@ -9,15 +9,18 @@
 # (the author cannot approve their own PR). Self-contained: this does NOT source wf.sh.
 #
 # Config (instance, env-overridable; NO instance defaults — fail closed):
-#   RESEARCH_REPO                       the research repo (owner/repo). REQUIRED.
-#   LOG_EXPERIMENT_AUTHOR_FAMILY        claude|codex (default claude); the reviewer is the OPPOSITE family
-#   LOG_EXPERIMENT_REVIEWER_TOKEN_CMD   optional: cmd printing a repo-scoped bot token; receives <owner/repo>.
-#                                       Default: derived from the instance seam WF_ENGINEER_TOKEN_CMD_<REVIEWER_FAMILY>.
+#   RESEARCH_REPO                    the research repo (owner/repo). REQUIRED; the input dir's origin must match it.
+#   LOG_EXPERIMENT_AUTHOR_FAMILY     claude|codex. Defaults to $AAR_SUBSTRATE; fail-closed if neither is set
+#                                    (a wrong default must not make the review same-family). Reviewer = OPPOSITE family.
+#   LOG_EXPERIMENT_TOKEN_CMD_CLAUDE  command taking <owner/repo> that mints a claude-engineer token.
+#   LOG_EXPERIMENT_TOKEN_CMD_CODEX   command taking <owner/repo> that mints a codex-engineer token.
+#                                    The REVIEWER family's command is used; fail-closed if unset.
+#                                    (A single LOG_EXPERIMENT_REVIEWER_TOKEN_CMD override is also honored.)
 set -euo pipefail
 
 # Config (instance, env-overridable). RESEARCH_REPO has NO default — fail closed if unset.
 RESEARCH_REPO="${RESEARCH_REPO:-}"
-AUTHOR_FAMILY="${LOG_EXPERIMENT_AUTHOR_FAMILY:-claude}"   # family of the runner; the reviewer is the OPPOSITE family
+AUTHOR_FAMILY="${LOG_EXPERIMENT_AUTHOR_FAMILY:-${AAR_SUBSTRATE:-}}"   # the running family (NO default — fail closed if unknown); reviewer is the OPPOSITE family
 
 die()  { echo "BLOCK: $*" >&2; exit 1; }
 note() { echo "[log-experiment] $*" >&2; }
@@ -33,6 +36,7 @@ for a in "$@"; do
 done
 [ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run]"
 [ -d "$DIR" ] || die "not a directory: $DIR"
+DIR="$(cd "$DIR" && pwd)"   # absolute — stable across the later cd into the repo root
 
 REPO_ROOT="$(cd "$DIR" && git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repo: $DIR"
 REL="$(cd "$REPO_ROOT" && realpath --relative-to="$REPO_ROOT" "$DIR")"
@@ -90,16 +94,21 @@ if [ "$DRY_RUN" = 1 ]; then note "--dry-run: classified=$KIND, gate PASSED; stop
 case "$AUTHOR_FAMILY" in
   claude) REVIEWER_FAMILY=CODEX  ;;
   codex)  REVIEWER_FAMILY=CLAUDE ;;
-  *) die "LOG_EXPERIMENT_AUTHOR_FAMILY must be claude|codex (got '$AUTHOR_FAMILY')" ;;
+  *) die "LOG_EXPERIMENT_AUTHOR_FAMILY (or AAR_SUBSTRATE) must be claude|codex (got '$AUTHOR_FAMILY') — fail closed to keep the review cross-family" ;;
 esac
-# Reviewer = OPPOSITE family (independence). Mint cmd: explicit override, else derive from the instance
-# engineer seam (strip the repo arg baked into WF_ENGINEER_TOKEN_CMD_*) and call with RESEARCH_REPO.
-# No hardcoded instance path; fail closed if it can't resolve. (Author push/PR/merge use ambient gh —
-# the researcher logging to their own lab is the legitimate author; the cross-family bot is the reviewer.)
-eng_var="WF_ENGINEER_TOKEN_CMD_${REVIEWER_FAMILY}"
-REVIEWER_MINT="${LOG_EXPERIMENT_REVIEWER_TOKEN_CMD:-}"
-[ -z "$REVIEWER_MINT" ] && [ -n "${!eng_var:-}" ] && REVIEWER_MINT="${!eng_var% *}"
-[ -n "$REVIEWER_MINT" ] || die "no opposite-family (${REVIEWER_FAMILY,,}) reviewer token command — set LOG_EXPERIMENT_REVIEWER_TOKEN_CMD or $eng_var"
+# F2: the input dir's repo must BE the research repo — never push/leak the record to the wrong origin.
+origin_url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+case "$origin_url" in
+  *"$RESEARCH_REPO".git|*"$RESEARCH_REPO") : ;;
+  *) die "input dir's origin '$origin_url' is not RESEARCH_REPO '$RESEARCH_REPO'" ;;
+esac
+# Reviewer = OPPOSITE family (independence). Token command is EXPLICIT instance config (family-keyed):
+# a command taking <owner/repo> that mints a ${REVIEWER_FAMILY,,}-engineer token. No derivation from other
+# seams; fail closed if unset. (Author push/PR/merge use ambient gh — the researcher logging to their own
+# lab is the legitimate author; the cross-family bot is the independent reviewer.)
+mint_var="LOG_EXPERIMENT_TOKEN_CMD_${REVIEWER_FAMILY}"
+REVIEWER_MINT="${LOG_EXPERIMENT_REVIEWER_TOKEN_CMD:-${!mint_var:-}}"
+[ -n "$REVIEWER_MINT" ] || die "no reviewer token command — set $mint_var (or LOG_EXPERIMENT_REVIEWER_TOKEN_CMD), a command taking <owner/repo> minting a ${REVIEWER_FAMILY,,}-engineer token"
 TOK="$($REVIEWER_MINT "$RESEARCH_REPO" 2>/dev/null || true)"
 [ -n "$TOK" ] || die "could not mint ${REVIEWER_FAMILY,,}-engineer reviewer token for $RESEARCH_REPO"
 # Validate repo access BEFORE any mutation (a token that can't reach the repo would strand a half-open PR).
@@ -140,4 +149,7 @@ if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
 else
   note "checkout is on $(git rev-parse --abbrev-ref HEAD), not main; skipping local sync"
 fi
+# F6: drop the temp worktree, then delete its now-merged local branch (the EXIT trap is the error-path fallback).
+git worktree remove --force "$WT" >/dev/null 2>&1 || true
+git branch -D "$BRANCH" >/dev/null 2>&1 || true
 echo "OK: logged $KIND '$REL' as PR #$PR (merged)."

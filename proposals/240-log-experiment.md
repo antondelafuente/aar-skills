@@ -23,7 +23,7 @@ This **supersedes** the earlier #130/#150 "neutral shared GitHub-lifecycle helpe
 
 ## Interface
 
-`log-experiment.sh <registry-dir> [--dry-run]` — classify → gate → branch → PR → approve (opposite-family bot) → merge → sync. Config via env (instance, **fail-closed — no instance defaults**): `RESEARCH_REPO` is **required**; `LOG_EXPERIMENT_AUTHOR_FAMILY` (`claude`|`codex`, default `claude`) selects the **opposite-family** reviewer, whose token command is derived from the instance engineer seam (`WF_ENGINEER_TOKEN_CMD_<family>`) or an explicit `LOG_EXPERIMENT_REVIEWER_TOKEN_CMD` override. Author push/PR/merge use ambient `gh` — the researcher logging to their own lab is the legitimate author; the cross-family bot is the independent reviewer. `--dry-run` classifies + gates and stops before any push.
+`log-experiment.sh <registry-dir> [--dry-run]` — classify → gate → branch → PR → approve (opposite-family bot) → merge → sync. Config via env (instance, **fail-closed — no instance defaults**): `RESEARCH_REPO` is **required** (and the input dir's `origin` must match it); `LOG_EXPERIMENT_AUTHOR_FAMILY` (defaults to `$AAR_SUBSTRATE`, fail-closed if unknown) selects the **opposite-family** reviewer; the reviewer token comes from the family-keyed `LOG_EXPERIMENT_TOKEN_CMD_<family>` (fail-closed if unset). Author push/PR/merge use ambient `gh` — the researcher logging to their own lab is the legitimate author; the cross-family bot is the independent reviewer. `--dry-run` classifies + gates and stops before any push.
 
 ## Gate detail (fail-closed)
 
@@ -39,7 +39,7 @@ This **supersedes** the earlier #130/#150 "neutral shared GitHub-lifecycle helpe
 
 ## Blast radius
 
-New skill + script only; no change to existing skills. Operates on the research repo (research-lab), not on automated-researcher itself. Reversible (revert the PR; the tool only adds a skill). Main risk: misclassification — mitigated by the explicit `KIND:` override and fail-closed gates.
+New skill + script, plus a one-line handoff added to `run-experiment`'s close (it now lands the record via `log-experiment` after the audit, instead of a raw push). Operates on the research repo (research-lab), not on automated-researcher itself. Reversible (revert the PR). Main risk: misclassification — mitigated by the explicit `KIND:` override and fail-closed gates. Known deferred integration: the direct `gh` writes are not yet composed with a repo's *optional* `gh` write-guard wrapper; on the current instance (no such wrapper) they work as-is, and a guard would be a follow-up.
 
 ## Rollout + rollback
 
