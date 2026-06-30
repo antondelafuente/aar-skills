@@ -29,8 +29,9 @@ Your human wants these skills available. Do this, in order:
      Then tell your human to run `/reload-plugins` (or restart the session) to activate.
      (`experiment-lifecycle` also needs an **execution profile** — your instance's provisioning,
      frozen recipes, artifact store, ledger, and teardown/cost policy — before `run-experiment`
-     can drive a real run; the installed skill alone is not enough. `aar-engineering` is the
-     build-the-product layer — install it only if you're developing these skills, not just using them.)
+     can drive a real run; the installed skill alone is not enough. The build-the-product layer —
+     `ship-change` (the `aar-engineering` plugin) — lives in the separate `agentic-engineering` repo;
+     install it from there only if you're developing these skills, not just using them.)
    - *Codex CLI / other Agent-Skills harnesses* — symlink each source skill dir into the harness's
      skills directory (note a plugin can expose more than one skill — `experiment-lifecycle` has two):
      ```
@@ -42,12 +43,13 @@ Your human wants these skills available. Do this, in order:
      ln -s ~/automated-researcher/plugins/feedback-loop/skills/file-feedback        ~/.codex/skills/file-feedback
      ln -s ~/automated-researcher/plugins/feedback-loop/skills/triage-feedback      ~/.codex/skills/triage-feedback
      ```
-     If you are developing the scaffold itself, also install the build-the-product skill:
+     If you are developing the scaffold itself, install `ship-change` from the `agentic-engineering` repo
+     (the engineering team's tooling — it owns the SWE pipeline that builds this product):
      ```
-     ln -s ~/automated-researcher/plugins/aar-engineering/skills/ship-change         ~/.codex/skills/ship-change
+     ln -s ~/agentic-engineering/plugins/aar-engineering/skills/ship-change          ~/.codex/skills/ship-change
      ```
      `ship-change` in an enforced repo also needs engineer identity config and a cross-family reviewer command
-     (for Codex authors, `AUDIT_VERIFIER_CMD` should point at a Claude-family CLI); see its `RUNBOOK.md`.
+     (for Codex authors, `AUDIT_VERIFIER_CMD` should point at a Claude-family CLI); see its `RUNBOOK.md` in that repo.
      Local harness wrappers are optional convenience files. Keep them thin: point at these source skills instead of
      copying the procedures.
 3. **Configure gpu-job:** run `~/automated-researcher/plugins/gpu-job/skills/gpu-job/scripts/gpu_job_init.sh`.
@@ -82,15 +84,18 @@ Your human wants these skills available. Do this, in order:
 | **verify-claims** | adversarial fact / design / data / code review of load-bearing work, read by an independent model *family* — the cross-family validity gate | shipped |
 | **experiment-lifecycle** | run a GPU experiment like a researcher: `design-experiment` (pre-register a design, clear it with the human through the validity gates) → `run-experiment` (a zero-context executor acquires, provisions, drives, collects, closes) | shipped |
 | **feedback-loop** | report and triage scaffold friction: `file-feedback` captures product/user pain while fresh, `triage-feedback` maintains dispositions and routes fixes through the product workflow | shipped |
-| **aar-engineering** | the SWE pipeline that builds the product itself: ship a scaffold change through a GitHub-backed lifecycle — design doc → cross-family review → checks → merge-when-clean | shipped |
 | *reproduce-paper* | point an agent at a paper, get a graded reproduction | planned |
+
+(The SWE pipeline that *builds* this product — `ship-change` / the `aar-engineering` plugin — lives in the
+separate `agentic-engineering` repo, not here.)
 
 (Exact versions live in each `plugins/<module>/.claude-plugin/plugin.json` — the one canonical home — not duplicated here.)
 
-**Two layers.** The shipped research/feedback modules are what an agent *uses* while doing research. **aar-engineering** is
-different: it's the SWE pipeline that *builds* this product — agents author changes, review each other's
-PRs across model families (Claude's work reviewed by Codex and vice-versa), and merge when clean. The
-product is built the way it ships: by agents, gated by agents. (Detail: `AGENTS.md`.)
+**The product vs the pipeline that builds it.** The modules above are what an agent *uses* while doing
+research. The SWE pipeline that *builds* this product — `ship-change` (the `aar-engineering` plugin) — lives in
+the separate **`agentic-engineering`** repo: agents author changes, review each other's PRs across model
+families (Claude's work reviewed by Codex and vice-versa), and merge when clean. The product is built the way it
+ships: by agents, gated by agents. (Detail: `AGENTS.md`.)
 
 ## Install (human, interactive)
 
@@ -106,7 +111,7 @@ If *you* are setting these up by hand in the Claude Code UI (the agent path is t
 
 **Codex CLI / other Agent-Skills harnesses:** clone, then symlink each source skill dir into your harness's
 skills directory (e.g. `~/.codex/skills/`) — use the explicit per-skill `ln -s` lines in "If you are a
-coding agent" above. Install `ship-change` only if you are developing the scaffold itself. A plugin can expose
+coding agent" above. Install `ship-change` (from the separate `agentic-engineering` repo) only if you are developing the scaffold itself. A plugin can expose
 more than one skill, so symlink the `skills/<skill>` dirs, not `skills/<module>`. Scripts are referenced
 relative to each skill.
 
