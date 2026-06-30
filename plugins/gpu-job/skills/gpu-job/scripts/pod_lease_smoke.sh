@@ -144,7 +144,7 @@ run provisional "$P" pod-bound >/dev/null
 
 # --- find-nonce with POD_NAME_PREFIX: the pod is named <prefix><nonce>; the intent records that EXACT
 #     expected_name and find-nonce exact-matches it — a prefixed pod still reaps, with NO substring authority ---
-PX=$(POD_NAME_PREFIX=anton- run intent RUNPOD_API_KEY)
+PX=$(run intent RUNPOD_API_KEY --name-prefix anton-)
 [ "$(run find-nonce "anton-$PX")" = "$PX" ] && ok findnonce-prefixed-exact      || no findnonce-prefixed-exact
 [ -z "$(run find-nonce "$PX")" ]            && ok findnonce-prefixed-bare-empty || no findnonce-prefixed-bare-empty
 [ -z "$(run find-nonce "evil-anton-$PX")" ] && ok findnonce-prefixed-no-substr  || no findnonce-prefixed-no-substr

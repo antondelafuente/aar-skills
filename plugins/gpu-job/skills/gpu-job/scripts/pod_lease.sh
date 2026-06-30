@@ -216,10 +216,11 @@ require_val(){ [ -n "${2:-}" ] || die "$1 requires a non-empty value (got empty/
 cmd_intent(){
   local key_ref=$1; shift
   require_val "<key-ref>" "$key_ref"
-  local expiry_min=15
+  local expiry_min=15 name_prefix=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --expiry-min) require_val --expiry-min "${2:-}"; expiry_min=$2; shift 2;;
+      --expiry-min)  require_val --expiry-min "${2:-}"; expiry_min=$2; shift 2;;
+      --name-prefix) name_prefix="${2:-}"; shift 2;;   # EXACT prefix deploy_pod resolved (may be empty)
       *) die "intent: unknown arg '$1'";;
     esac
   done
@@ -228,10 +229,10 @@ cmd_intent(){
   local file; file=$(record_path "$nonce")
   # nonce is fresh 128-bit entropy: an existing file would be a catastrophic RNG failure — fail closed.
   [ -e "$file" ] && die "intent: nonce collision on $nonce (refusing to overwrite)"
-  # The pod will be named POD_NAME_PREFIX+nonce (deploy_pod prepends the prefix, with the same env this
-  # subprocess inherits). Record that EXACT expected name so the reaper's find-nonce can exact-match a
-  # prefixed pod without re-deriving the prefix at reap time.
-  NONCE="$nonce" KEY_REF="$key_ref" EXPIRY_MIN="$expiry_min" EXPECTED_NAME="${POD_NAME_PREFIX:-}${nonce}" CREATE=true write_record "$file"
+  # The pod will be named <name_prefix><nonce>; deploy_pod passes the EXACT prefix it resolved (from its
+  # config file + env), so the recorded expected name always matches the actual pod name — independent of
+  # whether the prefix is in this subprocess's environment. find-nonce exact-matches it.
+  NONCE="$nonce" KEY_REF="$key_ref" EXPIRY_MIN="$expiry_min" EXPECTED_NAME="${name_prefix}${nonce}" CREATE=true write_record "$file"
   echo "$nonce"
 }
 

@@ -198,9 +198,9 @@ def pod_env():
 def deploy(nonce=None):
     # When leasing is on, the pod NAME is the lease nonce (gpujob-<hex>) so the reaper can match an
     # otherwise-unknown pod to its pending intent. POD_NAME is honored only when leasing is disabled.
-    # POD_NAME_PREFIX (e.g. "anton-" on a shared account) is prepended for dashboard visibility. The intent
-    # lease records this EXACT expected name (prefix+nonce; cmd_intent inherits the same env), so the reaper's
-    # find-nonce exact-matches a prefixed pod — deletion authority stays exact-whole-string only.
+    # POD_NAME_PREFIX (e.g. "anton-" on a shared account) is prepended for dashboard visibility. The same
+    # resolved prefix is passed explicitly to the intent (--name-prefix), which records the EXACT expected
+    # name (prefix+nonce); the reaper's find-nonce exact-matches it — deletion authority stays exact-whole-string.
     pod_name = env("POD_NAME_PREFIX", "") + (nonce if (nonce and _LEASE_ON) else env("POD_NAME", "gpu-job"))
     base = {"computeType": "GPU",
             "gpuCount": int(env("GPU_COUNT", "1")),
@@ -328,7 +328,11 @@ if __name__ == "__main__":
     # be reaped before enrich extends it (code-review Finding 1). enrich resets it to the run's real
     # expiry once SSH is up.
     intent_min = int(env("RETRY_MINUTES", "0")) + 20
-    nonce = lease("intent", KEY_NAME, "--expiry-min", str(intent_min)) if _LEASE_ON else None
+    # Pass the EXACT prefix deploy resolved (from the config file + env) into the intent, so the recorded
+    # expected_name always matches the pod name even when POD_NAME_PREFIX lives only in ~/.config/gpu-job/env
+    # and is not in this process's exported environment for the subprocess to inherit.
+    nonce = lease("intent", KEY_NAME, "--expiry-min", str(intent_min),
+                  "--name-prefix", env("POD_NAME_PREFIX", "")) if _LEASE_ON else None
     if nonce:
         print(f"[lease] intent {nonce} (key_ref={KEY_NAME}, expiry +{intent_min}min covers the acquire window)", flush=True)
     pid = deploy(nonce)
