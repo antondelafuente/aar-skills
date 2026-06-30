@@ -47,6 +47,14 @@ The two edits are **coupled and ship atomically** (see "Coupling"). Across three
   reliable, comparable data this produces, and what it's designed to inform)."** Update the frontmatter description and the
   `CHECKLIST` gate that currently reads "judged against the pre-registered DESIGN rules."
 
+**Edit 1b — executor-facing contracts (added per design-review F1, HIGH).** The design→execute seam carries the same
+decision-rule language; leaving it would hand a zero-context executor instructions that contradict a data-only DESIGN.
+So the atomic set also reshapes: `run-experiment/SKILL.md` (its "judge results against the pre-registered decision rules"
+close guidance → "describe the data per the DESIGN spec; if a RESULTS asserts a verdict, don't move goalposts / separate
+postdictions"), `START_TEMPLATE.md` (the executor disposition line), and the `experiment-lifecycle` `plugin.json` +
+`marketplace.json` descriptions ("pre-registration" / "RESULTS vs pre-registered rules" → data-collection-spec framing).
+This is exactly the "scan for decision-rule-shaped gates" the issue asked for, in the files the issue didn't enumerate.
+
 **Edit 2 — `audit_experiment.sh` `--design` prompt (surgical).**
 - Make the **claim-dimensions CONDITIONAL**: "pre-registration completeness," "decision-rule soundness," "claim-scope,"
   "power" fire **only if the design actually asserts a rigorous interpretation/claim/verdict.** A measurement design that
@@ -57,6 +65,15 @@ The two edits are **coupled and ship atomically** (see "Coupling"). Across three
 - Emit a **qualitative "evidence-quality" read** ("this will produce a clean comparable number" / "this confound will muddy
   it" / "cheaper way to get the same data") — the good/bad signal the researcher *does* want — without forcing pass/fail on
   interpretation.
+
+**Edit 2b — `audit_experiment.sh` CLOSE prompt (added per design-review F2, MED — symmetric, minimal).** The close audit
+reads `RESULTS.md`; Edit 1 redefines RESULTS as data-description (+ optional lightweight read, no verdict), so the close
+prompt's "conclusions (pre-registered) must be separated from postdictions" and "CONCLUSIONS vs POSTDICTIONS" dimension are
+made **conditional the same way**: a data-only RESULTS that reports numbers without a verdict is valid and must NOT be
+flagged "missing conclusion"; if RESULTS *does* assert a verdict, the overclaim / postdiction-separation backstop still
+fires. (Scope note: Anton's "does not touch `verify_claim`" referred to the facts-checker; this is the close
+`audit_experiment`. Surfaced for his review as a coherence-driven addition — without it the same spurious-claim pressure
+recurs at close, defeating the change's purpose.)
 
 ## Coupling (why atomic)
 
@@ -84,11 +101,13 @@ that *does* assert a verdict still gets the full claim-audit — nothing is lost
 
 ## Blast radius
 
-Two plugins: `experiment-lifecycle` (`design-experiment/SKILL.md`, `templates/CHECKLIST_TEMPLATE.md`) and `verify-claims`
-(`audit_experiment.sh` `--design` prompt). Both get a `plugin.json` version bump. No code-path/interface change — prompt +
-guidance text only; the `--design` invocation, output format, and gate wiring are unchanged. Affects how *future* designs
-are written and audited; in-flight experiments are unaffected. Reversible (revert the PR). Does not touch `--data`,
-`--scaffold`, `--code`, or `verify_claim`.
+Two plugins, version-bumped both. `experiment-lifecycle`: `design-experiment/SKILL.md`,
+`templates/CHECKLIST_TEMPLATE.md`, `templates/START_TEMPLATE.md`, `run-experiment/SKILL.md`, `.claude-plugin/plugin.json`
+description, and the repo `marketplace.json` description. `verify-claims`: `audit_experiment.sh` (`--design` **and** close
+prompts). No code-path/interface change — prompt + guidance text only; invocations, output formats, and gate wiring are
+unchanged. Affects how *future* designs are written, executed-against, and audited (design + close); in-flight experiments
+are unaffected. Reversible (revert the PR). Does not touch `--data`, `--scaffold`, `--code`, or `verify_claim` (the
+facts-checker).
 
 ## Rollout + rollback
 

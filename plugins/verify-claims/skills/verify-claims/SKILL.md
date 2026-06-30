@@ -16,7 +16,7 @@ zero-context instance still gives you context independence either way.
 - Before spending money or drawing conclusions that depend on factual claims about artifacts:
   identity of a baseline, location of original results, existence/provenance of a checkpoint,
   lineage of a derived model.
-- On pre-registration documents and their amendments.
+- On design documents (`DESIGN.md`) and their amendments.
 - On your own draft writeups: do the methods-section claims survive contact with the records?
   (Every UNKNOWN = a detail your readers won't be able to verify either.)
 
@@ -49,10 +49,13 @@ audits the experiment ITSELF at three points. Together they form the **facts →
 evidence** ladder — each rung read by a foreign model family you're too invested to judge:
 
 - **`verify_claim.sh` — the brief's FACTS** (pre-launch; above).
-- **`audit_experiment.sh --design <exp> [design-file]`** → `DESIGN_AUDIT.md` — the design's **LOGIC**,
-  PRE-LAUNCH: confounds, missing controls, comparability traps, pre-registration completeness,
-  claim-scope, power, cheaper-decisive alternatives. (Audit once → triage as a peer → surface
-  survivors to the human; on a re-run it's a peer debate, not a fresh scan.)
+- **`audit_experiment.sh --design <exp> [design-file]`** → `DESIGN_AUDIT.md` — the design's
+  **DATA-TRUSTABILITY**, PRE-LAUNCH: will it produce reliable, comparable data for its stated purpose?
+  comparability / co-measurement, confounds that corrupt the number, variable-pinning, anchor reproduction,
+  honest component / parse% reporting, right/cheapest-data — plus a qualitative evidence-quality read.
+  Claim-rigor (decision rules, claim-scope, power) fires **only if the design asserts a verdict** — a
+  measurement design states a purpose, not a claim. (Audit once → triage as a peer → surface survivors to the
+  human; on a re-run it's a peer debate, not a fresh scan.)
 - **`audit_experiment.sh --data <exp> <manifest>`** → `DATA_AUDIT.md` — the actual **DATA's sanity**
   vs the design intent, MID-RUN before train/eval. The SEMANTIC layer: a foreign model reads a
   STRATIFIED high-risk sample and asks "would this data make the experiment invalid or misleading?"
