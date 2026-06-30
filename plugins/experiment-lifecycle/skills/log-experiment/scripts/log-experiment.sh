@@ -105,10 +105,14 @@ gate_design_stage() {
   # but a KIND=design-stage file bypasses that): a design-stage record IS a pre-registration.
   [ -f "$DIR/DESIGN.md" ]  || die "design-stage dir missing DESIGN.md — a design-stage record is a pre-registration"
   [ -f "$DIR/RESULTS.md" ] && die "design-stage dir unexpectedly has RESULTS.md — should classify as experiment"
-  # Require a real design-audit OUTPUT (DESIGN_AUDIT.md or the numbered chain). A DESIGN_AUDIT_RESPONSE.md
-  # shares the DESIGN_AUDIT prefix but is NOT an audit — it must not satisfy the gate on its own.
-  { [ -f "$DIR/DESIGN_AUDIT.md" ] || compgen -G "$DIR/DESIGN_AUDIT[0-9]*.md" >/dev/null 2>&1; } \
-    || die "design-stage dir has DESIGN.md but no design-audit output (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md) — surface for human"
+  # Require a real design-audit OUTPUT — basename is EXACTLY DESIGN_AUDIT.md or DESIGN_AUDIT<digits>.md.
+  # A DESIGN_AUDIT_RESPONSE.md / DESIGN_AUDIT2_RESPONSE.md shares the prefix but is NOT an audit -> excluded.
+  _da=0
+  for _f in "$DIR"/DESIGN_AUDIT*.md; do
+    [ -f "$_f" ] || continue
+    if [[ "$(basename "$_f")" =~ ^DESIGN_AUDIT[0-9]*\.md$ ]]; then _da=1; break; fi
+  done
+  [ "$_da" = 1 ] || die "design-stage dir has DESIGN.md but no design-audit output (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md; a *_RESPONSE.md does not count) — surface for human"
   secret_scan
   APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md) and secret scan clean; pre-launch leg of the two-PR flow."
   note "design-stage gate ok: design-audit present and secret scan clean"
@@ -195,7 +199,10 @@ post_audit_thread(){
   local findings=() responses=() f body label
   case "$KIND" in
     experiment)   [ -f "$DIR/AUDIT.md" ] && findings=("$DIR/AUDIT.md"); responses=("$DIR/AUDIT_RESPONSE.md") ;;
-    design-stage) for f in "$DIR"/DESIGN_AUDIT.md "$DIR"/DESIGN_AUDIT[0-9]*.md; do [ -f "$f" ] && findings+=("$f"); done
+    design-stage) for f in "$DIR"/DESIGN_AUDIT*.md; do
+                    [ -f "$f" ] || continue
+                    if [[ "$(basename "$f")" =~ ^DESIGN_AUDIT[0-9]*\.md$ ]]; then findings+=("$f"); fi
+                  done
                   responses=("$DIR/DESIGN_AUDIT_RESPONSE.md") ;;
     *) return 0 ;;   # notes get no audit thread
   esac
