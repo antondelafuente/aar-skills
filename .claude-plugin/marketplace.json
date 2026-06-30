@@ -13,7 +13,7 @@
     {
       "name": "verify-claims",
       "source": "./plugins/verify-claims",
-      "description": "Verification gates that catch the confidently-wrong-number class before money or conclusions move: deterministic full-pool data audits plus adversarial fact/design/data/evidence checks read by an independent model family (read-only sandboxed). Also --scaffold: cross-family DESIGN REVIEW of product/scaffold change proposals before they land."
+      "description": "Verification gates that catch the confidently-wrong-number class before money or conclusions move: deterministic full-pool data audits plus adversarial fact/design/data/evidence checks read by an independent model family (read-only sandboxed)."
     },
     {
       "name": "experiment-lifecycle",

@@ -29,11 +29,13 @@ and can intervene — but is **not a per-PR gate**. This **mirrors the research 
 design *with the human* on what to build, execution *by the agents*. (The full engineer model + the
 merge-safety properties live with the pipeline in agentic-engineering.)
 
-**`verify-claims` is shared infrastructure used by both sides — and it stays in THIS repo.** Its cross-family
-review serves the **product** (`--design` / `--data` / close = experiment audits) AND the **SWE pipeline**
-(`--scaffold` design review + `--code` PR review). When agentic-engineering's `ship-change` reviews a change to
-this repo, it resolves the reviewer from THIS repo's own `verify-claims` (trusted-but-current, from the base
-ref) — so the modes must stay here. Same capability, used by both; neither substitutes for the other.
+**`verify-claims` in THIS repo is the product's experiment-audit engine** — `--design` / `--data` / close +
+`verify_claim` (the facts→logic→data→evidence ladder for experiments). The **SWE-review** halves (`--scaffold`
+design review + `--code` PR review) live with the engineering tooling in **agentic-engineering**: when its
+`ship-change` reviews a change to this repo, it resolves the SWE reviewer from **agentic-engineering's own**
+`verify-claims` (base-ref materialized, never the branch under review), judging against THIS repo's `AGENTS.md`.
+So the product carries only what experiments need, and the engineering team owns its own reviewer — one
+canonical home per side.
 
 **Two orthogonal cuts to keep straight:** *product vs instance* (this repo vs any consuming deployment that uses
 it) and *product vs SWE pipeline* (the shipped research plugins HERE vs the `aar-engineering` / `ship-change`
