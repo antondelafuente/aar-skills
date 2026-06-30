@@ -59,13 +59,15 @@ gate_experiment() {
     # This VERIFIES the audit ran and was triaged; it does not re-derive triage (a machine-readable
     # close-triage contract is a future hardening — see proposal #240 "Gate detail").
     [ -f "$DIR/AUDIT_RESPONSE.md" ] || die "experiment has AUDIT.md but no AUDIT_RESPONSE.md (close-audit not triaged) — surface for human"
-    if grep -qiE 'unresolved|OPEN HIGH|HIGH[^a-z]*(not addressed|outstanding|unresolved)' "$DIR/AUDIT_RESPONSE.md"; then
-      die "experiment AUDIT_RESPONSE.md flags an unresolved HIGH — surface for human"
+    # Backstop: block only if an unresolved/open HIGH is ASSERTED and not negated ("no unresolved HIGH").
+    if grep -qiE '\b(unresolved|open|outstanding)\b[^.]{0,24}\bHIGH\b' "$DIR/AUDIT_RESPONSE.md" \
+       && ! grep -qiE '\bno\b[^.]{0,24}\b(unresolved|open|outstanding)\b[^.]{0,24}\bHIGH\b' "$DIR/AUDIT_RESPONSE.md"; then
+      die "experiment AUDIT_RESPONSE.md appears to flag an unresolved HIGH — surface for human"
     fi
     APPROVAL_BODY="Experiment record — close-audit ran and was triaged (AUDIT.md + AUDIT_RESPONSE.md present, no unresolved-HIGH marker). Verified per registry convention."
     note "experiment gate ok: close-audit present and triaged"
   else
-    if grep -qiE 'ANCHOR_FAILED|NO-?GO|gate pass=false|gate=false|stopped at [a-z0-9 _-]*gate|null result|diagnostic only' "$DIR/RESULTS.md"; then
+    if grep -qiE '^[^A-Za-z0-9]*((decision|status|outcome|result)[^A-Za-z0-9]+)?(ANCHOR_FAILED|NO[ _-]?GO|GATE[ _]PASS=FALSE|GATE[ _]FAILED?|NULL RESULT|DIAGNOSTIC ONLY|STOPPED AT [A-Za-z0-9 _-]*GATE)' "$DIR/RESULTS.md"; then
       APPROVAL_BODY="Experiment record — eval-only/no-go run; no close-audit needed; RESULTS records a closed decision."
       note "experiment gate ok: no close-audit, RESULTS records a closed decision"
     else
@@ -98,9 +100,13 @@ case "$AUTHOR_FAMILY" in
 esac
 # F2: the input dir's repo must BE the research repo — never push/leak the record to the wrong origin.
 origin_url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
-# normalize git@github.com:owner/repo(.git) or https://github.com/owner/repo(.git) -> exact owner/repo
-origin_slug="$(printf '%s' "$origin_url" | sed -E 's#^.*[/:]([^/]+/[^/]+)$#\1#; s#\.git$##')"
-[ "$origin_slug" = "$RESEARCH_REPO" ] || die "input dir's origin ($origin_slug, from '$origin_url') is not RESEARCH_REPO ($RESEARCH_REPO)"
+# Require a github.com remote, then EXACT owner/repo. Never print the raw URL (it may carry a token).
+case "$origin_url" in
+  https://github.com/*|git@github.com:*|ssh://git@github.com/*) : ;;
+  *) die "input dir's origin is not a github.com remote — refusing to push" ;;
+esac
+origin_slug="$(printf '%s' "$origin_url" | sed -E 's#^.*github\.com[/:]##; s#\.git$##; s#/$##')"
+[ "$origin_slug" = "$RESEARCH_REPO" ] || die "input dir's origin ($origin_slug) is not RESEARCH_REPO ($RESEARCH_REPO)"
 # Reviewer = OPPOSITE family (independence). Token command is EXPLICIT instance config (family-keyed):
 # a command taking <owner/repo> that mints a ${REVIEWER_FAMILY,,}-engineer token. No derivation from other
 # seams; fail closed if unset. (Author push/PR/merge use ambient gh — the researcher logging to their own
@@ -119,9 +125,12 @@ cd "$REPO_ROOT"
 git fetch origin --quiet
 BRANCH="log/${SLUG}"
 WT="$(mktemp -d)/wt"
-cleanup() { git worktree remove --force "$WT" >/dev/null 2>&1 || true; git branch -D "$BRANCH" >/dev/null 2>&1 || true; }
+CREATED_BRANCH=0   # only delete the branch in cleanup if THIS run created it (never a pre-existing one)
+cleanup() { git worktree remove --force "$WT" >/dev/null 2>&1 || true; [ "$CREATED_BRANCH" = 1 ] && git branch -D "$BRANCH" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
-git worktree add -q -b "$BRANCH" "$WT" origin/main || die "could not create worktree/branch (does $BRANCH already exist?)"
+git show-ref --verify --quiet "refs/heads/$BRANCH" && die "local branch $BRANCH already exists (a prior run may have failed) — remove it and retry"
+git worktree add -q -b "$BRANCH" "$WT" origin/main || die "could not create worktree/branch $BRANCH"
+CREATED_BRANCH=1
 
 mkdir -p "$WT/$(dirname "$REL")"
 cp -r "$DIR" "$WT/$(dirname "$REL")/"
