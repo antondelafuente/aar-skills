@@ -142,6 +142,13 @@ rm -f "$TMP/gpujob-dupe.json"
 run provisional "$P" pod-bound >/dev/null
 [ -z "$(run find-nonce "$P")" ] && ok findnonce-skips-provisional || no findnonce-skips-provisional
 
+# --- find-nonce with POD_NAME_PREFIX: the pod is named <prefix><nonce>; the intent records that EXACT
+#     expected_name and find-nonce exact-matches it — a prefixed pod still reaps, with NO substring authority ---
+PX=$(run intent RUNPOD_API_KEY --name-prefix anton-)
+[ "$(run find-nonce "anton-$PX")" = "$PX" ] && ok findnonce-prefixed-exact      || no findnonce-prefixed-exact
+[ -z "$(run find-nonce "$PX")" ]            && ok findnonce-prefixed-bare-empty || no findnonce-prefixed-bare-empty
+[ -z "$(run find-nonce "evil-anton-$PX")" ] && ok findnonce-prefixed-no-substr  || no findnonce-prefixed-no-substr
+
 # --- find-by-pod: locate a non-terminal lease by its pod id (back-compat teardown, round-9 Finding 2) ---
 FBP=$(run intent RUNPOD_API_KEY --expiry-min 60); run provisional "$FBP" pod-fbp >/dev/null
 [ "$(run find-by-pod pod-fbp)" = "$FBP" ] && ok findbypod-active || no findbypod-active

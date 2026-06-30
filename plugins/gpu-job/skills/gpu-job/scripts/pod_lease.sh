@@ -142,6 +142,8 @@ now = int(time.time())
 if creating:
     rec = {
         "nonce": os.environ.get("NONCE", ""),
+        # the EXACT expected RunPod pod name (POD_NAME_PREFIX + nonce); find-nonce exact-matches this.
+        "expected_name": os.environ.get("EXPECTED_NAME") or os.environ.get("NONCE", ""),
         "pod_id": None,
         "key_ref": os.environ.get("KEY_REF", ""),
         "ssh": None,
@@ -214,10 +216,11 @@ require_val(){ [ -n "${2:-}" ] || die "$1 requires a non-empty value (got empty/
 cmd_intent(){
   local key_ref=$1; shift
   require_val "<key-ref>" "$key_ref"
-  local expiry_min=15
+  local expiry_min=15 name_prefix=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --expiry-min) require_val --expiry-min "${2:-}"; expiry_min=$2; shift 2;;
+      --expiry-min)  require_val --expiry-min "${2:-}"; expiry_min=$2; shift 2;;
+      --name-prefix) name_prefix="${2:-}"; shift 2;;   # EXACT prefix deploy_pod resolved (may be empty)
       *) die "intent: unknown arg '$1'";;
     esac
   done
@@ -226,7 +229,10 @@ cmd_intent(){
   local file; file=$(record_path "$nonce")
   # nonce is fresh 128-bit entropy: an existing file would be a catastrophic RNG failure — fail closed.
   [ -e "$file" ] && die "intent: nonce collision on $nonce (refusing to overwrite)"
-  NONCE="$nonce" KEY_REF="$key_ref" EXPIRY_MIN="$expiry_min" CREATE=true write_record "$file"
+  # The pod will be named <name_prefix><nonce>; deploy_pod passes the EXACT prefix it resolved (from its
+  # config file + env), so the recorded expected name always matches the actual pod name — independent of
+  # whether the prefix is in this subprocess's environment. find-nonce exact-matches it.
+  NONCE="$nonce" KEY_REF="$key_ref" EXPIRY_MIN="$expiry_min" EXPECTED_NAME="${name_prefix}${nonce}" CREATE=true write_record "$file"
   echo "$nonce"
 }
 
@@ -546,14 +552,18 @@ PY
 cmd_find_nonce(){
   local name=$1
   require_val "<name>" "$name"
-  case "$name" in gpujob-*) : ;; *) return 0;; esac   # not a nonce -> unknown
   [ -d "$ROOT" ] || return 0
   local f match="" count=0
   for f in "$ROOT"/*.json; do
     [ -e "$f" ] || continue
-    local n st pod
+    local n en st pod target
     n=$(get_field "$f" nonce)
-    [ "$n" = "$name" ] || continue
+    en=$(get_field "$f" expected_name)
+    # EXACT match the live pod NAME against the lease's recorded expected RunPod name (POD_NAME_PREFIX +
+    # nonce, recorded at intent). Legacy leases without expected_name fall back to the bare nonce. NEVER a
+    # substring/partial match — deletion authority stays exact-whole-string only (#169).
+    target="${en:-$n}"
+    [ -n "$target" ] && [ "$target" = "$name" ] || continue
     st=$(get_field "$f" state)
     pod=$(get_field "$f" pod_id)
     # pending intent ONLY: state=intent AND no pod bound

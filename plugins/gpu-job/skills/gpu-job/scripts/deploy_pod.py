@@ -3,7 +3,8 @@
 
 Config: ~/.config/gpu-job/env (KEY=VAL lines, written by gpu_job_init.sh); process env
 overrides. Required: RUNPOD_API_KEY (or API_KEY_ENV=<var name> to read another), SSH_PUBLIC_KEY. Knobs (env): GPU_TYPE (default
-"NVIDIA H200"), GPU_COUNT (1), DISK_GB (220), POD_NAME ("gpu-job"), IMAGE, TEMPLATE_ID,
+"NVIDIA H200"), GPU_COUNT (1), DISK_GB (220), POD_NAME ("gpu-job"), POD_NAME_PREFIX ("" —
+prepended to the pod name for shared-account dashboard visibility, e.g. "anton-"), IMAGE, TEMPLATE_ID,
 DATA_CENTERS (comma list, or "all" = every pod-creatable DC; overrides tiered retry), VOLUME_ID
 (network volume; requires DATA_CENTERS), RETRY_MINUTES (keep retrying ~3-min cycles until
 stock appears or the deadline passes — scarce multi-GPU stock can take an hour; default 0 =
@@ -197,7 +198,10 @@ def pod_env():
 def deploy(nonce=None):
     # When leasing is on, the pod NAME is the lease nonce (gpujob-<hex>) so the reaper can match an
     # otherwise-unknown pod to its pending intent. POD_NAME is honored only when leasing is disabled.
-    pod_name = nonce if (nonce and _LEASE_ON) else env("POD_NAME", "gpu-job")
+    # POD_NAME_PREFIX (e.g. "anton-" on a shared account) is prepended for dashboard visibility. The same
+    # resolved prefix is passed explicitly to the intent (--name-prefix), which records the EXACT expected
+    # name (prefix+nonce); the reaper's find-nonce exact-matches it — deletion authority stays exact-whole-string.
+    pod_name = env("POD_NAME_PREFIX", "") + (nonce if (nonce and _LEASE_ON) else env("POD_NAME", "gpu-job"))
     base = {"computeType": "GPU",
             "gpuCount": int(env("GPU_COUNT", "1")),
             "gpuTypeIds": [env("GPU_TYPE", "NVIDIA H200")],
@@ -324,7 +328,11 @@ if __name__ == "__main__":
     # be reaped before enrich extends it (code-review Finding 1). enrich resets it to the run's real
     # expiry once SSH is up.
     intent_min = int(env("RETRY_MINUTES", "0")) + 20
-    nonce = lease("intent", KEY_NAME, "--expiry-min", str(intent_min)) if _LEASE_ON else None
+    # Pass the EXACT prefix deploy resolved (from the config file + env) into the intent, so the recorded
+    # expected_name always matches the pod name even when POD_NAME_PREFIX lives only in ~/.config/gpu-job/env
+    # and is not in this process's exported environment for the subprocess to inherit.
+    nonce = lease("intent", KEY_NAME, "--expiry-min", str(intent_min),
+                  "--name-prefix", env("POD_NAME_PREFIX", "")) if _LEASE_ON else None
     if nonce:
         print(f"[lease] intent {nonce} (key_ref={KEY_NAME}, expiry +{intent_min}min covers the acquire window)", flush=True)
     pid = deploy(nonce)
