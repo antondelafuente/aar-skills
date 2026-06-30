@@ -26,4 +26,8 @@ One script (`log-experiment.sh`) + its config docs (SKILL.md, this proposal). No
 
 ## Rollout + rollback
 
-ship-change PR; then `log-experiment` writes go through the author bot identity. Set `LOG_EXPERIMENT_GIT_AUTHOR_CLAUDE/_CODEX` in the instance env. Rollback: revert the PR.
+ship-change PR; then `log-experiment` writes go through the author bot identity.
+
+**Per-instance preflight — a requirement for any consumer, not an assumption about this instance:** the consumer's engineer GitHub Apps must have `contents:write` + `pull_requests:write` on the research repo, and the instance must set **both** families' `LOG_EXPERIMENT_TOKEN_CMD_*` and `LOG_EXPERIMENT_GIT_AUTHOR_*`. The driver **fails closed** (before any mutation) if a token can't be minted, can't reach the repo, or an author identity is missing. (This instance already satisfies it — verified by a throwaway-ref write test.)
+
+Rollback: revert the PR → ambient writes.

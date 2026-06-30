@@ -151,8 +151,9 @@ cp -r "$DIR" "$WT/$(dirname "$REL")/"
 git -C "$WT" add -- "$REL"                          # respects the dir's .gitignore (large artifacts stay on R2)
 git -C "$WT" diff --cached --quiet && die "nothing to commit for $REL (all gitignored?)"
 git -C "$WT" -c user.name="$GA_NAME" -c user.email="$GA_EMAIL" commit -q -m "Log $KIND: $REL"
-# Push as the AUTHOR bot via a token-scoped remote (no ambient credential needed).
-git -C "$WT" push -q "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" "HEAD:refs/heads/$BRANCH"
+# Push as the AUTHOR bot via a token-scoped remote, with credential helpers DISABLED so no ambient
+# credential machinery can participate (matches the hardened push convention). URL not persisted as a remote.
+git -C "$WT" -c credential.helper= push -q "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" "HEAD:refs/heads/$BRANCH"
 HEAD_SHA="$(git -C "$WT" rev-parse HEAD)"   # bind the merge to exactly the reviewed commit
 
 # ---- PR -> bot approve -> merge ----
