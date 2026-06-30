@@ -221,14 +221,18 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Write `RESULTS.md` FIRST — the experiment-close gate (do NOT skip).** Bar: *a fresh agent could reproduce this run
   and know what you concluded **from this dir alone**.* **Judge each arm against the pre-registered decision rules in
   `DESIGN.md`**; separate conclusions from postdictions. One `RESULTS.md` at close for a multi-arm wave, not per-arm.
-- **Commit + push the record** (path-scoped if your tree is shared; `--rebase --autostash` if rejected).
+- **Stage the record locally** (path-scoped if your tree is shared). It is *landed to GitHub* by `log-experiment` **after** the close audit (below), not by a raw push — the experiment gate needs `AUDIT.md` to exist first.
 - **Independent close audit — the OUTPUT-side gate (before clearing the self-wake).** Your self-audit can't catch your
   own reproducibility gaps/overclaims/confounds. Run a **cross-family** audit via **`verify-claims`**
   (`audit_experiment <exp>` → `AUDIT.md`; always the *other* family from whoever ran the work). **Respond to every
   finding** — fix (commit) or a one-line accept/defer with reason; HIGH findings fixed or explicitly justified. **Triage
   as a PEER, autonomously — close is execution, you don't need the human here.** Audit once (a second pass if your fixes
   were substantive); do NOT auto-iterate to zero findings (it never converges) — stop when only polish remains.
-- **Clear the self-wake.** Once the record exists, is committed + pushed, and compute is torn down: delete this
+- **Land the record on GitHub via `log-experiment`** (the research counterpart to `ship-change`):
+  `log-experiment.sh <exp-dir>` opens a gated PR, verifies the close-audit is present + clean (or, for a
+  no-go/eval-only run, a closed `RESULTS.md` decision), takes the cross-family bot approval, and merges — one
+  command, not the by-hand branch/approve/merge dance. This is how a finished experiment becomes a GitHub record.
+- **Clear the self-wake.** Once the record exists, is landed via `log-experiment`, and compute is torn down: delete this
   experiment's recurring waker and its look-again marker. A finished run with a still-firing waker is a stale-waker
   footgun.
 - **Close the run-supervision record — the post-audit FINALIZER (ordering is load-bearing).** Clearing
