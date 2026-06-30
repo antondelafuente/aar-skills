@@ -198,8 +198,9 @@ def pod_env():
 def deploy(nonce=None):
     # When leasing is on, the pod NAME is the lease nonce (gpujob-<hex>) so the reaper can match an
     # otherwise-unknown pod to its pending intent. POD_NAME is honored only when leasing is disabled.
-    # POD_NAME_PREFIX (e.g. "anton-" on a shared account) is prepended for dashboard visibility; the lease
-    # still stores the bare nonce, and the reaper's find-nonce recovers the nonce structurally from the name.
+    # POD_NAME_PREFIX (e.g. "anton-" on a shared account) is prepended for dashboard visibility. The intent
+    # lease records this EXACT expected name (prefix+nonce; cmd_intent inherits the same env), so the reaper's
+    # find-nonce exact-matches a prefixed pod — deletion authority stays exact-whole-string only.
     pod_name = env("POD_NAME_PREFIX", "") + (nonce if (nonce and _LEASE_ON) else env("POD_NAME", "gpu-job"))
     base = {"computeType": "GPU",
             "gpuCount": int(env("GPU_COUNT", "1")),

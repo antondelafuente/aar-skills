@@ -19,7 +19,7 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
 ## The loop
 
 1. **Acquire:** `python3 scripts/deploy_pod.py` (env knobs: `GPU_TYPE`, `GPU_COUNT`,
-   `DISK_GB`, `POD_NAME`, `DATA_CENTERS`, `VOLUME_ID`). Prints `POD_ID` / `LEASE_NONCE` / `SSH` /
+   `DISK_GB`, `POD_NAME`, `POD_NAME_PREFIX` (prepended to the pod name for shared-account dashboard visibility, e.g. `anton-`; empty default), `DATA_CENTERS`, `VOLUME_ID`). Prints `POD_ID` / `LEASE_NONCE` / `SSH` /
    cost. Big-model jobs need big disks — the 220GB default is deliberate. Acquire also writes a
    **pod lease** (see *The pod lease + the standing reaper* below) so an abandoned pod can be reaped
    without you; note the `LEASE_NONCE` and pass it to teardown.

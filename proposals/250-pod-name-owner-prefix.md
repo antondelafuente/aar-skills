@@ -8,21 +8,21 @@ The catch: when leasing is on, the pod **name IS the lease nonce** (`gpujob-<hex
 
 ## Approach
 
-- **`deploy_pod.py`** — prepend `POD_NAME_PREFIX` (env, **empty default**) to the pod name, for both the lease-nonce name and the `POD_NAME` fallback. The lease itself still stores the bare nonce.
-- **`pod_lease.sh` `find-nonce`** — today it requires the pod name to *be* the nonce (`case $name in gpujob-*`, then an exact whole-string match). Change it to **recover the `gpujob-<hex>` nonce structurally** from the (possibly-prefixed) name: `gpujob-${name##*gpujob-}` (the substring from the last `gpujob-` onward). A name with no `gpujob-` token is still "unknown" → report-only.
+- **`deploy_pod.py`** — prepend `POD_NAME_PREFIX` (env, **empty default**) to the pod name, for both the lease-nonce name and the `POD_NAME` fallback.
+- **`pod_lease.sh`** — `cmd_intent` records the **exact expected RunPod name** (`POD_NAME_PREFIX + nonce`) in the lease as `expected_name`. It runs as `deploy_pod`'s subprocess and inherits the same env, so it computes the *same* name deploy uses. `find-nonce` then **exact-matches** the live pod name against the stored `expected_name`; legacy leases without it fall back to the bare nonce.
 
-The key safety property: the reaper (`pod_reaper.sh`) is a **separate, detached process with its own env**. By recovering the nonce from the *name's structure* instead of stripping a *configured* prefix, reaping stays correct **even if the prefix env never reaches the reaper** — a missing/misconfigured prefix can't silently orphan a pod. The reaper itself is unchanged; it calls `find-nonce`, which now handles prefixed names.
+The key safety property: the match stays **exact whole-string** (the recorded `expected_name`), preserving the reaper's invariant that deletion authority is never granted by a partial/substring match (#169). The reaper reads the expected name *from the lease*, so it needs **no prefix config at reap time** — a missing/misconfigured prefix env in the detached reaper cannot cause a wrong-pod match (worst case: no match → report-only, never a wrong deletion).
 
 ## Alternatives considered
 
-- **Strip a configured `POD_NAME_PREFIX` inside `find-nonce`** — rejected: correctness would depend on the prefix env reaching the detached reaper. A missing config would silently orphan billing pods — the exact failure we must avoid.
-- **Match "name ends with the nonce"** — rejected: looser than recovering the canonical `gpujob-<hex>` token; the structural extraction is exact.
+- **Recover the nonce structurally from the name** (`gpujob-${name##*gpujob-}`) — rejected: it turns an exact match into a *substring* match, so a peer/unknown pod whose name embeds a pending nonce could move from report-only to bind-and-reap — a deletion-authority loosening the reaper explicitly forbids (#169).
+- **Strip a configured `POD_NAME_PREFIX` inside `find-nonce`** — rejected: correctness would depend on the prefix env reaching the detached reaper; a missing config would orphan billing pods.
 - **Only prefix non-leased (`POD_NAME`) pods** — rejected: Anton wants *all* his pods identifiable, including leased ones.
 
 ## Blast radius
 
-gpu-job plugin only: `deploy_pod.py` (naming) + `pod_lease.sh` (`find-nonce`). `pod_reaper.sh` is unchanged. **Empty default = zero behavior change** for any instance that doesn't set the prefix; existing unprefixed pods still resolve (`find-nonce` recovers `gpujob-<hex>` from a bare nonce unchanged). Reversible (revert the PR).
+gpu-job plugin: `deploy_pod.py` (naming), `pod_lease.sh` (`cmd_intent` records `expected_name`; `find-nonce` exact-matches it). Note `find-nonce` **is** the reaper's pod→lease deletion mapping, so this is a reaper *behavior* change — covered by `pod_lease_smoke.sh` (extended with a prefixed-pod find-nonce case). **Empty default = zero behavior change** for unprefixed instances; legacy leases resolve via the bare-nonce fallback. Reversible (revert the PR).
 
 ## Rollout + rollback
 
-ship-change PR. This instance sets `POD_NAME_PREFIX=anton-` where `deploy_pod` reads its env. **Test before merge:** `find-nonce anton-gpujob-deadbeef` resolves to a pending-intent lease with nonce `gpujob-deadbeef`, and the bare `gpujob-deadbeef` case still resolves. Rollback: revert; pods go back to bare nonce names.
+ship-change PR. This instance sets `POD_NAME_PREFIX=anton-` in `~/.config/gpu-job/env`. **Tested before merge:** an intent created with `POD_NAME_PREFIX=anton-` stores `expected_name=anton-gpujob-<nonce>`; `find-nonce anton-gpujob-<nonce>` resolves it, while the bare nonce and a substring (`evil-anton-…`) do NOT (exact-match safety), and a legacy lease still resolves via the nonce fallback. Rollback: revert; pods go back to bare nonce names.
