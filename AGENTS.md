@@ -6,39 +6,38 @@ source checkouts, symlinks, or thin local wrappers. The product never depends on
 consuming instance owns its own transition map, local paths, credentials, run records, launch/reload machinery,
 and deployment guidance.
 
-## Two layers in this repo: the product and its SWE pipeline
+## This repo is the product; the SWE pipeline that builds it lives in agentic-engineering
 
-This repo holds **two layers** — same repo, different concerns:
+This repo is **the product** — the shipped research plugins (`gpu-job`, `verify-claims`, `experiment-lifecycle`,
+`feedback-loop`): the automated-researcher scaffold that turns a coding agent into an autonomous researcher.
+Quality bar: *is the research valid.* Customer: the alignment researcher.
 
-1. **The product** — the shipped research plugins (`gpu-job`, `verify-claims`, `experiment-lifecycle`): the
-   automated-researcher scaffold that turns a coding agent into an autonomous researcher. Quality bar: *is the research valid.* Customer:
-   the alignment researcher.
-2. **The SWE pipeline** — the engineering layer that builds, reviews, tests, and ships the product
-   (`aar-engineering`, `tests/`, CI). Quality bar: *does the product's machinery work and not regress.* Customer: us.
+The **SWE pipeline that builds, reviews, tests, and ships this product** — the `ship-change` lifecycle (the
+`aar-engineering` plugin) — lives in the separate **`agentic-engineering`** repo: the engineering team's
+tooling. A scaffold change to THIS repo is shipped via agentic-engineering's `ship-change` (Issue → worktree
+branch → design doc → draft PR → cross-family review → tracked `.aar-ci` checks + behavior smoke →
+merge-when-clean). *Why a separate repo:* the team's tooling is generic — it could build any product, not just
+this one — so it is not part of the shipped research product (the instance constitution's vision owns this
+boundary). It remains **agentic at both levels**: agents *do* the research (this product), and agents
+*build / test / ship* it (the agentic-engineering pipeline).
 
-This is the ordinary product-`src` + `tests`/CI split every software repo has — NOT a separate repo (one product →
-one repo; revisit multi-repo only when a piece ships independently). It is **agentic at both levels**: agents *do*
-the research (product), and agents *build / test / ship* the thing that lets agents do the research (SWE pipeline).
+**The agents ARE the engineers.** Every Claude Code / Codex instance is an engineer on the team (with its own
+GitHub identity): they author changes, **cross-family-review** each other's PRs (a foreign family is the
+safeguard — "AARs are peers" realized in the build), **approve**, and **merge**. The human is the
+**staff-engineer / PM**: sets direction (the Issue backlog) and shapes it (`needs-shaping → ready`), oversees
+and can intervene — but is **not a per-PR gate**. This **mirrors the research pipeline** at the direction level:
+design *with the human* on what to build, execution *by the agents*. (The full engineer model + the
+merge-safety properties live with the pipeline in agentic-engineering.)
 
-**Who runs the SWE pipeline: the agents ARE the engineers.** Every Claude Code / Codex instance is an engineer on
-the team (with its own GitHub identity). They author changes, **cross-family-review** each other's PRs (a foreign
-family is the safeguard — "AARs are peers" realized in the build), **approve**, and **merge** — the routine
-review → approve → merge loop is theirs to run. The human is the **staff-engineer / PM**: sets direction (the Issue
-backlog) and shapes it (`needs-shaping → ready`), oversees and can intervene on anything — but is **not a per-PR gate**.
-The human gates *which* architectural work happens (the Issue + the shaping conversation), not each PR's merge; the
-cross-family review gates the change itself. This **mirrors the research pipeline** at the direction level: design
-*with the human* on what to build, execution *by the agents* (here: code review → approve → merge). What makes agent self-merge
-safe: the foreign-family review (catches blind spots), the deterministic checks + behavior smoke, the human's audit
-of the durable trail (GitHub PRs / comments / history), and one-command revert.
-
-**Don't conflate the two quality gates.** `verify-claims` is shared infrastructure used by both: its cross-family
+**`verify-claims` is shared infrastructure used by both sides — and it stays in THIS repo.** Its cross-family
 review serves the **product** (`--design` / `--data` / close = experiment audits) AND the **SWE pipeline**
-(`--scaffold` design review + `--code` PR review). Same capability, wired into both layers; neither substitutes for
-the other.
+(`--scaffold` design review + `--code` PR review). When agentic-engineering's `ship-change` reviews a change to
+this repo, it resolves the reviewer from THIS repo's own `verify-claims` (trusted-but-current, from the base
+ref) — so the modes must stay here. Same capability, used by both; neither substitutes for the other.
 
 **Two orthogonal cuts to keep straight:** *product vs instance* (this repo vs any consuming deployment that uses
-it) and *product vs SWE pipeline* (within this repo: the shipped research plugins vs the `aar-engineering` layer
-that builds them).
+it) and *product vs SWE pipeline* (the shipped research plugins HERE vs the `aar-engineering` / `ship-change`
+tooling in `agentic-engineering` that builds them).
 
 ## Rules
 

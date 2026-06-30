@@ -50,12 +50,10 @@ fi
 #     Plugin-only installs cannot rely on repo-root AGENTS.md being present, but the product still needs one
 #     editorial home for the issue disposition contract. Dependent plugins therefore ship synced references, and
 #     wf.sh enforces the same label set at merge time.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(AGENTS\.md|plugins/[^/]+/skills/[^/]+/references/DISPOSITIONS\.md|plugins/aar-engineering/skills/ship-change/scripts/wf\.sh)$'; then
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(AGENTS\.md|plugins/[^/]+/skills/[^/]+/references/DISPOSITIONS\.md)$'; then
   if CHECK_ROOT="$ROOT" python3 - <<'PY'
 import os
 import pathlib
-import re
-import subprocess
 import sys
 
 root = pathlib.Path(os.environ["CHECK_ROOT"])
@@ -70,12 +68,12 @@ def extract(text: str, label: str) -> str:
     body = text.split(start, 1)[1].split(end, 1)[0]
     return f"{start}{body}{end}\n"
 
+# The ship-change driver + its packaged DISPOSITIONS.md (and the wf.sh label cross-check) moved to
+# agentic-engineering with the aar-engineering plugin (#270); that repo's checks own that sync now.
+# Here we keep the editorial guarantee for the product's REMAINING packaged disposition references
+# (feedback-loop's), which must still match AGENTS.md's canonical block.
 canonical = extract(agents, "AGENTS.md")
 refs = sorted(root.glob("plugins/*/skills/*/references/DISPOSITIONS.md"))
-required = root / "plugins/aar-engineering/skills/ship-change/references/DISPOSITIONS.md"
-if required not in refs:
-    print(f"missing required packaged disposition reference: {required.relative_to(root)}", file=sys.stderr)
-    sys.exit(1)
 bad = []
 for ref in refs:
     if ref.read_text() != canonical:
@@ -83,20 +81,9 @@ for ref in refs:
 if bad:
     print("packaged disposition reference drift: " + ", ".join(bad), file=sys.stderr)
     sys.exit(1)
-labels = re.findall(r"^- \*\*`([^`]+)`\*\*", canonical, flags=re.M)
-wf = root / "plugins/aar-engineering/skills/ship-change/scripts/wf.sh"
-if wf.exists():
-    try:
-        wf_labels = subprocess.check_output(["bash", str(wf), "dispositions"], text=True).splitlines()
-    except subprocess.CalledProcessError as exc:
-        print(f"wf.sh dispositions failed with rc={exc.returncode}", file=sys.stderr)
-        sys.exit(1)
-    if wf_labels != labels:
-        print(f"wf.sh disposition labels {wf_labels} != AGENTS labels {labels}", file=sys.stderr)
-        sys.exit(1)
 PY
-  then ok "disposition references and gate labels match AGENTS.md"
-  else err "disposition reference / gate-label sync check failed"
+  then ok "packaged disposition references match AGENTS.md"
+  else err "disposition reference sync check failed"
   fi
 fi
 
@@ -164,6 +151,7 @@ for plugdir in $(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#(plu
   nonmanifest=$(printf '%s\n' "${PATHS[@]}" | grep "^$plugdir/" | grep -v '\.claude-plugin/plugin.json' || true)
   [ -n "$nonmanifest" ] || continue
   pj="$plugdir/.claude-plugin/plugin.json"
+  [ -f "$pj" ] || { ok "plugin $plugdir removed (no version check)"; continue; }   # deleted plugin dir: nothing to version-bump
   oldv=$(git show "$BASE:$pj" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null)
   newv=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('version',''))" "$pj" 2>/dev/null)
   if [ -z "$oldv" ]; then ok "new plugin manifest $pj (v${newv:-?})"; continue; fi   # new plugin: no prior version to bump
@@ -186,6 +174,7 @@ $mp"
   fi
 fi
 for plug in $(printf '%s\n' "$SMOKE_PLUGS" | grep -v '^$' | sort -u); do
+  [ -d "$ROOT/plugins/$plug" ] || { ok "plugin $plug removed (no smoke)"; continue; }   # deleted plugin dir: nothing to smoke
   if [ -f "$SMOKE" ]; then
     echo "[checks] behavior smoke: $plug" >&2
     bash "$SMOKE" "$(git rev-parse --show-toplevel)" "$plug" && ok "smoke $plug" || err "fake-HOME smoke FAILED for $plug"
@@ -194,84 +183,10 @@ for plug in $(printf '%s\n' "$SMOKE_PLUGS" | grep -v '^$' | sort -u); do
   fi
 done
 
-# 7. composition smoke for wf.sh's verify-claims reviewer resolution (trusted-but-current, #69): a unit-style
-#    check the fake-HOME discovery smoke can't cover (it asserts WHICH reviewer copy runs, not just that skills
-#    install). Runs only when the ship-change driver itself changed.
-if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-change/scripts/wf.sh$'; then
-  LA_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/locate_audit_smoke.sh"
-  if [ -f "$LA_SMOKE" ]; then
-    echo "[checks] locate_audit resolution smoke" >&2
-    bash "$LA_SMOKE" >&2 && ok "locate_audit smoke" || err "locate_audit resolution smoke FAILED"
-  else
-    err "wf.sh changed but locate_audit_smoke.sh missing — cannot verify reviewer resolution"
-  fi
-  ID_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/identity_smoke.sh"
-  if [ -f "$ID_SMOKE" ]; then
-    echo "[checks] strict identity smoke" >&2
-    bash "$ID_SMOKE" >&2 && ok "identity smoke" || err "strict identity smoke FAILED"
-  else
-    err "wf.sh changed but identity_smoke.sh missing — cannot verify strict identity behavior"
-  fi
-  FD_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/fd_state_smoke.sh"
-  if [ -f "$FD_SMOKE" ]; then
-    echo "[checks] finding-disposition state smoke" >&2
-    bash "$FD_SMOKE" >&2 && ok "fd_state smoke" || err "fd_state smoke FAILED"
-  else
-    err "wf.sh changed but fd_state_smoke.sh missing — cannot verify the finding-disposition helpers"
-  fi
-  IV_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/issue_verbs_smoke.sh"
-  if [ -f "$IV_SMOKE" ]; then
-    echo "[checks] engineer issue-verbs smoke" >&2
-    bash "$IV_SMOKE" >&2 && ok "issue_verbs smoke" || err "issue_verbs smoke FAILED"
-  else
-    err "wf.sh changed but issue_verbs_smoke.sh missing — cannot verify the narrow maintainer verbs (#164)"
-  fi
-  # gh write-guard bypass STATIC check (#165): every internal `gh` call in wf.sh MUST carry the WF_GH_INTERNAL
-  # marker (route through real_gh / gh_author / git_push_author) so the guard never intercepts an engineer
-  # call. An unmarked call would silently break the SWE pipeline under the wrapper — fail the build on it.
-  GG_STATIC="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/gh_guard_static_check.sh"
-  if [ -f "$GG_STATIC" ]; then
-    echo "[checks] gh write-guard bypass static check" >&2
-    bash "$GG_STATIC" "$ROOT" >&2 && ok "gh_guard static" || err "gh write-guard bypass static check FAILED (an unmarked internal gh call in wf.sh)"
-  else
-    err "wf.sh changed but gh_guard_static_check.sh missing — cannot verify the gh write-guard bypass contract (#165)"
-  fi
-fi
-
-# read-only-ambient detector smoke (#166): runs when wf.sh OR the smoke itself changed (so an edit to the
-# smoke is also exercised — #166 code-review F3).
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/aar-engineering/skills/ship-change/scripts/(wf\.sh|readonly_ambient_smoke\.sh)$'; then
-  RO_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/readonly_ambient_smoke.sh"
-  if [ -f "$RO_SMOKE" ]; then
-    echo "[checks] read-only-ambient detector smoke" >&2
-    bash "$RO_SMOKE" >&2 && ok "readonly_ambient smoke" || err "read-only-ambient detector smoke FAILED"
-  else
-    err "wf.sh/readonly smoke changed but readonly_ambient_smoke.sh missing — cannot verify the read-only-ambient detector (#166)"
-  fi
-fi
-
-# gh write-guard behavior smoke (#165): runs when the guard wrapper, the static check, or wf.sh changed.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/aar-engineering/skills/ship-change/scripts/(gh-guard\.sh|gh_guard_static_check\.sh|gh_guard_smoke\.sh|wf\.sh)$'; then
-  GG_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/gh_guard_smoke.sh"
-  if [ -f "$GG_SMOKE" ]; then
-    echo "[checks] gh write-guard behavior smoke" >&2
-    bash "$GG_SMOKE" >&2 && ok "gh_guard smoke" || err "gh write-guard behavior smoke FAILED"
-  else
-    err "gh write-guard changed but gh_guard_smoke.sh missing — cannot verify the guard's read/write/bypass behavior (#165)"
-  fi
-fi
-
-# 8. disposition structural-gate smoke (#138): the deterministic gate that validates .aar-ci/dispositions.json
-#    against the reviewer's finding list (fail-closed). Runs when the gate or its smoke changed.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/aar-engineering/skills/ship-change/scripts/disposition_gate(_smoke)?\.sh$'; then
-  DG_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/disposition_gate_smoke.sh"
-  if [ -f "$DG_SMOKE" ]; then
-    echo "[checks] disposition structural-gate smoke" >&2
-    bash "$DG_SMOKE" >&2 && ok "disposition_gate smoke" || err "disposition_gate smoke FAILED"
-  else
-    err "disposition_gate.sh changed but disposition_gate_smoke.sh missing — cannot verify the structural gate"
-  fi
-fi
+# 7-8. ship-change driver smokes (locate_audit / identity / fd_state / issue_verbs / gh-guard static+behavior /
+#       readonly-ambient / disposition_gate) moved to agentic-engineering with the aar-engineering plugin (#270).
+#       That repo's .aar-ci profile owns the ship-change composition smokes now; this product profile keeps only
+#       the checks for the plugins it still ships.
 
 # 10. run-supervision-record smoke (#168): the monotonic state machine + fail-closed is-desired-active +
 #     atomic writes + the update-vs-stop/close race — behavior the JSON/syntax checks can't cover. Runs

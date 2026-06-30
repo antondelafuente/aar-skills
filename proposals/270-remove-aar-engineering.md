@@ -70,3 +70,26 @@ coupled to a reviewer-resolution change and is deferred to **Phase 3b**. Confirm
   source.
 - **Rollback:** revert this PR — the plugin dir, marketplace entry, and CI blocks return; nothing external
   depends on the deletion. The `agentic-engineering` copy is unaffected either way.
+
+## Design review (round 1) — triage
+
+Cross-family `--scaffold` review (Codex): 2 HIGH, 2 MED. Triaged as a peer:
+
+- **F1 (HIGH, blast radius) — ACCEPTED.** Instance pointers break on removal: `~/.codex/skills/ship-change`
+  (symlink to the product copy) and `~/.local/bin/gh-as-engineer` (references the product `wf.sh`). These are
+  **box-instance** files, not product-repo files — migrated to `~/agentic-engineering/...` as same-day box
+  edits alongside this PR (out of the PR diff, into the cutover).
+- **F2 (HIGH, scope) — ACCEPTED + FIXED in this PR.** The generic version-bump + behavior-smoke loops in
+  `.aar-ci/checks.sh` iterate over all changed `plugins/` paths and would treat the *deleted* `aar-engineering`
+  paths as a changed plugin (failing the version/smoke checks). Added guards to both loops: a plugin dir whose
+  `plugin.json` / dir no longer exists is a deletion and is skipped.
+- **F3 (MED, contract clarity) — ACCEPTED + FIXED in this PR.** `README.md` install instructions retargeted
+  from the deleted product path to `~/agentic-engineering/...`; the module table + "two layers" prose updated.
+- **F4 (MED, right seam) — DEFERRED (follow-up issue).** `tooling/review-eval/` is a separate engineering
+  harness; moving it is its own migration, not part of removing the *plugin*. Bundling it would expand blast
+  radius and break this PR's atomicity. Tracked as a follow-up.
+
+Also deferred (noted, not in this PR): AGENTS.md still carries the SWE-pipeline token-identity contract
+(`WF_*` rule). It is not factually broken (the section rewrite establishes ship-change now lives in
+agentic-engineering), but whether that contract's canonical home should move to agentic-engineering is a
+doc-ownership question for a later pass.
