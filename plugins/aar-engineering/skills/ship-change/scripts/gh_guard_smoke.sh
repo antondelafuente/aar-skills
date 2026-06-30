@@ -5,7 +5,7 @@
 #   reads pass; bare writes are blocked; credential-mutating `gh auth` is blocked; the whitelisted non-mutating
 #   `gh auth` helper forms pass; `gh api` is default-deny on a non-GET method/body; the WF_GH_INTERNAL marker
 #   and WF_GH_ALLOW_OWNER_WRITE override pass through; and the ACTUAL wf.sh internal paths survive the guard
-#   (real_gh review/comment/classify shapes + git_push_author against a HOSTILE ambient credential helper, where
+#   (real_gh review/comment shapes + git_push_author against a HOSTILE ambient credential helper, where
 #   the forced tokenized URL must win). Also asserts the static check passes on the real wf.sh and fails on a
 #   planted unmarked call.
 set -uo pipefail
@@ -186,7 +186,7 @@ run_wf_helper(){
   '
 }
 export FAKE_GH_LOG
-if run_wf_helper; then pass "wf.sh real_gh review/comment/classify(PATCH) shapes pass the guard on PATH"; else fail "wf.sh real_gh shapes did not survive the guard (rc=$?)"; fi
+if run_wf_helper; then pass "wf.sh real_gh review/comment(PATCH) shapes pass the guard on PATH"; else fail "wf.sh real_gh shapes did not survive the guard (rc=$?)"; fi
 
 echo "[smoke] git_push_author forces the engineer credential over a HOSTILE ambient helper"
 # Build a local bare 'remote' and a clone; set a HOSTILE ambient credential helper that would authenticate as

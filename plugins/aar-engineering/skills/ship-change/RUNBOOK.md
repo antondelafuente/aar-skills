@@ -22,8 +22,7 @@ The repo is **public**, and branch protection on `main` is **active** with:
 
 NOT enabled (deliberately): **required status checks**. The `.aar-ci` checks + behavior smoke run *driver-side*
 in `finish` (before the approval), not as GitHub-reported statuses — so there's nothing for branch protection
-to require yet. The classifier's `design-gate` is likewise **advisory** (recorded on the PR, not a required
-check). Wiring either as a GitHub-required status is a tracked follow-up (needs a small GitHub Action).
+to require yet. Wiring the checks as a GitHub-required status is a tracked follow-up (needs a small GitHub Action).
 
 ## Engineer identities (as-built)
 
@@ -75,7 +74,7 @@ ambient credential is **read-only by construction** (canonical rule + the `WF_RE
 it can never write. Owner/admin **writes** are NOT ambient — they go through the explicit elevated-owner-token
 + `WF_GH_ALLOW_OWNER_WRITE=1` maintenance path (see escape hatches below), so elevation is deliberate, never
 the silent default. `wf.sh` protected mutations that name an author (`open`, reviews, `comment`, `issue`,
-`classify`, `finish`) use the family engineer App tokens by default and fail closed if those seams are
+`finish`) use the family engineer App tokens by default and fail closed if those seams are
 missing. An instance may source a small read-only `gh.env`/`GH_TOKEN` for ambient CLI convenience; it must
 still source the engineer-token env before ship-change workflow writes.
 
@@ -150,5 +149,5 @@ If a plugin manifest changed, after a revert/merge refresh installed plugins:
 
 ## Follow-ups (not yet built)
 
-- **`.aar-ci` checks + `design-gate` as GitHub-required status checks** — a GitHub Action that runs the
+- **`.aar-ci` checks as GitHub-required status checks** — a GitHub Action that runs the
   checks and reports a status, so branch protection can require them (today they're driver-side only).

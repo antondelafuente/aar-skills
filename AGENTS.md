@@ -24,9 +24,10 @@ the research (product), and agents *build / test / ship* the thing that lets age
 the team (with its own GitHub identity). They author changes, **cross-family-review** each other's PRs (a foreign
 family is the safeguard — "AARs are peers" realized in the build), **approve**, and **merge** — the routine
 review → approve → merge loop is theirs to run. The human is the **staff-engineer / PM**: sets direction (the Issue
-backlog), gates the **architectural design** (the high-taste "together" moment), oversees and can intervene on
-anything — but is NOT a gate on routine code merges. This **mirrors the research pipeline exactly**: design *with the
-human* (architectural), execution *by the agents* (here: code review → approve → merge). What makes agent self-merge
+backlog) and shapes it (`needs-shaping → ready`), oversees and can intervene on anything — but is **not a per-PR gate**.
+The human gates *which* architectural work happens (the Issue + the shaping conversation), not each PR's merge; the
+cross-family review gates the change itself. This **mirrors the research pipeline** at the direction level: design
+*with the human* on what to build, execution *by the agents* (here: code review → approve → merge). What makes agent self-merge
 safe: the foreign-family review (catches blind spots), the deterministic checks + behavior smoke, the human's audit
 of the durable trail (GitHub PRs / comments / history), and one-command revert.
 
