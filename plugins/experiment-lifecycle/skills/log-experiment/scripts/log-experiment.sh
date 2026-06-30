@@ -8,15 +8,16 @@
 # A cross-family engineer-bot approval satisfies the research repo's branch protection
 # (the author cannot approve their own PR). Self-contained: this does NOT source wf.sh.
 #
-# Config (instance, env-overridable):
-#   RESEARCH_REPO                        default antondelafuente/research-lab
-#   LOG_EXPERIMENT_REVIEWER_TOKEN_CMD    cmd that prints a repo-scoped bot token; receives <owner/repo>
-#   LOG_EXPERIMENT_REVIEWER_NAME         display name of the reviewer bot (for the log line)
+# Config (instance, env-overridable; NO instance defaults — fail closed):
+#   RESEARCH_REPO                       the research repo (owner/repo). REQUIRED.
+#   LOG_EXPERIMENT_AUTHOR_FAMILY        claude|codex (default claude); the reviewer is the OPPOSITE family
+#   LOG_EXPERIMENT_REVIEWER_TOKEN_CMD   optional: cmd printing a repo-scoped bot token; receives <owner/repo>.
+#                                       Default: derived from the instance seam WF_ENGINEER_TOKEN_CMD_<REVIEWER_FAMILY>.
 set -euo pipefail
 
-RESEARCH_REPO="${RESEARCH_REPO:-antondelafuente/research-lab}"
-REVIEWER_TOKEN_CMD="${LOG_EXPERIMENT_REVIEWER_TOKEN_CMD:-bash $HOME/.config/codex-engineer/mint_token.sh}"
-REVIEWER_NAME="${LOG_EXPERIMENT_REVIEWER_NAME:-codex-engineer}"
+# Config (instance, env-overridable). RESEARCH_REPO has NO default — fail closed if unset.
+RESEARCH_REPO="${RESEARCH_REPO:-}"
+AUTHOR_FAMILY="${LOG_EXPERIMENT_AUTHOR_FAMILY:-claude}"   # family of the runner; the reviewer is the OPPOSITE family
 
 die()  { echo "BLOCK: $*" >&2; exit 1; }
 note() { echo "[log-experiment] $*" >&2; }
@@ -50,12 +51,15 @@ note "classified: $KIND  ($REL)"
 gate_experiment() {
   [ -f "$DIR/RESULTS.md" ] || die "experiment missing RESULTS.md"
   if [ -f "$DIR/AUDIT.md" ]; then
-    if [ -f "$DIR/AUDIT_RESPONSE.md" ] && \
-       grep -qiE 'unresolved|OPEN HIGH|HIGH[^a-z]*(not addressed|outstanding|unresolved)' "$DIR/AUDIT_RESPONSE.md"; then
+    # Require the triage artifact to exist (the close-audit must have been triaged), then backstop-scan it.
+    # This VERIFIES the audit ran and was triaged; it does not re-derive triage (a machine-readable
+    # close-triage contract is a future hardening — see proposal #240 "Gate detail").
+    [ -f "$DIR/AUDIT_RESPONSE.md" ] || die "experiment has AUDIT.md but no AUDIT_RESPONSE.md (close-audit not triaged) — surface for human"
+    if grep -qiE 'unresolved|OPEN HIGH|HIGH[^a-z]*(not addressed|outstanding|unresolved)' "$DIR/AUDIT_RESPONSE.md"; then
       die "experiment AUDIT_RESPONSE.md flags an unresolved HIGH — surface for human"
     fi
-    APPROVAL_BODY="Experiment record — close-AUDIT present and clean (no unresolved HIGH). Verified per registry convention."
-    note "experiment gate ok: AUDIT.md present, no unresolved HIGH"
+    APPROVAL_BODY="Experiment record — close-audit ran and was triaged (AUDIT.md + AUDIT_RESPONSE.md present, no unresolved-HIGH marker). Verified per registry convention."
+    note "experiment gate ok: close-audit present and triaged"
   else
     if grep -qiE 'ANCHOR_FAILED|no-?go|decision[: ]|stopped at|null result|diagnostic only' "$DIR/RESULTS.md"; then
       APPROVAL_BODY="Experiment record — eval-only/no-go run; no close-audit needed; RESULTS records a closed decision."
@@ -80,9 +84,23 @@ esac
 
 if [ "$DRY_RUN" = 1 ]; then note "--dry-run: classified=$KIND, gate PASSED; stopping before any push."; exit 0; fi
 
-# ---- mint the cross-family bot token up front (fail before mutating if it can't) ----
-TOK="$($REVIEWER_TOKEN_CMD "$RESEARCH_REPO" 2>/dev/null || true)"
-[ -n "$TOK" ] || die "could not mint reviewer bot token ($REVIEWER_NAME) for $RESEARCH_REPO"
+# ---- resolve identities + mint the cross-family reviewer token up front (fail before mutating) ----
+[ -n "$RESEARCH_REPO" ] || die "RESEARCH_REPO is required (instance config; no default target)"
+case "$AUTHOR_FAMILY" in
+  claude) REVIEWER_FAMILY=CODEX  ;;
+  codex)  REVIEWER_FAMILY=CLAUDE ;;
+  *) die "LOG_EXPERIMENT_AUTHOR_FAMILY must be claude|codex (got '$AUTHOR_FAMILY')" ;;
+esac
+# Reviewer = OPPOSITE family (independence). Mint cmd: explicit override, else derive from the instance
+# engineer seam (strip the repo arg baked into WF_ENGINEER_TOKEN_CMD_*) and call with RESEARCH_REPO.
+# No hardcoded instance path; fail closed if it can't resolve. (Author push/PR/merge use ambient gh —
+# the researcher logging to their own lab is the legitimate author; the cross-family bot is the reviewer.)
+eng_var="WF_ENGINEER_TOKEN_CMD_${REVIEWER_FAMILY}"
+REVIEWER_MINT="${LOG_EXPERIMENT_REVIEWER_TOKEN_CMD:-}"
+[ -z "$REVIEWER_MINT" ] && [ -n "${!eng_var:-}" ] && REVIEWER_MINT="${!eng_var% *}"
+[ -n "$REVIEWER_MINT" ] || die "no opposite-family (${REVIEWER_FAMILY,,}) reviewer token command — set LOG_EXPERIMENT_REVIEWER_TOKEN_CMD or $eng_var"
+TOK="$($REVIEWER_MINT "$RESEARCH_REPO" 2>/dev/null || true)"
+[ -n "$TOK" ] || die "could not mint ${REVIEWER_FAMILY,,}-engineer reviewer token for $RESEARCH_REPO"
 
 # ---- branch in a DEDICATED worktree (never disturbs the shared tree) ----
 cd "$REPO_ROOT"

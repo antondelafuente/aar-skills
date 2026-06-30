@@ -36,10 +36,12 @@ A `KIND` file in the dir (containing `experiment` or `note`) is honored as an ex
 
 ## The gates (fail-closed — an unparseable verdict BLOCKS, never passes)
 
-- **Experiment.** The close-audit already ran during `run-experiment`; this **verifies** it, it does not
-  re-run the science. BLOCK unless `AUDIT.md` is present and `AUDIT_RESPONSE.md` shows no unresolved HIGH.
-  An eval-only / anchor-failed run with no close-audit is allowed **only** if `RESULTS.md` records a closed
-  decision (e.g. `ANCHOR_FAILED`, no-go); otherwise it BLOCKS and you surface it to the researcher.
+- **Experiment.** The close-audit already ran during `run-experiment`; this **verifies it was triaged**, it
+  does not re-run or re-derive the science. BLOCK unless **both** `AUDIT.md` and `AUDIT_RESPONSE.md` are
+  present with no unresolved-HIGH marker. (A machine-readable close-triage contract is a future hardening;
+  today the gate confirms the audit ran + was triaged, with a backstop scan.) An eval-only / anchor-failed
+  run with no close-audit is allowed **only** if `RESULTS.md` records a closed decision (e.g. `ANCHOR_FAILED`,
+  no-go); otherwise it BLOCKS and you surface it to the researcher.
 - **Note.** A note has nothing to adversarially audit, so there is **no LLM review** — only a deterministic
   scan for secret-value patterns (`ghp_…`, `github_pat_…`, `sk-…`, `AKIA…`, PEM private keys). A hit BLOCKS.
 
@@ -48,16 +50,21 @@ to the researcher if it needs a human call.
 
 ## Identity / auth
 
-The author can't approve their own PR, so a **cross-family engineer bot** posts the approving review that
-satisfies the research repo's branch protection — the same identities `ship-change` uses. Ambient `gh`
-opens the PR and merges; the bot token is minted just-in-time and never printed.
+The author can't approve their own PR, so a **cross-family engineer bot — the family OPPOSITE the author**
+(`LOG_EXPERIMENT_AUTHOR_FAMILY`) — posts the approving review that satisfies the research repo's branch
+protection, using the same engineer identities `ship-change` uses. Author push/PR/merge use ambient `gh`:
+the researcher logging to their *own* lab is the legitimate author; the cross-family bot is the independent
+reviewer. The reviewer token is minted just-in-time, fail-closed (no token → BLOCK before any mutation), and
+never printed.
 
-## Config (instance, env-overridable — never hardcode an instance)
+## Config (instance, env-overridable — never hardcode an instance; fails closed if unset)
 
-- `RESEARCH_REPO` — the research repo (default `antondelafuente/research-lab`).
-- `LOG_EXPERIMENT_REVIEWER_TOKEN_CMD` — command printing a repo-scoped bot token; receives `<owner/repo>`.
-  Defaults to the codex-engineer mint seam (cross-family for Claude-authored work).
-- `LOG_EXPERIMENT_REVIEWER_NAME` — the reviewer bot's display name (log line only).
+- `RESEARCH_REPO` — the research repo (`owner/repo`). **Required — no default target.**
+- `LOG_EXPERIMENT_AUTHOR_FAMILY` — `claude`|`codex` (default `claude`). The reviewer is the **opposite** family.
+- `LOG_EXPERIMENT_REVIEWER_TOKEN_CMD` — *optional* override: a command printing a repo-scoped bot token
+  (receives `<owner/repo>`). By default the opposite-family token command is derived from the instance
+  engineer seam (`WF_ENGINEER_TOKEN_CMD_<family>`), so no new config is required on a box that already runs
+  ship-change.
 
 ## Composes
 
