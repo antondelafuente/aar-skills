@@ -14,8 +14,9 @@
 #                                    (a wrong default must not make the review same-family). Reviewer = OPPOSITE family.
 #   LOG_EXPERIMENT_TOKEN_CMD_CLAUDE  command taking <owner/repo> that mints a claude-engineer token.
 #   LOG_EXPERIMENT_TOKEN_CMD_CODEX   command taking <owner/repo> that mints a codex-engineer token.
-#                                    The REVIEWER family's command is used; fail-closed if unset.
-#                                    (A single LOG_EXPERIMENT_REVIEWER_TOKEN_CMD override is also honored.)
+#                                    AUTHOR family -> writes; OPPOSITE family -> approval. Fail-closed if unset.
+#   LOG_EXPERIMENT_GIT_AUTHOR_CLAUDE the 'Name <email>' the claude bot commits as.
+#   LOG_EXPERIMENT_GIT_AUTHOR_CODEX  the 'Name <email>' the codex bot commits as.
 set -euo pipefail
 
 # Config (instance, env-overridable). RESEARCH_REPO has NO default — fail closed if unset.
@@ -109,10 +110,9 @@ case "$origin_url" in
 esac
 origin_slug="$(printf '%s' "$origin_url" | sed -E 's#^.*github\.com[/:]##; s#\.git$##; s#/$##')"
 [ "$origin_slug" = "$RESEARCH_REPO" ] || die "input dir's origin ($origin_slug) is not RESEARCH_REPO ($RESEARCH_REPO)"
-# Reviewer = OPPOSITE family (independence). Token command is EXPLICIT instance config (family-keyed):
-# a command taking <owner/repo> that mints a ${REVIEWER_FAMILY,,}-engineer token. No derivation from other
-# seams; fail closed if unset. (Author push/PR/merge use ambient gh — the researcher logging to their own
-# lab is the legitimate author; the cross-family bot is the independent reviewer.)
+# Two engineer-bot tokens, both EXPLICIT family-keyed instance config (commands taking <owner/repo>):
+#   AUTHOR family -> the bot that pushes / creates / merges; REVIEWER = OPPOSITE family -> the bot that
+#   approves (cross-family independence; the author bot cannot approve its own PR). Fail closed if unset.
 mint_var="LOG_EXPERIMENT_TOKEN_CMD_${REVIEWER_FAMILY}"
 REVIEWER_MINT="${LOG_EXPERIMENT_REVIEWER_TOKEN_CMD:-${!mint_var:-}}"
 [ -n "$REVIEWER_MINT" ] || die "no reviewer token command — set $mint_var (or LOG_EXPERIMENT_REVIEWER_TOKEN_CMD), a command taking <owner/repo> minting a ${REVIEWER_FAMILY,,}-engineer token"
@@ -121,6 +121,18 @@ TOK="$($REVIEWER_MINT "$RESEARCH_REPO" 2>/dev/null || true)"
 # Validate repo access BEFORE any mutation (a token that can't reach the repo would strand a half-open PR).
 GH_TOKEN="$TOK" gh api "repos/$RESEARCH_REPO" -q .full_name >/dev/null 2>&1 \
   || die "reviewer token cannot access $RESEARCH_REPO (is the ${REVIEWER_FAMILY,,}-engineer App installed there?)"
+# Author-family token (the bot that pushes / creates / merges) + its commit identity. Fail closed.
+amint_var="LOG_EXPERIMENT_TOKEN_CMD_${AUTHOR_FAMILY^^}"
+AUTHOR_MINT="${!amint_var:-}"
+[ -n "$AUTHOR_MINT" ] || die "no author token command — set $amint_var, a command taking <owner/repo> minting a ${AUTHOR_FAMILY}-engineer token"
+ATOK="$($AUTHOR_MINT "$RESEARCH_REPO" 2>/dev/null || true)"
+[ -n "$ATOK" ] || die "could not mint ${AUTHOR_FAMILY}-engineer author token for $RESEARCH_REPO"
+GH_TOKEN="$ATOK" gh api "repos/$RESEARCH_REPO" -q .full_name >/dev/null 2>&1 \
+  || die "author token cannot access $RESEARCH_REPO (is the ${AUTHOR_FAMILY}-engineer App installed there?)"
+gitauthor_var="LOG_EXPERIMENT_GIT_AUTHOR_${AUTHOR_FAMILY^^}"
+GIT_AUTHOR="${!gitauthor_var:-}"
+[ -n "$GIT_AUTHOR" ] || die "no author git identity — set $gitauthor_var to the ${AUTHOR_FAMILY}-engineer 'Name <email>'"
+GA_NAME="${GIT_AUTHOR% <*}"; GA_EMAIL="${GIT_AUTHOR#*<}"; GA_EMAIL="${GA_EMAIL%>}"
 
 # ---- branch in a DEDICATED worktree (never disturbs the shared tree) ----
 cd "$REPO_ROOT"
@@ -138,18 +150,19 @@ mkdir -p "$WT/$(dirname "$REL")"
 cp -r "$DIR" "$WT/$(dirname "$REL")/"
 git -C "$WT" add -- "$REL"                          # respects the dir's .gitignore (large artifacts stay on R2)
 git -C "$WT" diff --cached --quiet && die "nothing to commit for $REL (all gitignored?)"
-git -C "$WT" commit -q -m "Log $KIND: $REL"
-git -C "$WT" push -q -u origin "$BRANCH"
+git -C "$WT" -c user.name="$GA_NAME" -c user.email="$GA_EMAIL" commit -q -m "Log $KIND: $REL"
+# Push as the AUTHOR bot via a token-scoped remote (no ambient credential needed).
+git -C "$WT" push -q "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" "HEAD:refs/heads/$BRANCH"
 HEAD_SHA="$(git -C "$WT" rev-parse HEAD)"   # bind the merge to exactly the reviewed commit
 
 # ---- PR -> bot approve -> merge ----
 BODY="$(printf '%s\n\nLogged by log-experiment.sh (gate: %s).' "$APPROVAL_BODY" "$KIND")"
-URL="$(gh pr create -R "$RESEARCH_REPO" --head "$BRANCH" --base main \
+URL="$(GH_TOKEN="$ATOK" gh pr create -R "$RESEARCH_REPO" --head "$BRANCH" --base main \
         -t "Log $KIND: $REL" -b "$BODY")"
 PR="$(echo "$URL" | grep -oE '[0-9]+$')"
 note "opened PR #$PR ($URL)"
 GH_TOKEN="$TOK" gh pr review "$PR" -R "$RESEARCH_REPO" --approve --body "$APPROVAL_BODY" >/dev/null
-gh pr merge "$PR" -R "$RESEARCH_REPO" --squash --delete-branch --match-head-commit "$HEAD_SHA" >/dev/null
+GH_TOKEN="$ATOK" gh pr merge "$PR" -R "$RESEARCH_REPO" --squash --delete-branch --match-head-commit "$HEAD_SHA" >/dev/null
 note "merged PR #$PR (head $HEAD_SHA)"
 
 # ---- sync local main (ff-only, ONLY if this checkout is on main; never touches other uncommitted work) ----
