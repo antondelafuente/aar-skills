@@ -44,8 +44,9 @@
       target when using feedback-loop (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample
       logs, generated data, reproduce scripts), not just SUMMARY.md, BEFORE teardown.            ev: rclone lsf
-- ☐ [BLOCK] RESULTS.md written + judged against the pre-registered DESIGN rules; conclusions
-      separated from postdictions.                                                               ev:
+- ☐ [BLOCK] RESULTS.md written — describes the data (numbers / plot) per the DESIGN spec; any
+      lightweight qualitative read stays separable from the numbers (no pre-registered verdict). If
+      RESULTS does assert a claim, conclusions are separated from postdictions.                  ev:
 - ☐ [BLOCK] Cross-family close audit run + every finding responded (ACCEPT/DISPUTE/DEFER).       ev: AUDIT.md
 - ☐ [BLOCK] Teardown verified via the DEPLOYING account's control plane (REST 404 / GraphQL
       empty with the DEPLOY key — never SSH liveness); self-wake/watchdog cleared.               ev:

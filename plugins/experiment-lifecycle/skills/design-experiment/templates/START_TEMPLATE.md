@@ -9,7 +9,8 @@ watches your progress; talk to it with clear status lines.
 > Mechanical/reversible gap → pick a sensible default, record it, keep going. Load-bearing gap (changes
 > method/cost/meaning) → notify the designer-of-record and work AROUND it; only a gap that blocks the whole run stops
 > you, and then you notify + arm your self-wake — NEVER park silently. The design is locked: execute per `DESIGN.md`,
-> judge results against its pre-registered decision rules, do not redesign.
+> collect the data it specifies and report it (the numbers / plot); do not redesign and do not pre-register a verdict —
+> interpretation is the researcher's separate step.
 
 ## Your one job
 <One sentence: build/train/eval X, upload, report. What new data point this produces.>
@@ -47,8 +48,8 @@ e.g. "if any single arm wins >90% the selection is degenerate".>
 - If stuck >15 min, print **`<NAME> BLOCKED: <one-line reason>`** and stop — don't spin.
 
 ## Resilience (be resumable by a model-free supervisor — maintain continuously, not at close)
-- Checkpoint run state to DISK, not only the conversation: pod ids, what's collected, the pre-registered decision
-  rules live in the artifact dir / this file / the ledger (a fresh successor only has the disk).
+- Checkpoint run state to DISK, not only the conversation: pod ids, what's collected, the DESIGN data-collection
+  spec lives in the artifact dir / this file / the ledger (a fresh successor only has the disk).
 - Keep a standing successor handoff at `<TEMP.md path>` (pointers only — pod ids, artifact paths, look-again
   deadline, next action; never trigger-prone prose); refresh it at every checkpoint.
 - Write the run-supervision record at run start and keep it current:

@@ -6,7 +6,7 @@ description: >-
   START.md + CHECKLIST.md, arm your self-wake, then run the loop to completion:
   acquire compute (via the gpu-job backend), PROVISION it (per your execution
   profile), drive it (a self-contained detached driver), collect results to your
-  artifact store, and CLOSE (RESULTS.md vs the pre-registered rules, cross-family
+  artifact store, and CLOSE (RESULTS.md describes the data per the DESIGN spec, cross-family
   audit via verify-claims, teardown, ledger). Use when handed a brief to run
   ("execute the wave per START.md", "run this arm", "kick off the eval"). The
   DESIGN half is the `design-experiment` skill; this is the EXECUTE half — it does
@@ -41,14 +41,15 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
     blocks the *whole* run do you stop — and then **TEAR DOWN THE COMPUTE FIRST** (a blocked run bills the same as a
     completed one — see tear-down-on-block in the close), record the blocker, ping the human, and clear the now-pointless
     self-wake. **Never leave blocked compute billing while you wait for a decision.**
-- **The design is locked — don't redesign.** Judge results against the **pre-registered decision rules in `DESIGN.md`**.
-  If you think the design is wrong, that's a load-bearing flag to the designer-of-record, not a unilateral change.
+- **The design is locked — don't redesign.** Collect + report the data `DESIGN.md` specifies (the numbers / the plot);
+  don't pre-register a verdict — interpretation is the researcher's separate step. If you think the design is wrong, that's
+  a load-bearing flag to the designer-of-record, not a unilateral change.
 - **Record your gaps.** The defaults you had to invent and the things you had to flag are **feedback that grades the
   design**: surface them in the close retro (too many = the design wasn't pinned enough → the design skill needs work).
 
 ## Your brief is your world — read it
 
-Your brief is **`DESIGN.md`** (the science + pre-registered rules) + **`START.md`** (the operational bridge: input
+Your brief is **`DESIGN.md`** (the science + the data-collection spec) + **`START.md`** (the operational bridge: input
 paths, scripts to adapt, cost ceiling, designer-of-record, and the execution-profile snapshot/link) + **`CHECKLIST.md`**
 (the verification gates). Read all three first. If you need a fact that isn't in the brief, that's a brief gap — flag it
 (load-bearing) or default-and-record (mechanical), don't confabulate.
@@ -99,7 +100,7 @@ instance that runs a model-free relaunch supervisor (the #54 crash-resilience de
 Three obligations, maintained continuously (not at close):
 
 - **Checkpoint state to disk, not only to conversation.** Everything a successor needs to continue —
-  what's launched, **pod ids**, what's been collected, the pre-registered decision rules — lives in the run's
+  what's launched, **pod ids**, what's been collected, the DESIGN data-collection spec — lives in the run's
   artifact dir / `START.md` / ledger. `--continue` replays the conversation, but a *fresh* successor only has the
   disk. Anything load-bearing that's only in your chat history is lost when the session is.
 - **Keep an always-current successor handoff.** Maintain `TEMP.md` (your instance's handoff path) as a
@@ -219,8 +220,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Stepping away?** Arm the controller-side idle-teardown watchdog (`gpu-job`) — always-on, detached, **scoped to THIS
   unit's id only** (never blanket-delete idle compute; peers own theirs).
 - **Write `RESULTS.md` FIRST — the experiment-close gate (do NOT skip).** Bar: *a fresh agent could reproduce this run
-  and know what you concluded **from this dir alone**.* **Judge each arm against the pre-registered decision rules in
-  `DESIGN.md`**; separate conclusions from postdictions. One `RESULTS.md` at close for a multi-arm wave, not per-arm.
+  and understand the data **from this dir alone**.* **Describe each arm's data (the numbers / the plot) per the DESIGN
+  spec**; any lightweight qualitative read stays separable from the numbers — no pre-registered verdict (if RESULTS *does*
+  assert a claim, separate conclusions from postdictions). One `RESULTS.md` at close for a multi-arm wave, not per-arm.
 - **Stage the record locally** (path-scoped if your tree is shared). It is *landed to GitHub* by `log-experiment` **after** the close audit (below), not by a raw push — the experiment gate needs `AUDIT.md` to exist first.
 - **Independent close audit — the OUTPUT-side gate (before clearing the self-wake).** Your self-audit can't catch your
   own reproducibility gaps/overclaims/confounds. Run a **cross-family** audit via **`verify-claims`**
@@ -269,8 +271,8 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Cheap proxy in, full-scale out.** Search on small model / small-n / cheap grader; validate finalists at full scale.
   **Re-run finalists once** before believing them (best-of-N from noise fakes ≈ SE·√(2 ln N) — often bigger than the
   gaps you chase).
-- **Honor the pre-registered rules** in `DESIGN.md` — don't move the goalposts post-hoc; separate conclusions
-  (pre-registered) from postdictions (fitted after — unverified).
+- **Report the data `DESIGN.md` specifies** — don't move the goalposts post-hoc. Interpretation is the researcher's
+  separate step; if RESULTS *does* assert a claim, separate conclusions from postdictions (fitted after — unverified).
 - **Cost / API discipline is your execution profile's policy** + the brief's ceiling. (Typically: GPU is cheap, run it
   autonomously and tear down promptly; the LLM API is the real sink — gate big data-generation/judging runs with the
   human before launching.)

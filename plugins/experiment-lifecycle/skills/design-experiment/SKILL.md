@@ -1,12 +1,13 @@
 ---
 name: design-experiment
 description: >-
-  Design and pre-register a GPU experiment WITH the researcher, then dispatch it
+  Design a GPU experiment as a DATA-COLLECTION spec WITH the researcher, then dispatch it
   to a fresh-context executor. The "together" stage: propose with taste + a
   recommendation, surface the load-bearing choices, write the DESIGN.md
-  pre-registration (hypothesis, arms, metric, decision rules, cost), run the
+  data-collection spec (purpose — what the data is designed to inform; arms; the canonical
+  metric + exact eval definitions; comparability; cost — but NOT a pre-registered verdict), run the
   pre-launch gates (verify-claim on the FACTS + cross-family design-audit on the
-  LOGIC), iterate till the researcher clears it, write the thin START.md executor
+  DATA-TRUSTABILITY), iterate till the researcher clears it, write the thin START.md executor
   brief + CHECKLIST.md gates, and dispatch a fresh-context executor to run it. Use
   when starting to design / scope / propose an experiment ("let's design X",
   "propose an experiment for Y"), BEFORE it runs. The layer ABOVE run-experiment —
@@ -40,19 +41,31 @@ You are the **design-side agent**, working with the researcher (the human who ho
 - **Iterate till the researcher stops** (they are the convergence stop — see the gates). Don't over-engineer past the
   real flaws.
 
-## Step 1 — Write `DESIGN.md` (the pre-registration)
+## Step 1 — Write `DESIGN.md` (the data-collection spec)
 
-`DESIGN.md` (in the experiment's working dir) is the experiment's brain and the executor's scientific world. Pin:
-- **WHY + hypothesis + predictions, BEFORE running.** Pre-registration is what makes a result interpretable instead of
-  a post-hoc story. State the arms, the canonical metric (exact eval definitions — these are load-bearing), and
-  **numeric decision rules** (what counts as the effect / no-effect / inconclusive; falsifiers; per-component reporting).
-- **Separate conclusions from postdictions:** a *conclusion* is strictly about the pre-registered hypothesis; any *new*
-  explanation fitted from the results is a *postdiction* (unverified; if load-bearing, test on FRESH data). Bake this
-  distinction into the doc so the executor reports it correctly.
+An experiment's job is to produce **trustworthy DATA**. *Interpretation* — "what does it mean" — is a **separate step the
+researcher does afterward, by looking at the data.** So `DESIGN.md` (in the experiment's working dir) pins how to collect
+**reliable, comparable** data and states **what that data is designed to inform** — it does NOT pre-register a verdict on
+it. The line: **purpose and lightweight qualitative reads are welcome; pre-registered verdicts and refutation thresholds
+are not.** Pin:
+- **WHY + what question the data is designed to inform** (the *purpose* — load-bearing: "trustworthy for what?" is
+  undefined without it, and the data-audit's "what would invalidate this" is relative to it). This is a purpose, **not a
+  claim**: do NOT pre-register numeric decision rules, falsifiers, "what counts as effect / no-effect / inconclusive," or
+  pass/fail verdicts. (If a design genuinely *does* assert a rigorous claim, that's fine — it just then gets audited as
+  one; the default is measurement.)
+- **What's measured + comparability (the load-bearing core).** The arms; the canonical metric with **EXACT eval
+  definitions** (load-bearing); **comparability** — the anchor-gate and co-measurement on ONE scale; the confound controls
+  that corrupt *the number*; **pinning the independent variable**; the data-audit + manifest. This is the rigor that earns
+  its keep: the silent failure mode is *a clean pipeline producing a confidently-wrong NUMBER*.
+- **RESULTS describes the data, not a verdict.** `RESULTS.md` reports the numbers / the plot and **may include a
+  lightweight, clearly-marked qualitative read** ("the data looks like X") that stays **separable from the numbers**. It
+  must NOT make a rigorous pre-registered claim ("H confirmed / refuted at threshold") — the rigorous interpretation is the
+  researcher's separate analysis step. (Hygiene survives: a read *fitted* from the data is a postdiction — unverified; if
+  load-bearing, test on FRESH data.)
 - **Provenance gets verified or flagged, never asserted.** Before stating any lineage/provenance, sweep the archive for
   EVERY artifact matching the target's name AND public sources under the researcher's handles (HF, GitHub). (Real case:
   a brief asserted "no checkpoint survives" when the policy was in fact live on the customer's own HF — a wrong anchor
-  silently redefines PASS/FAIL for a zero-context reader.) State unverified readings as "documented reading, unverified."
+  silently corrupts every comparison built on it.) State unverified readings as "documented reading, unverified."
 - **Cost estimate** (GPU $/hr × runtime; API cascade) + the parallel-wave shape (independent arms launch together).
 
 ## Step 2 — The pre-launch gates (both MANDATORY for a new design, before any GPU/$ spend)
@@ -63,10 +76,15 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
   anchors, provenance, comparison references — read-only. **DISPUTE blocks until resolved. UNKNOWN = the records can't
   support the claim** (a records-sufficiency finding, not a pass). Don't check your own claim; route it to independent
   context.
-- **design-audit — the design's LOGIC** (`audit_experiment --design` → `DESIGN_AUDIT.md`): a cross-family review of the
-  *proposal* — confounds/missing controls, comparability traps, pre-registration completeness, claim-scope, power,
-  execution under-specification, cheaper-decisive alternatives. (Origin: a real case where two design flaws survived
-  until close because nothing audited the *logic* pre-launch.)
+- **design-audit — the design's DATA-TRUSTABILITY** (`audit_experiment --design` → `DESIGN_AUDIT.md`): a cross-family
+  review of the *proposal* — does it produce reliable, comparable data for its stated purpose? Comparability / co-measurement
+  traps, confounds that corrupt the number, variable-pinning, anchor reproduction, honest component / parse% reporting,
+  execution under-specification, and is-this-the-right/cheapest-data. It leads with a qualitative evidence-quality read
+  ("this will produce a clean comparable number" / "this confound will muddy it"). Claim-rigor dimensions (decision-rule
+  soundness, claim-scope, power) fire **only if the design actually asserts a verdict** — a measurement design that states a
+  purpose but no decision rule is not "incomplete." (Origin: a real case where two design flaws survived until close because
+  nothing audited the *logic* pre-launch — and two later cases where every claim-rigor HIGH dissolved the moment the
+  researcher said "just plot the data," while every measurement-validity finding survived and mattered.)
 - **The loop: audit ONCE → triage as a PEER → surface survivors to the researcher → they arbitrate.**
   1. **Audit ONCE.** Do NOT auto-iterate to "no new findings" — an adversarial auditor is *told* to find the next
      thing, so it never converges (real case: a design ran to 9 passes; confounds settled by ~pass 4, the rest was
@@ -94,7 +112,7 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
   planning is the failure mode. Mechanical/reversible gap → pick a sensible default, record it, keep going.
   Load-bearing gap (changes method/cost/meaning) → notify the researcher and work AROUND it; only a gap that blocks the
   whole run stops you, and then you notify + arm your self-wake — NEVER park silently."*
-- **Don't-redesign:** the design is locked; execute per `DESIGN.md`; judge results against its pre-registered rules.
+- **Don't-redesign:** the design is locked; execute per `DESIGN.md`; collect + report the data it specifies (no verdict).
 - **Exact input paths + scripts to adapt**, with filename caveats (a filename can lie about its contents — verify by
   content, not name). Point at battle-tested worked-example drivers; don't make the executor write from scratch.
 - **Use the `run-experiment` skill** for the loop + gates. **Cost ceiling** + who the **designer-of-record** is (so the

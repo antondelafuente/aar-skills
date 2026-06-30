@@ -38,9 +38,11 @@
 #   experiment-dir: the ~/orchestrator/<exp>/ dir to audit (read-only; the auditor sees its files)
 #   out-file:       findings destination (default: <experiment-dir>/AUDIT.md, or DESIGN_AUDIT.md in --design mode)
 #   design-file:    (--design mode) the proposal to audit; default = newest DESIGN*.md in the dir
-# --design audits the PROPOSAL before any money/GPU moves (third gate alongside verify_claim
-# pre-launch and the close audit): confounds & missing controls, comparability traps,
-# pre-registration completeness, claim-scope, power, cheaper-decisive alternatives. Motivated by
+# --design audits the PROPOSAL's DATA-TRUSTABILITY before any money/GPU moves (third gate alongside
+# verify_claim pre-launch and the close audit): will it produce reliable, comparable data for its stated
+# purpose? comparability/co-measurement, confounds that corrupt the number, variable-pinning, anchor
+# reproduction, cheaper-decisive alternatives. Claim-rigor (decision rules, claim-scope, power) is audited
+# ONLY if the design asserts a verdict — measurement designs state a purpose, not a claim. Motivated by
 # midtrain-interp v2, whose two real flaws (in-sample steering eval; no random-direction control)
 # were DESIGN flaws only caught at close.
 # Env: AAR_SUBSTRATE=claude|codex (family that ran the exp; default claude — set in instance config)
@@ -135,32 +137,39 @@ Read it in full; read other files in the dir tree for context (prior RESULTS*.md
 files (LOOK_AGAIN.md, *.log, driver logs, CLAIMED_BY, .done markers): they describe the RUN's status, not
 the design — never raise a finding from them (e.g. 'the run already launched' is not a design flaw).
 
-Review against the program's constitution (below). The most load-bearing standards: validity and
-comparability are the main failure mode ('are these two numbers even on the same scale?'); success
-criteria and falsifiers must be pre-registered BEFORE the run; conclusions must be distinguishable
-from postdictions by design; the silent failure mode is a clean pipeline producing a
-confidently-wrong number.
+An experiment's job is to produce TRUSTWORTHY DATA for a stated purpose; INTERPRETATION ('what does it
+mean') is the researcher's SEPARATE step, done afterward by looking at the data. So this audit checks
+DATA-TRUSTABILITY, not interpretation-rigor. A measurement design states a PURPOSE ('what the data is
+designed to inform') but pre-registers NO verdict, decision rule, or falsifier — and that is CORRECT, not
+incomplete: do NOT flag a measurement design for 'missing success criteria / decision rules / power
+analysis.' Review against the program's constitution (below). The most load-bearing standard: validity and
+comparability ('are these two numbers even on the same scale?'); the silent failure mode is a clean pipeline
+producing a confidently-wrong NUMBER.
 
 Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say
 'no material finding' for it — do NOT invent issues. False findings destroy this tool's value.
-1. CONFOUNDS / MISSING CONTROLS — are the planned comparisons matched; are the baselines and
-   negative controls (random/orthogonal/shuffled class, placebo arms) IN THE PLAN, not deferred?
-2. VALIDITY / COMPARABILITY — will any two numbers being compared be on the same scale, same metric,
-   same data distribution? Any train/eval leakage, probe contamination, or selection effect built
-   into the construction?
-3. PRE-REGISTRATION COMPLETENESS — are success criteria AND falsifiers stated with thresholds? Is
-   every plausible outcome interpretable (no 'heads I win, tails ambiguous' designs)? Are
-   hyperparameter/selection steps confined to fit data?
-4. CLAIM-SCOPE — will the planned evidence actually license the claim the design says it is after
-   (causal strength, generality, storage-vs-routing, in-sample-vs-held-out)? Quote the claim and the
-   evidence that falls short.
-5. POWER / SENSITIVITY — n, seeds, effect sizes: can the design distinguish its hypotheses at the
-   planned sample sizes, or will results land inside the noise band?
-6. EXECUTION UNDER-SPECIFICATION — steps a zero-context executor would have to guess (datasets,
-   composition of checkpoints, prompt formats, thresholds), where a wrong guess silently changes
-   the result.
-7. CHEAPER / MORE DECISIVE ALTERNATIVE — is there a materially cheaper design answering the same
-   question, or a small addition that turns a suggestive result into a decisive one?
+1. VALIDITY / COMPARABILITY (lead) — will any two numbers being compared be on the same scale, same metric,
+   same data distribution, co-measured? Any train/eval leakage, probe contamination, or selection effect
+   built into the construction? Does the anchor / baseline reproduce?
+2. CONFOUNDS THAT CORRUPT THE NUMBER — are the planned comparisons matched; are the baselines and negative
+   controls (random/orthogonal/shuffled class, placebo arms) IN THE PLAN, not deferred? Is a nuisance
+   variable (descriptor/length/format) confounded with the signal?
+3. VARIABLE-PINNING & HONEST REPORTING — is the independent variable actually pinned (only it varies across
+   arms)? Are components reported separately (not silently pooled), and parse%/coverage reported honestly?
+4. EXECUTION UNDER-SPECIFICATION — steps a zero-context executor would have to guess (datasets, composition
+   of checkpoints, prompt formats), where a wrong guess silently changes the DATA.
+5. RIGHT / CHEAPEST DATA FOR THE PURPOSE — given what the design says the data is for, is THIS the right
+   data, and is there a materially cheaper way to get the same trustworthy data (or a small addition that
+   makes it cleaner / more comparable)?
+6. CLAIM-RIGOR — CONDITIONAL: fire ONLY IF the design actually asserts a rigorous interpretation / verdict
+   / pre-registered conclusion. THEN audit it as one (pre-registration completeness: success criteria AND
+   falsifiers with thresholds; claim-scope: does the evidence license the claim — causal strength,
+   generality, in-sample-vs-held-out; power: can it distinguish the asserted hypotheses at the planned n).
+   If the design states a PURPOSE but no verdict, this dimension is 'no material finding' — NOT 'incomplete.'
+
+Also emit, separate from the findings, a one-line QUALITATIVE EVIDENCE-QUALITY read — the good/bad signal the
+researcher wants — e.g. 'this will produce a clean comparable number' / 'this confound will muddy it' /
+'cheaper way to get the same data' (see the output format).
 
 PRIOR-ROUND DEBATE (when this is a RE-RUN on a revised proposal): if the proposal contains the author's
 RESPONSES to earlier findings (e.g. a 'Design-audit responses' / pass-N section), this is a PEER DEBATE,
@@ -184,6 +193,7 @@ FINDING <n>: <HIGH|MED|LOW> [<dimension>]
   recommendation: <one sentence>
 ...
 NO-FINDING DIMENSIONS: <list any dimension where you found nothing material>
+EVIDENCE-QUALITY: <one line — will this design produce a clean, comparable number for its stated purpose, or what will muddy it / a cheaper way to get the same data>
 SUMMARY: high=<n> med=<n> low=<n>
 
 === THE PROGRAM CONSTITUTION (audit against this) ===
@@ -330,11 +340,15 @@ PROMPT="You are an INDEPENDENT ADVERSARIAL AUDITOR from a different model family
 ran this experiment. You are auditing a COMPLETED autonomous-research experiment before it is treated
 as 'done'. Read any file in the current directory tree (grep/head as needed; some logs are large).
 
-You audit the experiment AGAINST the research program's own constitution, included below. The most
-load-bearing standards in it: a fresh agent must be able to reproduce the run and know its conclusion
-FROM THIS DIR ALONE; conclusions (pre-registered) must be separated from postdictions (fitted after);
-validity and comparability are the main failure mode; headline numbers must trace to durable,
-versioned code in the experiment record, not ad-hoc steps.
+You audit the experiment AGAINST the research program's own constitution, included below. An experiment's
+job is to produce TRUSTWORTHY DATA; INTERPRETATION is the researcher's separate later step — so a RESULTS
+that describes the data (the numbers / the plot, + an optional clearly-marked lightweight qualitative read)
+and asserts NO pre-registered verdict is VALID and complete: do NOT flag it for a 'missing conclusion /
+decision rule.' The most load-bearing standards: a fresh agent must reproduce the run and understand the DATA
+FROM THIS DIR ALONE; validity and comparability are the main failure mode; headline numbers must trace to
+durable, versioned code in the record, not ad-hoc steps. The interpretation backstop is CONDITIONAL: IF
+RESULTS *does* assert a rigorous claim/verdict, THEN it must not overclaim and its conclusions must be
+separated from postdictions (fitted after).
 
 Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say
 'no material finding' for it — do NOT invent issues. False findings destroy this tool's value.
@@ -342,15 +356,17 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    in the record (the scripts/drivers in the dir), or by something not in the records? Does that code
    regenerate them? Is there evidence of a clean rerun? (If git metadata is available, also check the
    code is committed; if not — e.g. a /tmp or R2 copy — judge durability/presence, not git status.)
-2. CLAIM-vs-EVIDENCE — does each CONCLUSION follow from the data shown, or overreach the method
-   (causal-strength, generality, storage-vs-correlation, in-sample-vs-general)?
+2. CLAIM-vs-EVIDENCE — CONDITIONAL on RESULTS asserting a claim: does each CONCLUSION follow from the data
+   shown, or overreach the method (causal-strength, generality, storage-vs-correlation, in-sample-vs-general)?
+   A data-only RESULTS that reports numbers without a verdict is valid — do NOT flag 'missing conclusion.'
 3. CONFOUNDS / VALIDITY — comparisons matched, baselines present, alternative explanations and
    missing controls (e.g. random/orthogonal baselines) ruled out?
 4. DATA SANITY — actually SAMPLE the raw generated/training/eval rows (not just the aggregate
    numbers): are labels right, any train/eval or prompt-template leakage, malformed/duplicated rows,
    generator artifacts, or descriptor/format confounds in how the data was constructed? This is the
    'crappy generated data / confounded probe' failure class — inspect the rows, don't trust the JSON.
-5. CONCLUSIONS vs POSTDICTIONS — separated, postdictions flagged untested?
+5. CONCLUSIONS vs POSTDICTIONS — ONLY IF RESULTS asserts a verdict: are conclusions separated from
+   postdictions, postdictions flagged untested? A data-only RESULTS (numbers + lightweight read) needs none.
 6. RECORDS SELF-SUFFICIENCY — could a fresh agent reproduce the headline results FROM THIS DIR ALONE
    (are the decisive artifacts/probes/logs present, not only referenced on remote storage)?
 7. HONEST BOUNDS — are the real limitations (n, single model/organism, in-sample fits, selected
