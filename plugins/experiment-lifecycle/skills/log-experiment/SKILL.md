@@ -1,3 +1,13 @@
+---
+name: log-experiment
+description: >-
+  Log a finished experiment or a plain note to the research repo as a GATED pull request and merge it —
+  the research counterpart to ship-change. Classifies by the registry convention (DESIGN.md + RESULTS.md =
+  experiment, otherwise note) and gates by context: an experiment verifies its close-audit is present and
+  clean; a note runs a deterministic secret scan. A cross-family engineer bot (the family opposite the
+  author) approves to satisfy branch protection. Run this instead of hand-doing branch/PR/approve/merge.
+  Self-contained (does not source wf.sh); config via RESEARCH_REPO + the instance engineer seam.
+---
 # log-experiment — log an experiment or note to GitHub as a gated PR
 
 The **research** counterpart to `ship-change`: where `ship-change` ships a code change to the product,
