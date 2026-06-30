@@ -338,14 +338,14 @@ def _selftest():
 
 
 if __name__ == "__main__":
+    if _BADARGS:                    # unrecognized arg: refuse FIRST, never deploy (fail-closed even
+        sys.stderr.write(f"deploy_pod.py: unrecognized argument(s): {' '.join(_BADARGS)}\n\n")
+        sys.stderr.write(_USAGE)    # alongside --selftest/--help — a typo never slips through)
+        raise SystemExit(2)
     if _SELFTEST:
         _selftest(); raise SystemExit(0)
     if _HELP:                       # --help/-h: print usage, never deploy
         print(_USAGE); raise SystemExit(0)
-    if _BADARGS:                    # unrecognized arg: refuse, never deploy (fail-closed)
-        sys.stderr.write(f"deploy_pod.py: unrecognized argument(s): {' '.join(_BADARGS)}\n\n")
-        sys.stderr.write(_USAGE)
-        raise SystemExit(2)
     # INTENT (pre-deploy): mint the lease BEFORE deploy() so even a created-but-id-never-returned pod
     # is covered (the reaper matches it to the pending intent by nonce and reaps it on the intent
     # expiry). The intent records the KEY REFERENCE the reaper resolves on its own (the API_KEY_ENV var
