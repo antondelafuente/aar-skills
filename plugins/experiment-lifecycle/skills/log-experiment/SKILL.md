@@ -61,18 +61,19 @@ to the researcher if it needs a human call.
 
 ## Identity / auth
 
-The author can't approve their own PR, so a **cross-family engineer bot — the family OPPOSITE the author**
-(`LOG_EXPERIMENT_AUTHOR_FAMILY`) — posts the approving review that satisfies the research repo's branch
-protection, using the same engineer identities `ship-change` uses. Author push/PR/merge use ambient `gh`:
-the researcher logging to their *own* lab is the legitimate author; the cross-family bot is the independent
-reviewer. The reviewer token is minted just-in-time, fail-closed (no token → BLOCK before any mutation), and
-never printed.
+Both the writes and the review go through **engineer bots**: the **author-family** bot does the commit /
+push / PR-create / merge, and the **opposite-family** bot posts the approving review — so the author bot
+can't approve its own PR (cross-family independence), using the same engineer identities `ship-change` uses.
+Because the writes use the author bot's own token, **an autonomous agent can log its work with no ambient
+`gh` credential at all**. Both tokens are minted just-in-time, validated against the repo, fail-closed (no
+token / no access → BLOCK before any mutation), and never printed.
 
 ## Config (instance, env-overridable — never hardcode an instance; fails closed if unset)
 
 - `RESEARCH_REPO` — the research repo (`owner/repo`). **Required — no default**; the input dir's `origin` must match it.
 - `LOG_EXPERIMENT_AUTHOR_FAMILY` — `claude`|`codex`. Defaults to `$AAR_SUBSTRATE`; **fails closed if neither is set** (a wrong default must not make the review same-family). The reviewer is the **opposite** family.
-- `LOG_EXPERIMENT_TOKEN_CMD_CLAUDE` / `LOG_EXPERIMENT_TOKEN_CMD_CODEX` — each a command taking `<owner/repo>` that mints that family's engineer-bot token. The **reviewer's** family's command is used; **fail closed if unset**. (A single `LOG_EXPERIMENT_REVIEWER_TOKEN_CMD` override is also honored.)
+- `LOG_EXPERIMENT_TOKEN_CMD_CLAUDE` / `LOG_EXPERIMENT_TOKEN_CMD_CODEX` — each a command taking `<owner/repo>` that mints that family's engineer-bot token. **Both** are used: the author family's (writes) and the opposite family's (approval). **Fail closed if either is unset.**
+- `LOG_EXPERIMENT_GIT_AUTHOR_CLAUDE` / `LOG_EXPERIMENT_GIT_AUTHOR_CODEX` — the `Name <email>` each bot commits as. **Fail closed if the author family's is unset.**
 
 ## Composes
 
