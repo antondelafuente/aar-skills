@@ -82,7 +82,7 @@ Your human wants these skills available. Do this, in order:
 | **verify-claims** | adversarial fact / design / data / code review of load-bearing work, read by an independent model *family* — the cross-family validity gate | shipped |
 | **experiment-lifecycle** | run a GPU experiment like a researcher: `design-experiment` (pre-register a design, clear it with the human through the validity gates) → `run-experiment` (a zero-context executor acquires, provisions, drives, collects, closes) | shipped |
 | **feedback-loop** | report and triage scaffold friction: `file-feedback` captures product/user pain while fresh, `triage-feedback` maintains dispositions and routes fixes through the product workflow | shipped |
-| **aar-engineering** | the SWE pipeline that builds the product itself: ship a scaffold change through a GitHub-backed lifecycle — design doc → cross-family review → classifier → checks → merge-when-clean | shipped |
+| **aar-engineering** | the SWE pipeline that builds the product itself: ship a scaffold change through a GitHub-backed lifecycle — design doc → cross-family review → checks → merge-when-clean | shipped |
 | *reproduce-paper* | point an agent at a paper, get a graded reproduction | planned |
 
 (Exact versions live in each `plugins/<module>/.claude-plugin/plugin.json` — the one canonical home — not duplicated here.)

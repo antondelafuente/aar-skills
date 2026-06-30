@@ -3,8 +3,8 @@ name: ship-change
 description: >-
   Ship a scaffold/product change through the SWE pipeline as a GitHub-backed lifecycle: Issue → worktree
   branch → namespaced design doc → draft PR → cross-family --scaffold design review (posted to the PR) →
-  implement → cross-family --code review (posted) → classifier (records mechanical vs architectural with
-  evidence) → tracked .aar-ci checks + fake-HOME behavior smoke → fail-closed merge-when-clean. Use for any
+  implement → cross-family --code review (posted) → tracked .aar-ci checks + fake-HOME behavior smoke →
+  fail-closed merge-when-clean. Use for any
   change to the product scaffold (skills, plugins, CI, the constitution). The agents ARE the engineers: a
   change is authored by one family and reviewed by the OTHER. ENFORCED repos can require the --code review as
   a native opposite-family engineer review before merge. Worktree-from-the-start — never disturbs the shared
@@ -19,18 +19,18 @@ this ships a change to the *product itself*. It belongs to the **SWE pipeline** 
 
 **The agents are the engineers** (`AGENTS.md` "The vision"). Every change is **authored by one model
 family and reviewed by the OTHER** (Claude-authored → Codex reviews; vice-versa). The human is the
-staff-engineer / PM: sets direction (the Issue), gates the **architectural design**, and audits the durable
-GitHub trail — but is not a gate on routine merges. This mirrors the research split: design *with* the
-human, execution *by* the agents.
+staff-engineer / PM: sets direction (the Issue) and shapes the backlog (`needs-shaping → ready`), and audits the
+durable GitHub trail — but is **not a per-PR gate**. The human gates *which* architectural work happens (the
+Issue + the shaping conversation), not each PR's merge; the cross-family review gates the change itself. This
+mirrors the research split: design *with* the human at the direction level, execution *by* the agents.
 
 **ENFORCED where configured.** The cross-family `--code` review can be posted as a **native opposite-family
 engineer review**, and branch protection on `main` can **require** that approval (plus no force-push/deletion,
 and *include administrators* so even an admin author token can't bypass) before any merge. `wf.sh`'s own
 fail-closed gate (checks + a final-SHA `--code` review, no HIGH) runs first; on enforced repos, `gh pr merge`
-then succeeds only because the required approval is present. **Still advisory:** the classifier's architectural/mechanical
-classification is recorded on the PR, not yet wired to a required `design-gate` check — so the design
-approval is the human's judgment, recorded, not mechanically blocking. As-built config + escape hatches:
-`RUNBOOK.md`.
+then succeeds only because the required approval is present. Architectural and mechanical changes use the
+**same** gate — the cross-family review + checks, author-triaged; there is no classification step and no
+per-change human design approval. As-built config + escape hatches: `RUNBOOK.md`.
 
 ## The non-negotiable properties (the driver enforces them — don't work around them)
 
@@ -63,10 +63,6 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
 - **Tracked check profile + behavior smoke.** Every change runs `<repo>/.aar-ci/checks.sh` (deterministic:
   JSON/syntax/compile/version-bump) AND the fake-HOME behavior smoke for plugin/skill changes (an
   install/discovery break that deterministic checks can't catch).
-- **The classifier records, never blocks (advisory).** `.aar-ci/classify.sh` records mechanical vs
-  architectural WITH EVIDENCE and the driver posts it to the PR. Architectural = needs the PM's design
-  approval; mechanical merges on the cross-family review + checks alone. This is recorded for the human to
-  read — not yet wired to a required `design-gate` check (a tracked follow-up).
 
 ## The lifecycle (the agent drives; `wf.sh` is the mechanical glue)
 
@@ -100,9 +96,9 @@ wf.sh open <WORKTREE> <author>    # prints PR=<n>; author=claude|codex is requir
 
 # 3. DESIGN REVIEW — cross-family --scaffold on the doc, posted to the PR
 wf.sh design-review <WORKTREE> <author>
-#   → revise the doc for findings. ARCHITECTURAL changes: this is where the PM's design approval belongs
-#     (recorded, advisory — the human reads the PR; not yet a required check). `wf.sh` selects the reviewer
-#     environment from <author>; do not clear or set `BASH_ENV` by hand to force a reviewer. Then:
+#   → revise the doc for findings, triaging as a peer (no separate human design approval — architectural and
+#     mechanical changes use the same gate). `wf.sh` selects the reviewer environment from <author>; do not
+#     clear or set `BASH_ENV` by hand to force a reviewer. Then:
 
 # 4. IMPLEMENT — build the change IN the worktree, commit it (path-scoped) on the branch.
 
@@ -112,10 +108,7 @@ wf.sh code-review <WORKTREE> <author>
 #     with accept/defer + reason via `wf.sh comment <WORKTREE> <author>` (posts as the AUTHOR engineer
 #     identity, NOT your owner token — never a bare `gh pr comment`). Re-run code-review after a HIGH fix.
 
-# 6. CLASSIFY — record mechanical|architectural with evidence, posted (advisory)
-wf.sh classify <WORKTREE> <author>
-
-# 7. FINISH — checks + smoke + fail-closed --code merge-gate + mark ready + merge + cleanup worktree
+# 6. FINISH — checks + smoke + fail-closed --code merge-gate + mark ready + merge + cleanup worktree
 wf.sh finish <WORKTREE> <author>
 #   → SHIPPED on a clean gate; or BLOCKED with the reason (fix + re-run finish). Cleans the worktree.
 ```
@@ -199,7 +192,6 @@ GitHub is the durable coordination record, but it should read like a handoff to 
 - PR bodies show the first paragraph of `Problem` and the first paragraph of `Approach`, then hide the full design
   record under details.
 - Review comments start with the result in plain language. The full audit output stays under details for agents.
-- Classification comments say what the classification means first, then hide the classifier evidence under details.
 - Author triage comments post exactly what the author writes, because accept/defer decisions must stay visible. Start
   them with the outcome in plain language; put any long evidence under your own details block.
 
@@ -207,8 +199,6 @@ GitHub is the durable coordination record, but it should read like a handoff to 
 
 - `<repo>/.aar-ci/checks.sh` (required, tracked, executable) — deterministic checks + when to run the
   behavior smoke. See `automated-researcher/.aar-ci/checks.sh`.
-- `<repo>/.aar-ci/classify.sh` + `classifier.conf` — the mechanical/architectural classifier (fail-closed;
-  a non-configurable protected floor + an adjustable glob list). See `automated-researcher/.aar-ci/`.
 - `<repo>/.aar-ci/fake_home_smoke.sh` — the virgin-HOME install/resolve behavior smoke.
 
 ## Composes

@@ -3,8 +3,7 @@
 #
 # Drives one scaffold change through its whole lifecycle, GitHub as the durable coordination layer:
 #   Issue -> worktree branch -> namespaced proposals/<issue>-<slug>.md -> draft PR -> --scaffold design
-#   review (posted) -> implement -> --code review (posted) -> classifier (records mechanical|architectural
-#   with evidence, posted) -> checks + fail-closed gate -> merge-when-clean.
+#   review (posted) -> implement -> --code review (posted) -> checks + fail-closed gate -> merge-when-clean.
 # The agent (following SKILL.md) does the JUDGMENT steps (write the design doc, implement, respond to
 # findings) BETWEEN these mechanical subcommands; wf.sh is the glue that is too error-prone to hand-run.
 #
@@ -22,9 +21,8 @@
 # protection on `main` can REQUIRE that opposite-family approval (+ no force-push/deletion, include-admins so the
 # admin author token can't bypass) before any merge. wf.sh's own fail-closed gate (checks + final-SHA review,
 # no HIGH) runs first; `gh pr merge` then succeeds only when the required approval is present.
-# STILL ADVISORY: the classifier's architectural/mechanical classification is RECORDED on the PR (the human
-# reads it), not yet wired to a required `design-gate` check — so the design/architectural approval is the
-# human's judgment, recorded, not mechanically blocking. See RUNBOOK.md for the as-built config + escape hatches.
+# Architectural and mechanical changes go through the SAME gate (cross-family review + checks, author-triaged);
+# there is no separate classification step or per-change human design approval. See RUNBOOK.md for as-built config.
 #
 # Usage: run `wf.sh help` (or `-h` / no args) for the lifecycle short-list; SKILL.md is the full runbook.
 # (The command list lives in ONE place — the usage() function below — not duplicated here.)
@@ -67,7 +65,6 @@ Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh code-review   <worktree> <author> --code on the diff, post to PR (fail-closed)
   wf.sh comment <worktree> <author> [file] post an AUTHOR triage comment as the engineer identity (body: file|stdin)
   wf.sh issue   <author> <gh issue args…>  file/comment a GitHub Issue AS the engineer identity (no worktree)
-  wf.sh classify      <worktree> <author> classifier on changed paths, post evidence (advisory record)
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh doctor <author> [repo-or-worktree] report ambient + engineer identity readiness without printing tokens
   wf.sh doctor <author> [repo-or-worktree] --readonly  STRICT read-only-ambient detector: exits non-zero if the ambient credential is not authoritatively read-only (API + git-push, per-source, non-mutating)
@@ -351,21 +348,6 @@ review_summary_text(){  # review_summary_text <high> <med> <low> <approving:0|1>
   else
     printf 'This review found no problems.'
   fi
-}
-
-classification_summary_text(){  # classification_summary_text <classification>
-  local class=$1
-  case "$class" in
-    architectural)
-      printf 'This PR touches a high-impact part of the scaffold. A human design approval is expected before treating it as routine. The detailed rule that matched is below.'
-      ;;
-    mechanical)
-      printf 'This PR looks mechanical. It can merge on the normal review and checks if no serious issues remain.'
-      ;;
-    *)
-      printf 'This PR was classified as %s. The detailed classifier output is below.' "$class"
-      ;;
-  esac
 }
 
 author_token_optional(){
@@ -2017,7 +1999,7 @@ design-review)  # wf.sh design-review <worktree> <author>
   # push so the reviewed doc == what the PR shows (consistency with code-review)
   git_push_author "$ATOK" "$WT" -q origin HEAD || die "push failed — can't review a doc the PR doesn't reflect"
   run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Design review (\`--scaffold\`)"
-  note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings; the PM's design approval is the human gate (recorded, advisory — not a required check). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
+  note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings, triaging as a peer (no separate human design approval — architectural and mechanical changes use the same gate). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
   ;;
 
 code-review)    # wf.sh code-review <worktree> <author>
@@ -2032,7 +2014,7 @@ code-review)    # wf.sh code-review <worktree> <author>
   ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
   [ -s "$DIFF" ] || die "empty diff main...$(wt_branch "$WT") — implement + commit the change first"
   run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Code review (\`--code\`)"
-  note "code-review done (HIGH=$REVIEW_HIGH). Triage findings (fix in $WT + commit, or respond via: wf.sh comment $WT $AUTHOR — posts as the engineer identity, NOT your owner token). Then: wf.sh classify $WT ; wf.sh finish $WT $AUTHOR"
+  note "code-review done (HIGH=$REVIEW_HIGH). Triage findings (fix in $WT + commit, or respond via: wf.sh comment $WT $AUTHOR — posts as the engineer identity, NOT your owner token). Then: wf.sh finish $WT $AUTHOR"
   ;;
 
 comment)        # wf.sh comment <worktree> <author> [body-file]   — post an AUTHOR triage comment
@@ -2166,55 +2148,8 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
   fi
   ;;
 
-classify)       # wf.sh classify <worktree> <author>   — advisory record (never blocks)
-  need_gh; WT=${1:?usage: wf.sh classify <worktree> <author>}; AUTHOR=${2:-}
-  if [ -n "$AUTHOR" ]; then
-    check_author "$AUTHOR"
-  elif ambient_identity_allowed; then
-    ambient_identity_note "classify without author (classification will use ambient auth)"
-  else
-    missing_identity_die "classify requires an author family (claude|codex) so the opposite-family reviewer identity can post the classification"
-  fi
-  [ -d "$WT" ] || die "no such worktree: $WT"
-  [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the automated-researcher repo?)"
-  require_clean "$WT"
-  mapfile -t PATHS < <(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD)
-  [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD"
-  OUT=$( cd "$WT" && .aar-ci/classify.sh "${PATHS[@]}" )
-  CLASS=$(echo "$OUT" | sed -nE 's/^CLASSIFICATION: //p' | head -1)
-  # Attribute the classification to the opposite-family reviewer identity when configured. Without an author
-  # or reviewer identity, keep the existing ambient-comment fallback.
-  RTOK=""
-  if [ -n "$AUTHOR" ]; then
-    if ambient_identity_allowed; then
-      RTOK=$(reviewer_token "$AUTHOR" 0)
-    else
-      RTOK=$(reviewer_token "$AUTHOR" 1)
-    fi
-  else
-    note "WARN: no author passed to classify; posting classification with ambient GitHub auth because WF_ALLOW_AMBIENT_IDENTITY=1"
-  fi
-  if [ -z "$RTOK" ]; then
-    ambient_identity_note "classification for PR lookup/post"
-    need_ambient_gh
-  fi
-  PR=$(wt_pr_required "$WT" "$RTOK")
-  BODY=$( { echo "## Type of change"; echo;
-      classification_summary_text "$CLASS"; echo; echo;
-      markdown_code_details "Classifier details" "$OUT"; } )
-  if [ -z "$RTOK" ] && ambient_identity_allowed; then
-    BODY=$( { ambient_override_notice "wf.sh classify on PR #$PR"; printf '\n\n%s' "$BODY"; } )
-  fi
-  if [ -n "$RTOK" ]; then
-    echo "$BODY" | GH_TOKEN="$RTOK" real_gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
-      || die "could not post the classification to PR #$PR as the reviewer identity — failing closed (classification was: $CLASS)"
-    note "posted classification to PR #$PR as the reviewer identity"
-  else
-    echo "$BODY" | real_gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
-      || die "could not post the classification to PR #$PR — failing closed (classification was: $CLASS)"
-    note "posted classification to PR #$PR (default token)"
-  fi
-  echo "$OUT"
+classify)       # RETIRED (#248) — the mechanical/architectural classifier was removed; all changes use the same gate.
+  die "wf.sh classify is retired (#248): classification was removed. There is no classify step — just run: wf.sh finish <worktree> <author>."
   ;;
 
 finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code merge gate + ready + merge + cleanup
