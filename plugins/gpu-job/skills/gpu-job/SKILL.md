@@ -31,9 +31,11 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
    Cost safety needs no per-pod timer armed by hand — every pod is lease-covered automatically at
    acquire (step 1), and the standing reaper is the backstop (see "The pod lease + the standing
    reaper" below).
-4. **Persist + VERIFY:** the job's last act is `rclone copy <outputs> <remote>/<job>/`;
-   before teardown, verify EVERY unique artifact is in the store (`rclone lsf` the
-   directory and check the final artifact's bytes — never trust a zero-byte done-marker).
+4. **Persist + VERIFY:** the job's last act is `source job_lib.sh; r2_copy <outputs> <remote>/<job>/`
+   — the hardened copy that always follows symlinks (`-L`) and fails closed if rclone skips one
+   (`Can't follow symlink` ⇒ INCOMPLETE), so an incomplete upload never reads as success. Before
+   teardown, verify EVERY unique artifact is in the store (`r2_exists`/`r2_done` — list the directory
+   and check the final artifact's bytes; never trust a zero-byte done-marker).
 5. **Tear down:** `scripts/teardown.sh <pod-id> [lease-nonce]`. Default the moment artifacts verify.
    Pass the `LEASE_NONCE` so the lease is **closed only after the delete is verified gone** (an
    unverified delete leaves the lease for the standing reaper to retry). Never use provider "stop"

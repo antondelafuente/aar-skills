@@ -52,15 +52,34 @@ Semantics — it bakes in the two copy-rule requirements:
    propagates rclone's own non-zero exit (via `PIPESTATUS`, so it is correct without `pipefail`).
 
 The other three rules already have shared, correct implementations in `job_lib.sh`; this proposal
-**strengthens their header docstrings** to state the contract explicitly ("never single-file `lsf`",
-"never a size threshold", ".done-sentinel/exact-bytes only") so the rule is discoverable at the call
-site, but does not change their behavior.
+**strengthens their header docstrings** to state each contract accurately at the call site, without
+changing behavior: `r2_exists`/`wait_r2` list the **directory** and `grep -qx` (never single-file
+`lsf`); `pull_model` verifies the **exact** object-count/bytes from the `_STAGED.json` manifest; and
+`r2_done` gates on the **real final-artifact's bytes** (the last shard — the deliverable-bytes fix),
+which is deliberately NOT the racy anti-pattern the gotcha warns against (a *whole-tree size
+threshold* used as a readiness proxy). The docstrings name that distinction so `r2_done` is not
+mistaken for, or mislabelled as, an exact-manifest gate.
 
-**Reference call-site (in-tree caller):** route `pull_model`'s pull through `r2_copy`. `pull_model`
-pulls a materialized flat tree from R2 (no symlinks), so `-L` is a no-op and the NOTICE never fires —
-but it gives `r2_copy` a real caller in the shipped code and adds belt-and-suspenders NOTICE
-detection to the pull path at zero behavior cost. (`stage_model.sh` is box-side and does not source
-`job_lib.sh`; its inline `-L` copy is correct and left as-is — adoption there follows separately.)
+**`r2_copy` is sourceable from BOTH pod-side and box-side.** `job_lib.sh` is a pure function library
+(sourcing it only *defines* functions — no side effects, no GPU/network calls at source time), so a
+box-side script in the same `scripts/` dir can `source` it. That lets us close the copy footgun on
+the box side too, not just pod side.
+
+**Reference call-sites (two in-tree callers):**
+- **Pod-side:** route `pull_model`'s pull through `r2_copy`. `pull_model` pulls a materialized flat
+  tree from R2 (no symlinks), so `-L` is a no-op and the NOTICE never fires — but it gives `r2_copy`
+  a real caller and adds belt-and-suspenders NOTICE detection at zero behavior cost.
+- **Box-side:** adopt `r2_copy` in `stage_model.sh` (the staging helper in the same plugin — the copy
+  site most directly related to the data-loss incident). It already does `rclone copy -L` correctly;
+  routing it through `r2_copy` keeps the `-L` and *adds* the "`Can't follow symlink` ⇒ INCOMPLETE"
+  fail-closed it lacks today. This is in-plugin tooling, not an instance driver, so it stays within
+  the ticket's "don't rewire every driver" scope while directly answering the box-side gap.
+
+**Discoverability:** the `gpu-job` SKILL.md "Persist + VERIFY" step (step 4) currently teaches raw
+`rclone copy <outputs> <remote>/<job>/` — the exact recurrence path. Update it to
+`source job_lib.sh; r2_copy <outputs> <remote>/<job>/` with the verify rule beside it, so the
+zero-context user path leads with the safe helper (mirroring how the staging + serve helpers are
+already taught there).
 
 **Self-test:** a new `rclone_helper_smoke.sh` (offline; stubs `rclone` on PATH) asserts the behavior
 the JSON/syntax checks can't: `r2_copy` **returns non-zero when a stub emits a `Can't follow symlink`
@@ -91,13 +110,16 @@ Product SWE-pipeline scaffold, `gpu-job` plugin only:
 - `plugins/gpu-job/skills/gpu-job/scripts/job_lib.sh` — one new function (`r2_copy`), strengthened
   docstrings on `r2_exists`/`r2_done`/`wait_r2`, and `pull_model`'s copy line routed through
   `r2_copy` (behavior-preserving on a flat tree).
+- `plugins/gpu-job/skills/gpu-job/scripts/stage_model.sh` — box-side reference call-site: its inline
+  `rclone copy -L` routed through a sourced `r2_copy` (keeps `-L`, adds NOTICE fail-closed).
+- `plugins/gpu-job/skills/gpu-job/SKILL.md` — the "Persist + VERIFY" step teaches `r2_copy`.
 - `plugins/gpu-job/skills/gpu-job/scripts/rclone_helper_smoke.sh` — new offline self-test.
 - `.aar-ci/checks.sh` — one new smoke-gate stanza.
 - `plugins/gpu-job/.claude-plugin/plugin.json` — version bump.
 
 No instance drivers change; adoption is opt-in as drivers source the helper. `job_lib.sh` is only
 *sourced*, never auto-executed, so the only runtime effect is on code that calls `r2_copy`
-(today: `pull_model`, on a symlink-free tree).
+(today: `pull_model` on a symlink-free tree, and `stage_model.sh` whose copy already used `-L`).
 
 ## Rollout + rollback
 
