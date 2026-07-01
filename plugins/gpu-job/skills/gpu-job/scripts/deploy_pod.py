@@ -202,6 +202,33 @@ def delete_pod_now(pod_id):
         return False
 
 
+# --- mid-create abort cleanup (#278). deploy is non-atomic: POST /pods starts BILLING, then wait_ssh
+#     polls ~30-90s for readiness. A kill in that window (a `timeout` wrapper's SIGTERM, Ctrl-C, a host
+#     time limit) otherwise leaves the just-created pod billing until the reaper reaps it at the SHORT
+#     intent-lease expiry. This trap DELETEs the un-confirmed pod immediately on a catchable signal.
+#     (The untrappable SIGKILL/hard-timeout case is already bounded by that short intent lease.)
+import signal
+
+_INFLIGHT = {"pid": None, "nonce": None}  # set the instant the create 201 returns; cleared once enriched
+
+
+def _abort_cleanup(signum, _frame):
+    pid = _INFLIGHT.get("pid")
+    if pid:
+        print(f"[deploy] signal {signum} during acquire — deleting un-confirmed pod {pid} "
+              f"(billing; fail-closed)", flush=True)
+        gone = delete_pod_now(pid)
+        n = _INFLIGHT.get("nonce")
+        if n and _LEASE_ON:
+            try:
+                lease("emergency", n, str(pid), check=False)  # mark reapable if the DELETE didn't land
+                if gone:
+                    lease("mark-deleted", n, check=False)     # verified gone -> reaper closes, doesn't loop
+            except Exception:
+                pass
+    raise SystemExit(130 if signum == signal.SIGINT else 143)
+
+
 def pod_env():
     e = {"PUBLIC_KEY": PUBLIC_KEY}
     if env("RCLONE_CONF_B64"):
@@ -255,6 +282,9 @@ def deploy(nonce=None):
             print(f"[deploy] attempt {attempt} tier {tier[:2]}... -> HTTP {st}", flush=True)
             if st in (200, 201):
                 pid = resp.get("id") or resp.get("podId")
+                # From this instant the pod is BILLING but not yet confirmed — arm the abort trap so a
+                # kill during the readiness poll deletes it (#278). Cleared once fully enriched.
+                _INFLIGHT["pid"] = pid; _INFLIGHT["nonce"] = nonce
                 print(f"[deploy] OK pod={pid} dc={resp.get('machine',{}).get('dataCenterId','?')} "
                       f"costPerHr={resp.get('costPerHr','?')}", flush=True)
                 # PROVISIONAL: bind the real pod id to the intent. WRITE-FAILURE → fail CLOSED: the pod
@@ -337,13 +367,46 @@ def _selftest():
     print(f"deploy_pod selftest OK: {len(ids)} DCs -> {len(t)} tiers")
 
 
+def _selftest_cleanup():
+    """Offline unit check of the #278 mid-create abort trap (no network, no pod, no creds): an
+    in-flight pod is DELETEd on a catchable signal; a confirmed/cleared pod is left alone. Stubs the
+    network DELETE + the lease subprocess."""
+    global delete_pod_now, lease
+    _real_del, _real_lease = delete_pod_now, lease
+    deleted = []
+    delete_pod_now = lambda pid: (deleted.append(pid) or True)   # noqa: E731 (test stub)
+    lease = lambda *a, **k: (deleted and None) or ""             # noqa: E731 (no-op lease in test)
+    try:
+        _INFLIGHT["pid"] = "pod-x"; _INFLIGHT["nonce"] = "gpujob-abc"
+        try:
+            _abort_cleanup(signal.SIGTERM, None)
+        except SystemExit as e:
+            assert e.code == 143, e.code
+        assert deleted == ["pod-x"], f"in-flight pod must be deleted on signal, got {deleted}"
+        deleted.clear()
+        _INFLIGHT["pid"] = None                                  # confirmed / handed off
+        try:
+            _abort_cleanup(signal.SIGINT, None)
+        except SystemExit as e:
+            assert e.code == 130, e.code
+        assert deleted == [], f"a cleared/confirmed pod must NOT be deleted, got {deleted}"
+    finally:
+        delete_pod_now, lease = _real_del, _real_lease
+        _INFLIGHT["pid"] = None; _INFLIGHT["nonce"] = None
+    print("deploy_pod cleanup selftest OK: in-flight pod deleted on signal; confirmed pod left alone")
+
+
 if __name__ == "__main__":
     if _BADARGS:                    # unrecognized arg: refuse FIRST, never deploy (fail-closed even
         sys.stderr.write(f"deploy_pod.py: unrecognized argument(s): {' '.join(_BADARGS)}\n\n")
         sys.stderr.write(_USAGE)    # alongside --selftest/--help — a typo never slips through)
         raise SystemExit(2)
     if _SELFTEST:
-        _selftest(); raise SystemExit(0)
+        _selftest(); _selftest_cleanup(); raise SystemExit(0)
+    # Install the mid-create abort trap (#278) BEFORE any pod is created, so a kill during deploy/poll
+    # deletes the un-confirmed billing pod instead of orphaning it (cleared once the pod is enriched).
+    signal.signal(signal.SIGTERM, _abort_cleanup)
+    signal.signal(signal.SIGINT, _abort_cleanup)
     if _HELP:                       # --help/-h: print usage, never deploy
         print(_USAGE); raise SystemExit(0)
     # INTENT (pre-deploy): mint the lease BEFORE deploy() so even a created-but-id-never-returned pod
@@ -403,6 +466,9 @@ if __name__ == "__main__":
             raise SystemExit(f"[deploy] enrich failed; pod {pid} "
                              + ("DELETED (fail-closed)" if gone else
                                 f"could NOT be deleted — REAP {pid} MANUALLY (lease {nonce})"))
+    # Pod is fully confirmed (SSH up; lease enriched to the long expiry, or leasing disabled). Disarm the
+    # abort trap so a later signal (during printing / a caller's own teardown) can't delete a good pod.
+    _INFLIGHT["pid"] = None; _INFLIGHT["nonce"] = None
     print(f"\nPOD_ID={pid}")
     if nonce:
         print(f"LEASE_NONCE={nonce}")
