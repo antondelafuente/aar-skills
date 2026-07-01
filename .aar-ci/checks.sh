@@ -194,7 +194,7 @@ MP_DECLARED=""   # plugins DECLARED in the CURRENT marketplace.json — these MU
 MP_PARSE_OK=1
 MP_JSON="$ROOT/.claude-plugin/marketplace.json"
 if [ -f "$MP_JSON" ]; then
-  if ! MP_DECLARED=$(python3 -c "import json;print('\n'.join(p['name'] for p in json.load(open('$MP_JSON'))['plugins']))" 2>/dev/null); then
+  if ! MP_DECLARED=$(MP_JSON="$MP_JSON" python3 -c "import json,os;print('\n'.join(p['name'] for p in json.load(open(os.environ['MP_JSON']))['plugins']))" 2>/dev/null); then
     MP_PARSE_OK=0
     MP_DECLARED=""
   fi

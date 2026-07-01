@@ -46,7 +46,10 @@ mkrepo(){
   fi
   # README namespace must match the marketplace name ("aar") so step 1b passes when marketplace.json changed.
   printf 'Install with `claude plugin install foo@aar`.\n' > "$d/README.md" || { rm -rf "$d"; return 1; }
-  ( cd "$d" && git add -A && git commit -qm init >/dev/null 2>&1 ) || { rm -rf "$d"; return 1; }
+  # Disable signing + bypass hooks so the fixture commit can't fail for environment reasons unrelated to
+  # the check logic (inherited global commit.gpgsign / pre-commit hooks).
+  ( cd "$d" && git add -A && git -c commit.gpgsign=false commit --no-verify -qm init >/dev/null 2>&1 ) \
+    || { rm -rf "$d"; return 1; }
   printf '%s' "$d"
 }
 
