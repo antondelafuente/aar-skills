@@ -184,9 +184,25 @@ done
 #    changed, smoke every plugin it declares (a marketplace edit can break discovery for any of them).
 SMOKE="$ROOT/.aar-ci/fake_home_smoke.sh"
 SMOKE_PLUGS=$(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#plugins/([^/]+)/.*#\1#')
-MP_DECLARED=""   # plugins DECLARED in marketplace.json (when it changed) — these MUST exist, never skipped
+# Parse the CURRENT marketplace declarations ALWAYS — not only when marketplace.json is in the changeset —
+# so a PR that DELETES a plugin dir WITHOUT touching marketplace.json still fails loud on a declared-but-
+# missing plugin (#274; mirror of the #280 guard on the marketplace-changed path). MP_PARSE_OK tracks
+# whether the current file parsed: a MISSING marketplace.json is not a failure (empty list, PARSE_OK=1 —
+# a deletion in a repo with no marketplace stays benign), but a PRESENT-yet-unparsable one is (PARSE_OK=0),
+# and the missing-dir branch below fails closed on it rather than vacuously passing.
+MP_DECLARED=""   # plugins DECLARED in the CURRENT marketplace.json — these MUST exist, never skipped
+MP_PARSE_OK=1
+MP_JSON="$ROOT/.claude-plugin/marketplace.json"
+if [ -f "$MP_JSON" ]; then
+  if ! MP_DECLARED=$(MP_JSON="$MP_JSON" python3 -c "import json,os;print('\n'.join(p['name'] for p in json.load(open(os.environ['MP_JSON']))['plugins']))" 2>/dev/null); then
+    MP_PARSE_OK=0
+    MP_DECLARED=""
+  fi
+fi
+# When marketplace.json ITSELF changed, smoke EVERY declared plugin (a marketplace edit can break discovery
+# for any of them). A parse failure on THIS path is fatal — we cannot know what to smoke.
 if printf '%s\n' "${PATHS[@]}" | grep -q '^\.claude-plugin/marketplace.json$'; then
-  if MP_DECLARED=$(python3 -c "import json;print('\n'.join(p['name'] for p in json.load(open('$ROOT/.claude-plugin/marketplace.json'))['plugins']))" 2>/dev/null); then
+  if [ "$MP_PARSE_OK" = 1 ] && [ -f "$MP_JSON" ]; then
     SMOKE_PLUGS="$SMOKE_PLUGS
 $MP_DECLARED"
   else
@@ -194,11 +210,14 @@ $MP_DECLARED"
   fi
 fi
 for plug in $(printf '%s\n' "$SMOKE_PLUGS" | grep -v '^$' | sort -u); do
-  # An absent plugin dir is only OK when it was DELETED in this changeset (came from a changed plugins/ path);
-  # a plugin DECLARED in marketplace.json but missing is a broken marketplace and must FAIL (#270 code-review F1).
+  # An absent plugin dir is only OK when it was DELETED in this changeset (came from a changed plugins/ path)
+  # AND the CURRENT marketplace no longer declares it; a plugin still DECLARED in marketplace.json but missing
+  # is a broken marketplace and must FAIL (#270 code-review F1; widened to the marketplace-unchanged path, #274).
   if [ ! -d "$ROOT/plugins/$plug" ]; then
     if printf '%s\n' "$MP_DECLARED" | grep -qxF "$plug"; then
       err "marketplace.json declares plugin '$plug' but plugins/$plug is missing — discovery would break"
+    elif [ "$MP_PARSE_OK" != 1 ]; then
+      err "plugins/$plug is missing but the current marketplace.json could not be parsed — cannot verify it isn't still declared"
     else
       ok "plugin $plug removed (no smoke)"
     fi
@@ -276,6 +295,21 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/verify-claims/skills/verify-
     bash "$CFV_SMOKE" >&2 && ok "cross_family_verifier smoke" || err "cross_family_verifier smoke FAILED"
   else
     err "audit_experiment.sh changed but cross_family_verifier_smoke.sh missing — cannot verify cross-family selection"
+  fi
+fi
+
+# 13. marketplace missing-plugin cross-check smoke (#274): the step-6 branch that decides whether an absent
+#     plugin dir is a benign deletion or a broken marketplace — declared-but-missing FAILs (both when
+#     marketplace.json is in the changeset and when it is NOT), undeclared-deleted PASSes, and a present-but-
+#     unparsable marketplace with a missing plugin FAILs closed. Deterministic behavior the JSON/syntax checks
+#     can't cover, and the exact logic that regressed once (#280). Runs when checks.sh or the smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^\.aar-ci/(checks|checks_marketplace_smoke)\.sh$'; then
+  CM_SMOKE="$ROOT/.aar-ci/checks_marketplace_smoke.sh"
+  if [ -f "$CM_SMOKE" ]; then
+    echo "[checks] marketplace missing-plugin cross-check smoke" >&2
+    bash "$CM_SMOKE" >&2 && ok "checks marketplace missing-plugin smoke" || err "checks marketplace missing-plugin smoke FAILED"
+  else
+    err "checks.sh changed but checks_marketplace_smoke.sh missing — cannot verify the marketplace cross-check"
   fi
 fi
 
