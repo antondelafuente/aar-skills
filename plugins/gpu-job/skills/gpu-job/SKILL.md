@@ -41,6 +41,29 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
    unverified delete leaves the lease for the standing reaper to retry). Never use provider "stop"
    expecting keep-warm — container disk wipes on restart.
 
+## One canonical copy — reference it, never fork
+
+`scripts/deploy_pod.py` **in this plugin is the single canonical `deploy_pod.py`.** The provisioning
+gotchas it guards (disk-size default, `ports==None`, hardcoded `containerDiskInGb`, the mid-create abort
+trap) only stay fixed everywhere if there is **one** copy. A driver **references** the canonical; it never
+copies or forks it into an experiment dir.
+
+**Box-side vs pod-side — how a driver gets the canonical without forking it:**
+
+- **Box-side (invoked on the orchestrator, never copied to the pod):** `deploy_pod.py` (acquisition — it
+  calls the RunPod API to *create* the pod and prints the SSH endpoint) and `run_remote.sh` (it `scp`s a job
+  script over and launches it detached). A driver runs these **in place** against the canonical path —
+  either `python3 <this-scripts-dir>/deploy_pod.py`, or through a **box-side symlink/shim into this scripts
+  dir** that the consuming instance provides. The env knobs (`GPU_TYPE`, `DISK_GB`, `POD_NAME`, …) are the
+  customization seam — not a reason to fork the code.
+- **Pod-side (they run on the pod, so they are copied *to* it from THIS scripts dir at provision time):**
+  `bootstrap_pod.sh` (run on first ssh) and `job_lib.sh` (sourced by the job). `scp` them from the canonical
+  `scripts/` dir so the pod runs the canonical helpers too — never a hand-carried older copy.
+
+So every path (box-side invoke, pod-side `scp`) resolves back to this one directory; a fix here reaches every
+run. If you find a divergent `deploy_pod.py` under an experiment/pipeline dir, treat it as stale and repoint
+it at this canonical — do not patch the fork.
+
 ## Staging a base model (optional)
 
 Pods re-pulling the same base model from HF every run is the root of a paid gotcha cluster

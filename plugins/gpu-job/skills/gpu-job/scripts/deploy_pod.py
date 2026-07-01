@@ -170,7 +170,9 @@ def gql(query):
 #     who doesn't want a lease registry); the reaper simply has nothing to read for that pod.
 import subprocess
 
-_LEASE_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pod_lease.sh")
+# realpath (not abspath) so sibling helpers resolve to the CANONICAL scripts dir even when this file is
+# invoked through a box-side symlink (#297): abspath keeps the symlink path, realpath follows it.
+_LEASE_SH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pod_lease.sh")
 _LEASE_ON = env("GPU_JOB_LEASE_DISABLE", "") not in ("1", "true", "yes")
 
 
