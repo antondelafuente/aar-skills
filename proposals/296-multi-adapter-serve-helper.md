@@ -42,17 +42,26 @@ you eval) to caller callbacks:
 
 ```
 serve_adapters_eval <out_root> <port> <serve_fn> <eval_fn> -- <adapter1> [adapter2 ...]
-  serve_fn <adapter> <port> <serve_log>   # launch vLLM serving THIS adapter, detached; return at once
+  serve_fn <adapter> <port> <serve_log>   # launch vLLM serving THIS adapter, detached; ECHO its PID
   eval_fn  <adapter> <out_dir> <port>     # run the eval, writing results UNDER the isolated <out_dir>
 ```
 
+**The `serve_fn` PID contract (F2).** `serve_fn` must launch the server detached and **echo the
+launched server's PID (a positive integer) to stdout** — that is the machine-checkable contract the
+teardown relies on. The helper captures it, **validates it is numeric and fails closed otherwise**
+(so a `serve_fn` that forgets to echo a PID dies loud instead of silently skipping the
+kill-by-PID). Both the baked-in default serve and a stubbed custom serve are exercised in the smoke.
+
 For each adapter the helper, in order:
 
-1. **Full teardown before serving** — kills any serve process it launched (by captured PID, via
-   `kill_tree`), then `pkill -9` for BOTH `vllm.entrypoints.openai.api_server` AND `VLLM::EngineCore`
-   AND every extra pattern in `MA_KILL_PATTERNS` (default includes `run_pooled_gpqa` so in-process
-   pooled servers die too). It KILLS rather than waits-for-exit, because an OOM'd server hangs and
-   would never exit on its own.
+1. **Full teardown before serving** — kills the server process by its captured PID (via `kill_tree`,
+   never `pkill -f` which self-matches), then `pkill -9` for BOTH
+   `vllm.entrypoints.openai.api_server` AND `VLLM::EngineCore` AND every extra pattern in
+   `MA_KILL_PATTERNS`. It KILLS rather than waits-for-exit, because an OOM'd server hangs and would
+   never exit on its own. `MA_KILL_PATTERNS` **defaults to the two generic vLLM process forms only**;
+   a driver that runs an **in-process pooled server** (its process name is the driver's own, e.g. a
+   `run_pooled_…` script) sets `MA_KILL_PATTERNS` to add that name — the hook is documented, but the
+   default carries **no instance eval-driver name** (F3: those are not product-generic).
 2. **Waits until the GPU/port is ACTUALLY free** — blocks until `nvidia-smi memory.used` drops below
    `MA_VRAM_FLOOR_MIB` (default 12000) AND `curl localhost:<port>/v1/models` refuses. Never a
    fixed-timeout "proceed regardless" gate; if VRAM never frees within a generous bound it dies loud.
@@ -61,16 +70,30 @@ For each adapter the helper, in order:
 4. **Serves, waits for readiness** (`serve_wait`), then runs `eval_fn` against the isolated dir.
 5. **Tears down again** (step 1) before the next adapter.
 
-After the loop it runs a **distinctness assertion**: it hashes each adapter's output tree and DIES
-loud if any two adapters produced byte-identical output — the direct, structural catch for the exact
-"identical numbers" signature, so even a novel reuse path can't pass silently. (Pairs with the
-separately-ticketed eval-warning that watches for the identical-numbers signature downstream; this
-helper prevents it at the source.)
+After the loop it runs a **distinctness assertion** — the structural catch for the exact "identical
+numbers" signature, so even a novel reuse path can't pass silently. To avoid the wrong-unit problems
+(F4) — harmless metadata masking a real reuse, or a legitimately-deterministic eval false-failing —
+the check is **scoped and mode-configurable**, not a blanket whole-tree hash:
 
-A thin baked-in default serve, **`vllm_serve_lora <base> <adapter> <port> [extra vllm args…]`**, is
-also added so the common case (serve one LoRA against a base on the OpenAI api_server) needs no
-custom `serve_fn` — the driver just passes `vllm_serve_lora`-derived closure. The eval side stays a
-callback because eval harnesses vary too much to bake one in.
+- `MA_DISTINCT_GLOB` (default `*`, always excluding `serve.log`) points the check at the **canonical
+  eval artifact** (e.g. `rollouts.jsonl` / `results.json`), so a driver can compare exactly the
+  rollout/metric file that matters rather than incidental sidecar metadata.
+- `MA_DISTINCT_MODE` = `error` (default, die loud) | `warn` (print a loud WARNING, continue — the
+  explicit opt-out for an eval whose outputs are legitimately identical across adapters) | `off`.
+
+(Pairs with the separately-ticketed eval-warning that watches for the identical-numbers signature
+downstream; this helper prevents it at the source.)
+
+A thin baked-in default serve, **`vllm_serve_lora <base> <adapter> <port> <serve_log> [extra vllm
+args…]`**, is also added so the common case (serve one LoRA against a base on the OpenAI api_server)
+needs no custom `serve_fn` — it launches the api_server detached and echoes its PID per the contract,
+so a driver wraps it in a one-line `serve_fn`. The eval side stays a callback because eval harnesses
+vary too much to bake one in.
+
+**Discoverability (F1).** A concise section is added to the gpu-job **`SKILL.md`** — the
+`serve_adapters_eval` contract, the default-serve example, and a reference `serve_fn`/`eval_fn`
+callback pair — so a zero-context agent finds the safe helper at the point of need instead of
+re-deriving (and re-breaking) the loop.
 
 **Testability / reference call-site.** A new `multi_adapter_smoke.sh` is the reference call-site and
 self-test. It sources `job_lib.sh`, shadows the GPU-touching primitives (`gpu_gate`-internals,
@@ -103,8 +126,9 @@ separate PRs so each driver's serve/eval wiring is reviewed on its own.
 
 ## Blast radius
 
-- **Product scaffold, gpu-job plugin only.** New helpers in `job_lib.sh`, one new smoke script, one
-  new gate in `.aar-ci/checks.sh`, gpu-job `plugin.json` version bump (0.2.4 → 0.2.5).
+- **Product scaffold, gpu-job plugin only.** New helpers in `job_lib.sh`, a new `SKILL.md` usage
+  section, one new smoke script, one new gate in `.aar-ci/checks.sh`, gpu-job `plugin.json` version
+  bump (0.2.4 → 0.2.5).
 - **Additive.** No existing helper's signature changes; no driver is rewired in this PR, so nothing
   that currently sources `job_lib.sh` changes behavior until it opts in by calling the new function.
 - **CI:** the new checks gate runs the offline smoke; it touches no network/GPU/creds by construction.

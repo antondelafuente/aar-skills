@@ -172,3 +172,115 @@ ckpt_janitor(){ # ckpt_janitor <dir> <glob> [age-min=2] [interval=30] — detach
   ( while true; do find "$dir" -name "$glob" -mmin +"$age" -delete 2>/dev/null; sleep "$iv"; done ) &
   echo $!
 }
+
+# --- multi-adapter serve loop ----------------------------------------------------------
+# THE recurring silent-failure (gotchas 2026-06-06 OPD-A / reconcile, lines 13/46/74/87): an eval
+# driver that scores several LoRA adapters on ONE pod serves adapter A, evals, serves B, evals… and
+# N conditions collapse to N IDENTICAL numbers — a clean pipeline emitting a confidently-wrong table
+# (cost toy-reason-beyond-rerun ~2.5h). Two compounding bugs: (a) a SURVIVING server from the
+# previous adapter keeps answering (serve only `if ! curl /v1/models`; killing only VLLM::EngineCore
+# leaves the api_server PARENT alive; an in-process pooled server isn't matched by the api_server
+# pattern at all; an OOM'd server HANGS holding VRAM), so every later adapter is scored on the FIRST
+# adapter's weights; (b) rollouts cached in a SHARED dir with `skip-if *.eval exists` → adapters 2..N
+# find adapter 1's files and skip generation. serve_adapters_eval bakes in the fix so drivers call it
+# instead of re-hand-rolling (and re-breaking) the loop: FULL teardown + wait-until-actually-free
+# between adapters, an ISOLATED fresh out-dir per adapter (no skip-if-exists reuse possible), and a
+# final distinctness assertion (identical outputs across adapters = the exact tell → die loud).
+
+MA_VRAM_FLOOR_MIB=${MA_VRAM_FLOOR_MIB:-12000}
+# Default kill patterns are the two GENERIC vLLM process forms ONLY — no instance eval-driver name.
+# A driver that runs an IN-PROCESS pooled server (its process name is the driver's own, e.g. a
+# `run_pooled_…` script that spawns vLLM in-process) sets MA_KILL_PATTERNS to add that name so the
+# between-adapter teardown kills it too — the hook is here, the instance-specific value stays caller-side.
+MA_KILL_PATTERNS=${MA_KILL_PATTERNS:-"vllm.entrypoints.openai.api_server VLLM::EngineCore"}
+# Distinctness check unit + mode (F4). GLOB scopes the compare to the CANONICAL eval artifact so
+# incidental sidecar metadata can't mask a real reuse (and serve.log is always excluded); MODE lets
+# an eval whose outputs are legitimately identical across adapters opt out.
+MA_DISTINCT_GLOB=${MA_DISTINCT_GLOB:-'*'}
+MA_DISTINCT_MODE=${MA_DISTINCT_MODE:-error}   # error (die) | warn (loud, continue) | off
+
+ma_teardown(){ # ma_teardown [serve-pid] [port=8000] — kill the served process + every vLLM/pooled
+               # form, then BLOCK until VRAM is below the floor AND the port refuses. KILLS (never
+               # waits-for-exit): an OOM'd server hangs and never exits on its own. Dies loud if the
+               # GPU/port never frees — never a fixed-timeout "proceed regardless" gate.
+  local pid=${1:-} port=${2:-8000} pat i used
+  [ -n "$pid" ] && kill_tree "$pid" KILL
+  for pat in $MA_KILL_PATTERNS; do pkill -9 -f "$pat" 2>/dev/null || true; done
+  for i in $(seq 1 180); do   # up to ~15 min
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
+           | sort -n | tail -1)
+    if [ -n "${used:-}" ] && [ "$used" -lt "$MA_VRAM_FLOOR_MIB" ] \
+       && ! curl -sf "http://localhost:$port/v1/models" >/dev/null 2>&1; then
+      say "ma_teardown: GPU/port free (${used}MiB, port $port refuses)"; return 0
+    fi
+    sleep 5
+  done
+  echo "ma_teardown: GPU/port never freed (last ${used:-?}MiB, port $port)" >&2; return 1
+}
+
+ma_hash_dir(){ # ma_hash_dir <dir> — content hash of MA_DISTINCT_GLOB files (serve.log excluded),
+               # path-independent (per-file content only) so the per-adapter dir prefix never matters.
+  find "$1" -type f -name "$MA_DISTINCT_GLOB" ! -name 'serve.log' -exec sha256sum {} + 2>/dev/null \
+    | awk '{print $1}' | sort | sha256sum | awk '{print $1}'
+}
+
+ma_assert_distinct(){ # ma_assert_distinct <dir…> — honor MA_DISTINCT_MODE. In error mode returns 1
+                      # (caller dies) if any two dirs hash identically; warn prints loud + returns 0.
+  [ "$MA_DISTINCT_MODE" = off ] && return 0
+  local d h prev; declare -A seen=()
+  for d in "$@"; do
+    h=$(ma_hash_dir "$d")
+    prev=${seen[$h]:-}
+    if [ -n "$prev" ]; then
+      local msg="ma_assert_distinct: '$d' output is BYTE-IDENTICAL to '$prev' — the multi-adapter reuse/caching bug (a surviving server or a stale per-adapter cache). Two conditions collapsed to one number; do NOT trust these results."
+      if [ "$MA_DISTINCT_MODE" = warn ]; then echo "WARNING: $msg" >&2; else echo "$msg" >&2; return 1; fi
+    fi
+    seen[$h]=$d
+  done
+  return 0
+}
+
+vllm_serve_lora(){ # vllm_serve_lora <base> <adapter> <port> <serve-log> [extra vllm args…] — the
+                   # baked-in DEFAULT serve: launch the OpenAI api_server serving ONE LoRA adapter
+                   # (module name 'adapter') against <base>, detached, logging to <serve-log>. ECHOES
+                   # the server PID per the serve_fn contract. Wrap it in a one-line serve_fn that
+                   # closes over the base model.
+  local base=$1 adapter=$2 port=$3 log=$4; shift 4
+  mkdir -p "$(dirname "$log")"
+  nohup python -m vllm.entrypoints.openai.api_server \
+    --model "$base" --enable-lora --lora-modules "adapter=$adapter" \
+    --port "$port" "$@" </dev/null >"$log" 2>&1 &
+  echo $!
+}
+
+serve_adapters_eval(){ # serve_adapters_eval <out_root> <port> <serve_fn> <eval_fn> -- <adapter…>
+  #   serve_fn <adapter> <port> <serve-log>  : launch vLLM serving THIS adapter, detached; ECHO its PID
+  #   eval_fn  <adapter> <out_dir> <port>    : run the eval, writing results UNDER the isolated <out_dir>
+  # Guarantees, per adapter: full teardown+wait-until-free BEFORE serve (no surviving-server reuse), a
+  # FRESH isolated out-dir (no stale-cache skip), serve+readiness, eval, teardown AFTER; then a final
+  # distinctness assertion over the per-adapter outputs. See MA_* knobs above.
+  local out_root=$1 port=$2 serve_fn=$3 eval_fn=$4; shift 4
+  [ "${1:-}" = "--" ] && shift
+  local adapters=("$@")
+  [ "${#adapters[@]}" -ge 1 ] || die "serve_adapters_eval: no adapters given"
+  command -v "$serve_fn" >/dev/null 2>&1 || die "serve_adapters_eval: serve_fn '$serve_fn' not found"
+  command -v "$eval_fn"  >/dev/null 2>&1 || die "serve_adapters_eval: eval_fn '$eval_fn' not found"
+  mkdir -p "$out_root"
+  local i=0 a name out_dir serve_log pid; local out_dirs=()
+  for a in "${adapters[@]}"; do
+    i=$((i+1))
+    name=$(printf '%02d-%s' "$i" "$(printf '%s' "$(basename "$a")" | tr -c 'A-Za-z0-9._-' '_')")
+    out_dir="$out_root/$name"; serve_log="$out_dir/serve.log"
+    say "serve_adapters_eval: [$i/${#adapters[@]}] adapter=$a -> $out_dir"
+    ma_teardown "" "$port" || die "serve_adapters_eval: could not free GPU/port before adapter $a"
+    rm -rf "$out_dir"; mkdir -p "$out_dir"              # fresh isolated dir — no stale .eval to reuse
+    pid=$("$serve_fn" "$a" "$port" "$serve_log") || die "serve_adapters_eval: serve_fn failed for $a"
+    case "$pid" in ''|*[!0-9]*) die "serve_adapters_eval: serve_fn must ECHO a numeric server PID (got '$pid') for $a";; esac
+    serve_wait "$port" || { ma_teardown "$pid" "$port"; die "serve_adapters_eval: server never became ready for $a"; }
+    "$eval_fn" "$a" "$out_dir" "$port" || { ma_teardown "$pid" "$port"; die "serve_adapters_eval: eval_fn failed for $a"; }
+    ma_teardown "$pid" "$port" || die "serve_adapters_eval: could not free GPU/port after adapter $a"
+    out_dirs+=("$out_dir")
+  done
+  ma_assert_distinct "${out_dirs[@]}" || die "serve_adapters_eval: DISTINCTNESS FAILED — investigate the reuse before trusting these numbers (or set MA_DISTINCT_MODE=warn for a legitimately identical-output eval)."
+  say "serve_adapters_eval: ${#adapters[@]} adapters served in isolation; outputs verified distinct (mode=$MA_DISTINCT_MODE)"
+}
