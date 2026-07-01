@@ -37,6 +37,17 @@ be parsed → `err` (cannot verify it isn't still declared); (c) otherwise → t
 `ok: plugin <x> removed (no smoke)`. Note a *missing* marketplace.json file is not a parse failure —
 `MP_DECLARED` is empty and `MP_PARSE_OK=1`, so a deletion in a repo with no marketplace stays benign.
 
+**Regression coverage (scaffold-review MED, accepted).** This is the exact branch #280 had to re-close,
+so it earns a deterministic self-test — the first one checks.sh has. A new
+`.aar-ci/checks_marketplace_smoke.sh` drives the *real* checks.sh over throwaway git repos and asserts
+its exit code across five cases: declared-but-missing FAILs both with and without marketplace.json in
+the changeset (the #274 hole + the #280-guarded path), undeclared-deleted PASSes, an unparsable-yet-
+present marketplace with a missing plugin FAILs closed, and an absent marketplace.json with a deleted
+plugin PASSes. Each case names only the deleted plugin's path, so no present plugin is smoked and
+`fake_home_smoke.sh` never runs — the test stays hermetic. checks.sh runs it (step 12) whenever
+checks.sh or the smoke itself changes, following the same helper+smoke precedent as the pod-lease /
+reap-session smokes. Verified it goes red against the pre-fix logic (cases A and D) and green with the fix.
+
 The deleted plugin's paths are always in the changeset (deleting a plugin removes its files), so the
 plugin name lands in `SMOKE_PLUGS` and the loop reaches the missing-dir branch — the fix needs no new
 enumeration source, only the always-current declared list to check against.
@@ -54,7 +65,8 @@ enumeration source, only the always-current declared list to check against.
 
 ## Blast radius
 
-One file: `.aar-ci/checks.sh` (the automated-researcher tracked CI profile), step 6 only. It tightens a
+Two files, both under `.aar-ci/` (the automated-researcher tracked CI profile): `checks.sh` (step 6
+logic + the step-12 smoke trigger) and the new `checks_marketplace_smoke.sh`. It tightens a
 green-when-it-should-fail hole; it cannot newly fail a currently-passing legitimate change (a real
 plugin deletion also removes its marketplace declaration in the same PR, so the plugin is no longer in
 `MP_DECLARED` and the branch stays benign). No skill/plugin/version-bump surface changes (checks.sh is
