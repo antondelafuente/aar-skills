@@ -283,6 +283,22 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scrip
   fi
 fi
 
+# 11b. multi-adapter serve-loop smoke (#296): serve_adapters_eval's per-adapter output ISOLATION (a
+#      pre-planted stale cache is wiped, never reused), teardown BETWEEN adapters (ordering), the
+#      serve_fn numeric-PID contract (default + custom serve paths), and the distinctness assertion
+#      that catches the "identical numbers across adapters" reuse bug (error dies / warn continues) —
+#      behavior the JSON/syntax checks can't cover. Fully offline (stubs nvidia-smi/curl/pkill/pgrep/
+#      python on PATH). Runs when job_lib.sh or the smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scripts/(job_lib|multi_adapter_smoke)\.sh$'; then
+  MA_SMOKE="$ROOT/plugins/gpu-job/skills/gpu-job/scripts/multi_adapter_smoke.sh"
+  if [ -f "$MA_SMOKE" ]; then
+    echo "[checks] multi-adapter serve-loop smoke" >&2
+    bash "$MA_SMOKE" >&2 && ok "multi_adapter smoke" || err "multi_adapter smoke FAILED"
+  else
+    err "job_lib.sh changed but multi_adapter_smoke.sh missing — cannot verify the multi-adapter serve helper"
+  fi
+fi
+
 # 12. cross-family verifier-selection smoke (#262/#239): audit_experiment.sh derives the auditor from
 #     AAR_SUBSTRATE (opposite family), self-corrects a same-family / BASH_ENV-injected AUDIT_VERIFIER_CMD
 #     instead of blocking, redirects the claude default to $OUT_TMP, and fails closed on unset/unknown

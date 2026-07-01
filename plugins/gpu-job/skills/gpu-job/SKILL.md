@@ -52,6 +52,41 @@ in the store **once** and pull from there:
   for the manifest, pulls, and **verifies count + bytes against it** — a pod that starts
   before staging finished, or gets a partial pull, dies on a loud gate, never a short read.
 
+## Scoring several LoRA adapters on one pod (use the helper — do NOT hand-roll)
+
+Serving adapter → eval → next adapter is the single most-repeated pod loop, and hand-rolling it keeps
+producing the **same silent failure**: N conditions collapse to N *identical* numbers because a
+surviving server (or a stale per-adapter cache) is reused — a clean pipeline emitting a
+confidently-wrong table. **`source job_lib.sh; serve_adapters_eval`** bakes in the fix; call it
+instead of writing the loop:
+
+```
+serve_adapters_eval <out_root> <port> <serve_fn> <eval_fn> -- <adapter1> [adapter2 …]
+  serve_fn <adapter> <port> <serve-log>  # launch vLLM serving THIS adapter, detached; ECHO its PID
+  eval_fn  <adapter> <out_dir> <port>    # run the eval, writing results UNDER the isolated <out_dir>
+```
+
+Per adapter it does, in order: **full teardown** (kill the served PID + every `MA_KILL_PATTERNS`
+process form) → **wait until the GPU/port is ACTUALLY free** (`nvidia-smi` below the floor AND the
+port refuses — never a fixed timeout) → a **fresh isolated `<out_root>/NN-<adapter>` dir** (no
+stale-cache reuse possible) → serve → readiness → `eval_fn` → teardown again. After the loop it
+**asserts the per-adapter outputs are distinct** and dies loud otherwise (the exact reuse tell).
+
+```bash
+source /root/job_lib.sh
+BASE=/workspace/models/Qwen3-32B
+serve_fn(){ vllm_serve_lora "$BASE" "$1" "$2" "$3" --max-model-len 8192; }   # baked-in default serve
+eval_fn(){ python /root/run_eval.py --url "http://localhost:$3/v1" --out "$2"; }  # your harness
+serve_adapters_eval /workspace/out 8000 serve_fn eval_fn -- adapters/dose25 adapters/dose50 adapters/dose100
+```
+
+Knobs: `MA_VRAM_FLOOR_MIB` (free-VRAM floor, default 12000); `MA_KILL_PATTERNS` (default the two
+generic vLLM forms — **add your in-process pooled-server's process name here** if you run one, e.g.
+`MA_KILL_PATTERNS="vllm.entrypoints.openai.api_server VLLM::EngineCore run_pooled_gpqa"`);
+`MA_DISTINCT_GLOB` (scope the distinctness compare to your canonical rollout/metric file);
+`MA_DISTINCT_MODE`=`error`|`warn`|`off` (`warn` opts out for an eval whose outputs are legitimately
+identical across adapters). Reference call-site + self-test: `scripts/multi_adapter_smoke.sh`.
+
 ## The pod lease + the standing reaper
 
 Cost safety is **automatic** — there is no per-pod timer to arm by hand. `deploy_pod.py` writes a
