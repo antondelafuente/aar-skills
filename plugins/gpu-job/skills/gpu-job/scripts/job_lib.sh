@@ -85,7 +85,9 @@ r2_copy(){ # r2_copy <src> <dst> [extra rclone args…] — hardened tree/HF-cac
     esac
   done
   local log rc notice=0
-  log=$(mktemp)
+  # Fail closed if the temp log can't be made: an empty $log would make the NOTICE grep always miss
+  # and return rclone's status — 0 in the very NOTICE-but-exit-0 case this helper exists to catch.
+  log=$(mktemp) || { echo "r2_copy: mktemp failed — refusing to copy without a log to scan for skipped symlinks" >&2; return 1; }
   # Capture rclone's status via PIPESTATUS so the result is correct with OR without `pipefail`; guard
   # errexit around the pipe so a non-zero rclone doesn't exit the caller before we surface the message
   # (restore the caller's errexit exactly — never force it on/off). -L is LAST so it wins over any
@@ -154,7 +156,7 @@ pull_model(){ # pull_model <remote-model-path> <local-dir> [deadline-min=30] —
   say "pull_model: pulling $remote -> $dest (expect $exp_n files, $exp_b bytes)"
   # Via r2_copy (hardened): the staged tree is materialized flat so -L is a no-op and the NOTICE never
   # fires, but this routes the pull through the one copy path + fails closed on any residual symlink.
-  r2_copy "$remote/" "$dest/" --transfers=8 --checkers=8
+  r2_copy "$remote/" "$dest/" --transfers=8 --checkers=8 || return 1   # explicit: fail closed even without caller errexit
   got_n=$(find "$dest" -type f ! -name '_STAGED.json' | wc -l | tr -d ' ')
   got_b=$(find "$dest" -type f ! -name '_STAGED.json' -printf '%s\n' | awk '{s+=$1} END{print s+0}')
   [ "$got_n" = "$exp_n" ] && [ "$got_b" = "$exp_b" ] || {

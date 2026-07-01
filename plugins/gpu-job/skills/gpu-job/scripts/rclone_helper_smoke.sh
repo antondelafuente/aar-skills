@@ -34,6 +34,8 @@ case "$sub" in
   lsf)
     [ -n "${RCLONE_LSF_ARG:-}" ] && printf '%s\n' "${2:-}" > "$RCLONE_LSF_ARG"
     printf '%s' "${RCLONE_LSF_OUT:-}" ;;
+  cat)
+    printf '%s' "${RCLONE_CAT_OUT:-}" ;;
   *) exit 0 ;;
 esac
 EOF
@@ -79,5 +81,21 @@ case "$(cat "$LSFARG")" in */) ok lists-directory-not-file ;; *) no "lists-direc
 
 # --- 7. grep -qx anchors the whole name: a partial/substring match must NOT false-pass --------------
 if RCLONE_LSF_OUT=$'model-00002.safetensors.tmp\n' r2_exists r2:bucket/dir model-00002.safetensors; then no exact-name-match; else ok exact-name-match; fi
+
+# --- 8. r2_copy FAILS CLOSED if mktemp fails (#301): an empty log would disable the NOTICE scan and
+#        return rclone's status — 0 in the NOTICE-but-exit-0 case. Force mktemp to fail via a bad
+#        TMPDIR; RCLONE_COPY_MODE=ok proves it fails BEFORE trusting a would-be-success rclone. --------
+if ( set +e; TMPDIR=/nonexistent/definitely-not-here RCLONE_COPY_MODE=ok r2_copy /src /dst ) >/dev/null 2>&1; then no mktemp-fail-closed; else ok mktemp-fail-closed; fi
+
+# --- 9. pull_model PROPAGATES an r2_copy failure even WITHOUT caller errexit (#301) ------------------
+#        Drive pull_model with a present+valid manifest so it reaches the copy, then fail the copy:
+#        under `set +e` it must still return non-zero (the explicit `|| return 1`), never march into
+#        the manifest verify. RCLONE_LSF_OUT carries _STAGED.json so pull_model's wait loop exits.
+pm_dest="$TMP/pm_dest"
+if ( set +e
+     export RCLONE_LSF_OUT=$'_STAGED.json\n'
+     export RCLONE_CAT_OUT='{"object_count":1,"total_bytes":10,"repo":"x","rev":"main"}'
+     export RCLONE_COPY_MODE=fail
+     pull_model r2:bucket/model "$pm_dest" 1 ) >/dev/null 2>&1; then no pull_model-propagates-copy-fail; else ok pull_model-propagates-copy-fail; fi
 
 [ "$fails" = 0 ] && { echo "PASS rclone_helper_smoke"; exit 0; } || { echo "FAIL rclone_helper_smoke"; exit 1; }
