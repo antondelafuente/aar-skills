@@ -7,10 +7,14 @@
 # run by a DIFFERENT model family than the agent that produced the work — because an agent cannot
 # reliably catch its own reproducibility gaps, overclaims, or confounds, but a foreign reader can.
 #
-# Cross-family is the whole point: on a Claude AAR the auditor is Codex; on a Codex AAR set
-# AUDIT_VERIFIER_CMD to `claude -p …`. Always the OTHER family from whoever ran the experiment.
-# The cross-family guarantee is MECHANICAL here (not just documented): set AAR_SUBSTRATE to the
-# family that RAN the experiment; the script refuses to run if the auditor family would match it.
+# Cross-family is the whole point and is guaranteed BY CONSTRUCTION: set AAR_SUBSTRATE to the family
+# that RAN the experiment (REQUIRED — no default; a wrong default must not make the audit same-family,
+# matching log-experiment.sh) and the auditor is ALWAYS the opposite family. Both families have a correct
+# built-in default verifier, so normally you set nothing else. AUDIT_VERIFIER_CMD is an OVERRIDE honored
+# only when it is a DIFFERENT family than the runner; a same-family value — a misconfig, or an instance
+# BASH_ENV that re-injects AUDIT_VERIFIER_CMD into every non-interactive shell (issue #262) — is IGNORED
+# with a warning and the opposite-family default is used, so the audit can never silently run same-family
+# and the legitimate case never dead-ends on a block the caller can't clear.
 #
 # Validated 2026-06-12: from a cold read of a pre-fix experiment state, Codex independently
 # rediscovered all three findings a human had routed to ChatGPT (repro gap, in-sample steering,
@@ -39,8 +43,11 @@
 # ONLY if the design asserts a verdict — measurement designs state a purpose, not a claim. Motivated by
 # midtrain-interp v2, whose two real flaws (in-sample steering eval; no random-direction control)
 # were DESIGN flaws only caught at close.
-# Env: AAR_SUBSTRATE=claude|codex (family that ran the exp; default claude — set in instance config)
-#      AUDIT_VERIFIER_CMD=...      (override the auditor; must be a DIFFERENT family than AAR_SUBSTRATE)
+# Env: AAR_SUBSTRATE=claude|codex (family that RAN the exp; REQUIRED — fails closed if unset/unknown so a
+#                                  wrong default can't make the audit same-family; auditor = opposite family)
+#      AUDIT_VERIFIER_CMD=...      (OVERRIDE the auditor; honored only if a DIFFERENT family than the runner,
+#                                  and it MUST write its final answer to "$OUT_TMP" — see the built-in defaults.
+#                                  A same-family value is ignored (warn) + the opposite-family default is used.)
 #      AUDIT_CONSTITUTION=path     (the standards file; default ~/AGENTS.md)
 set -euo pipefail
 MODE=close
@@ -63,20 +70,36 @@ else
 fi
 [ -d "$EXP" ] || { echo "BLOCKED: context/experiment dir missing: $EXP" >&2; exit 1; }
 
-# --- cross-family enforcement (FINDING 2) -------------------------------------------------------
-# Infer the auditor's family from the verifier command (default = codex).
-AUDITOR_FAMILY=codex
+# --- cross-family auditor selection (guaranteed by construction; #262 / #239) -------------------
+# RUNNER_FAMILY is the family that RAN the experiment (AAR_SUBSTRATE — REQUIRED, no default: a wrong
+# default must not make the audit same-family, matching log-experiment.sh). The auditor is ALWAYS the
+# opposite family; its built-in default verifier is assembled below (after $OUT_TMP exists).
+RUNNER_FAMILY=${AAR_SUBSTRATE:-}
+case "$RUNNER_FAMILY" in
+  claude) AUDITOR_FAMILY=codex ;;
+  codex)  AUDITOR_FAMILY=claude ;;
+  *) echo "BLOCKED: AAR_SUBSTRATE must be claude|codex (got '${RUNNER_FAMILY:-<unset>}') — set it to the" >&2
+     echo "  family that RAN the experiment so the auditor is the OTHER family. Fail closed rather than" >&2
+     echo "  default to a family and risk a silent same-family audit." >&2
+     exit 1 ;;
+esac
+# AUDIT_VERIFIER_CMD is an OVERRIDE, honored ONLY when a DIFFERENT family than the runner. A same-family
+# value — a misconfig, or an instance BASH_ENV re-injecting AUDIT_VERIFIER_CMD into every shell (#262) — is
+# IGNORED (warn) and the opposite-family built-in default is used, so the audit can never silently run
+# same-family and the legitimate case never dead-ends. A custom (neither-claude-nor-codex) command is
+# trusted as a deliberate third-family escape hatch (it can never equal the runner family).
+VERIFIER_OVERRIDE=""
 if [ -n "${AUDIT_VERIFIER_CMD:-}" ]; then
   case "$AUDIT_VERIFIER_CMD" in
-    *claude*) AUDITOR_FAMILY=claude ;; *codex*) AUDITOR_FAMILY=codex ;; *) AUDITOR_FAMILY=custom ;;
+    *claude*) OVERRIDE_FAMILY=claude ;; *codex*) OVERRIDE_FAMILY=codex ;; *) OVERRIDE_FAMILY=custom ;;
   esac
-fi
-RUNNER_FAMILY=${AAR_SUBSTRATE:-claude}
-if [ "$AUDITOR_FAMILY" = "$RUNNER_FAMILY" ]; then
-  echo "BLOCKED: cross-family audit required — auditor family ($AUDITOR_FAMILY) == experiment runner" >&2
-  echo "  family ($RUNNER_FAMILY). Set AUDIT_VERIFIER_CMD to a DIFFERENT family (e.g. on a Codex AAR:" >&2
-  echo "  AUDIT_VERIFIER_CMD='claude -p ...'), or correct AAR_SUBSTRATE if mis-set." >&2
-  exit 1
+  if [ "$OVERRIDE_FAMILY" = "$RUNNER_FAMILY" ]; then
+    echo "[audit_experiment] WARN: ignoring same-family AUDIT_VERIFIER_CMD (family=$OVERRIDE_FAMILY == runner)" >&2
+    echo "  — likely a misconfig or an instance BASH_ENV re-injection (#262); using the built-in $AUDITOR_FAMILY auditor." >&2
+  else
+    VERIFIER_OVERRIDE=$AUDIT_VERIFIER_CMD
+    [ "$OVERRIDE_FAMILY" = custom ] && AUDITOR_FAMILY=custom
+  fi
 fi
 
 CONSTITUTION=${AUDIT_CONSTITUTION:-$HOME/AGENTS.md}
@@ -266,9 +289,44 @@ if [ -n "${AUDIT_DRY_RUN:-}" ]; then printf '%s\n' "$PROMPT"; exit 0; fi
 
 # --- run, with stale-output guard (FINDING 1): write to a temp file, atomic-mv only on success ----
 OUT_TMP="$(mktemp "${TMPDIR:-/tmp}/audit.XXXXXX.md")"
-VERIFIER_CMD=${AUDIT_VERIFIER_CMD:-"codex exec --sandbox read-only --skip-git-repo-check --cd \"$EXP\" -o \"$OUT_TMP\""}
+# Built-in default verifiers MUST (1) run with cwd = "$EXP" so the auditor sees the experiment files the
+# PROMPT calls "the current directory" (the codex default uses --cd; the claude default cd's in a SUBSHELL
+# so the script's own cwd — and the relative $OUT/$OUT.run.log paths — are unaffected), and (2) write their
+# FINAL answer to $OUT_TMP (the harness atomically promotes it to $OUT). claude's print mode writes to
+# STDOUT, which the harness redirects to the run log — so the claude default REDIRECTS stdout to $OUT_TMP
+# (#239: a custom 'claude -p' WITHOUT this redirection wrote to the run log and the harness failed closed
+# with "auditor produced no findings file"). A custom AUDIT_VERIFIER_CMD override must likewise run in "$EXP"
+# and write its final answer to "$OUT_TMP".
+# Select the auditor. A built-in default is run DIRECTLY as argv (NEVER eval'd) so a hostile $EXP path
+# can't inject shell (security). Only a caller-supplied AUDIT_VERIFIER_CMD override is eval'd — its
+# documented contract is a shell command line (it may carry a redirection/pipeline), and the caller owns it.
+# VERIFIER_CMD below is a DISPLAY string (logging + the print seam); the built-ins EXECUTE from the argv
+# branches in run_verifier, not from this string.
+if [ -n "$VERIFIER_OVERRIDE" ]; then
+  VERIFIER_KIND=override; VERIFIER_CMD=$VERIFIER_OVERRIDE
+elif [ "$AUDITOR_FAMILY" = claude ]; then
+  VERIFIER_KIND=claude;   VERIFIER_CMD="( cd \"$EXP\" && claude -p ) > \"$OUT_TMP\""
+else
+  VERIFIER_KIND=codex;    VERIFIER_CMD="codex exec --sandbox read-only --skip-git-repo-check --cd \"$EXP\" -o \"$OUT_TMP\""
+fi
+# run_verifier: stdin = the PROMPT. Built-ins run as direct argv (no eval); the override is eval'd (its
+# documented contract is a shell command line that writes its final answer to "$OUT_TMP").
+run_verifier(){
+  case "$VERIFIER_KIND" in
+    claude)   ( cd "$EXP" && claude -p ) > "$OUT_TMP" ;;
+    codex)    codex exec --sandbox read-only --skip-git-repo-check --cd "$EXP" -o "$OUT_TMP" ;;
+    override) eval "$VERIFIER_OVERRIDE" ;;
+  esac
+}
+# Testability seam: print the resolved cross-family selection without invoking a model (mirrors
+# AUDIT_DRY_RUN; lets the offline smoke assert selection + the exact $OUT_TMP redirect target). Cleans up.
+if [ -n "${AUDIT_PRINT_VERIFIER:-}" ]; then
+  printf 'AUDITOR_FAMILY=%s\nRUNNER_FAMILY=%s\nOUT_TMP=%s\nVERIFIER_CMD=%s\n' \
+    "$AUDITOR_FAMILY" "$RUNNER_FAMILY" "$OUT_TMP" "$VERIFIER_CMD"
+  rm -f "$OUT_TMP"; exit 0
+fi
 echo "[audit_experiment] mode=$MODE exp=$EXP auditor=$AUDITOR_FAMILY runner=$RUNNER_FAMILY" >&2
-if ! eval "$VERIFIER_CMD" <<< "$PROMPT" >"$OUT.run.log" 2>&1; then
+if ! run_verifier <<< "$PROMPT" >"$OUT.run.log" 2>&1; then
   echo "BLOCKED: auditor run failed — last lines of $OUT.run.log:" >&2; tail -5 "$OUT.run.log" >&2
   rm -f "$OUT_TMP"; exit 1; fi
 [ -s "$OUT_TMP" ] || { echo "BLOCKED: auditor produced no findings file (stale $OUT NOT reused)" >&2; rm -f "$OUT_TMP"; exit 1; }

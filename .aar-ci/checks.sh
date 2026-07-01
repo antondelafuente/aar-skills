@@ -256,4 +256,19 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scrip
   fi
 fi
 
+# 12. cross-family verifier-selection smoke (#262/#239): audit_experiment.sh derives the auditor from
+#     AAR_SUBSTRATE (opposite family), self-corrects a same-family / BASH_ENV-injected AUDIT_VERIFIER_CMD
+#     instead of blocking, redirects the claude default to $OUT_TMP, and fails closed on unset/unknown
+#     substrate — behavior the JSON/syntax checks can't cover. Offline seam. Runs when the script or its
+#     smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/verify-claims/skills/verify-claims/scripts/(audit_experiment|cross_family_verifier_smoke)\.sh$'; then
+  CFV_SMOKE="$ROOT/plugins/verify-claims/skills/verify-claims/scripts/cross_family_verifier_smoke.sh"
+  if [ -f "$CFV_SMOKE" ]; then
+    echo "[checks] cross-family verifier-selection smoke" >&2
+    bash "$CFV_SMOKE" >&2 && ok "cross_family_verifier smoke" || err "cross_family_verifier smoke FAILED"
+  else
+    err "audit_experiment.sh changed but cross_family_verifier_smoke.sh missing — cannot verify cross-family selection"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }
