@@ -12,9 +12,13 @@ Two *opposite* pod-lifecycle failures, both real incidents (2026-06-30):
 
 ## Approach
 
-**#266 — delete the watchdog, do not replace it.** Remove `scripts/watchdog.sh` and its references in the gpu-job `SKILL.md`. Deliberately build NO liveness/heartbeat machinery for the agent-death case (Anton's explicit call: that case hasn't happened, so it's not worth standing overhead). The existing **lease-based reaper (`pod_reaper.sh`) stays as the sole backstop** — it is model-free, reaps on lease expiry alone (contract-2), and does NOT depend on the watchdog or any pod-side keepalive.
+**#266 — retire the watchdog (no-op shim now; full removal in a follow-up).** Replace `scripts/watchdog.sh` with a no-op deprecation shim and remove the "arm the watchdog" step from the gpu-job `SKILL.md`. Deliberately build NO liveness/heartbeat machinery for the agent-death case (Anton's explicit call: that case hasn't happened, so it's not worth standing overhead). The existing **lease-based reaper (`pod_reaper.sh`) stays as the sole backstop** — it is model-free, reaps on lease expiry alone (contract-2), and does NOT depend on the watchdog or any pod-side keepalive.
+
+Why a shim, not a hard delete: installed `run-experiment`/`design-experiment` (experiment-lifecycle) instructions still reference `watchdog.sh`, and a parallel PR is editing that plugin — so removing those refs here would collide. The shim removes the *danger* now (it can no longer reap anything) with zero dangling-reference risk; a follow-up removes the shim + those refs together. (This is the design-review's endorsed "compatibility shim until all consumers stop pointing at it" path.)
 
 **#278 — add a signal trap; keep the existing short-lease machinery.** `deploy_pod.py` already mints a SHORT intent lease pre-deploy, binds the real pod id to it the instant the 201 returns (`provisional`), and promotes to the long run expiry only after SSH is confirmed (`enrich`) — all fail-closed. So the "short unconfirmed lease" and "durable, discoverable pod id" #278 asks for already exist; the reaper already reaps a never-enriched pod at intent expiry. The genuine gap is that a **kill during the readiness poll** isn't cleaned up promptly. Fix: install a `SIGTERM`/`SIGINT` trap that `DELETE`s the just-created pod (and marks its lease reaped) before exiting — so a graceful kill (a `timeout`'s initial `SIGTERM`, Ctrl-C) cleans up in seconds. The untrappable `SIGKILL`/hard-timeout case is already bounded by the short intent lease.
+
+**Testing.** `deploy_pod.py --selftest` gains an offline `_selftest_cleanup` check (stubs the DELETE + lease calls, fires the trap on an in-flight pod and asserts it deletes; fires it on a cleared/confirmed pod and asserts it does not). `.aar-ci/checks.sh` runs `deploy_pod.py --selftest` whenever that file changes — compile-only can't catch a broken billing-safety cleanup.
 
 ## Alternatives considered
 

@@ -147,6 +147,14 @@ for p in "${PATHS[@]}"; do case "$p" in
   *.py) [ -f "$p" ] && { python3 -c "import sys; compile(open(sys.argv[1]).read(), sys.argv[1], 'exec')" "$p" 2>/dev/null && ok "py-syntax $p" || err "py-syntax: $p"; } ;;   # in-memory: no __pycache__ written (keeps the tree clean)
 esac; done
 
+# 3b. gpu-job deploy_pod.py behavior selftest (offline: region-selection + the #278 mid-create abort
+#     trap). A signal trap that DELETEs a billing pod is billing-safety code — compile-only can't catch
+#     a broken cleanup. `--selftest` requires no creds/network by construction.
+for p in "${PATHS[@]}"; do case "$p" in
+  */gpu-job/skills/gpu-job/scripts/deploy_pod.py)
+    [ -f "$p" ] && { python3 "$p" --selftest >/dev/null 2>&1 && ok "deploy_pod --selftest ($p)" || err "deploy_pod --selftest FAILED: $p"; } ;;
+esac; done
+
 # 4. instance-leak / secrets: NOT re-implemented here. The repo's pre-commit secrets hook
 #    (.githooks/pre-commit) is the deterministic backstop for instance specifics + secrets, and the
 #    cross-family --code review is the judgment-based catch. Hardcoding instance patterns in a product

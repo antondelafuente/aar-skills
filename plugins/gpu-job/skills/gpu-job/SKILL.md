@@ -28,16 +28,13 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
 3. **Run detached:** `scripts/run_remote.sh <port> root@<ip> <job.sh> /root/job.log [ENV=V…]`
    — survives SSH close, verifies the job actually started (a "launched" echo proves the
    wrapper ran, not the job). Write the job script to be idempotent and to print progress.
-4. **Arm the watchdog the moment the job is launched:** `scripts/watchdog.sh <pod-id> <ip>
-   <port> [grace]` — if you stop paying attention, the pod still gets deleted. NOTE its
-   semantics: it is a **TTL / dead-man timer, not idle detection** — it fires after the grace
-   period unless `/workspace/.keepalive_until_utc` holds a future UTC timestamp. A long job
-   must REFRESH that file periodically (e.g. each epoch), or set grace ≥ expected runtime +
-   margin; otherwise a healthy job gets killed on schedule.
-5. **Persist + VERIFY:** the job's last act is `rclone copy <outputs> <remote>/<job>/`;
+   Cost safety needs no per-pod timer armed by hand — every pod is lease-covered automatically at
+   acquire (step 1), and the standing reaper is the backstop (see "The pod lease + the standing
+   reaper" below).
+4. **Persist + VERIFY:** the job's last act is `rclone copy <outputs> <remote>/<job>/`;
    before teardown, verify EVERY unique artifact is in the store (`rclone lsf` the
    directory and check the final artifact's bytes — never trust a zero-byte done-marker).
-6. **Tear down:** `scripts/teardown.sh <pod-id> [lease-nonce]`. Default the moment artifacts verify.
+5. **Tear down:** `scripts/teardown.sh <pod-id> [lease-nonce]`. Default the moment artifacts verify.
    Pass the `LEASE_NONCE` so the lease is **closed only after the delete is verified gone** (an
    unverified delete leaves the lease for the standing reaper to retry). Never use provider "stop"
    expecting keep-warm — container disk wipes on restart.
@@ -57,16 +54,16 @@ in the store **once** and pull from there:
 
 ## The pod lease + the standing reaper
 
-The per-pod `watchdog.sh` only reaps a pod if you armed it, by hand, after the run was underway — so
-a pod whose agent died before arming it bills until a human notices. The **pod lease** closes that
-hole: `deploy_pod.py` writes a tiny, **deletion-scoped** lease (via `scripts/pod_lease.sh`) across
-acquire — an **intent** record *before* the pod is created (so even a created-but-never-returned pod
-is covered), bound to the real pod id (**provisional**) the moment it deploys, then **enriched** with
-the SSH endpoint + the run's real expiry. A standing, **model-free** box-level reaper
-(`scripts/pod_reaper.sh`, scheduled by the instance) then deletes **only leases that are registered
-AND past expiry**, and **reports — never deletes — any unknown pod** (no lease). The lease is what
-gives the reaper the authority to delete safely; the reaper is the always-on counterpart to the
-per-pod watchdog.
+Cost safety is **automatic** — there is no per-pod timer to arm by hand. `deploy_pod.py` writes a
+tiny, **deletion-scoped** lease (via `scripts/pod_lease.sh`) across acquire — an **intent** record
+*before* the pod is created (so even a created-but-never-returned pod is covered), bound to the real
+pod id (**provisional**) the moment it deploys, then **enriched** with the SSH endpoint + the run's
+real expiry. A kill during the readiness poll DELETEs the un-confirmed pod on a catchable signal (a
+`timeout`'s SIGTERM, Ctrl-C); an untrappable kill (SIGKILL / host limit) is bounded by the short
+intent expiry. A standing, **model-free** box-level reaper (`scripts/pod_reaper.sh`, scheduled by the
+instance) then deletes **only leases that are registered AND past expiry**, and **reports — never
+deletes — any unknown pod** (no lease). The lease is what gives the reaper the authority to delete
+safely, and it is the **sole** backstop — the old per-pod `watchdog.sh` is retired (#266).
 
 - **A long job must keep its lease fresh.** The lease `expiry` is the only deletion trigger. A run
   that outlives its expiry must `bash scripts/pod_lease.sh refresh <nonce> --expiry-min <N>`
