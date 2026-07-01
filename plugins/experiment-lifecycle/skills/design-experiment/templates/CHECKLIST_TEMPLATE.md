@@ -34,15 +34,15 @@
       idle-cost teardown backstop; controller-supervised detached probes MUST name the supervising watcher/driver.
       Parking with only an in-process monitor is FAIL for autonomous detached runs; a blocking watcher that keeps the
       executor turn alive is controller-supervised, not autonomous detached.
-      (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + box-side idle-teardown watchdog).  ev:
+      (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + the gpu-job lease as idle-teardown backstop).  ev:
 - ☐ [BLOCK] Resume contract armed (so a model-free supervisor can relaunch a dead run): standing successor
       handoff (`TEMP.md`) current; run-supervision record written and **desired-active** with a session handle
       bound (`run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque>`) — the
       `<opaque>` handle RESOLVED to a concrete instance value by the dispatch/launcher (a tmux name, systemd
       unit, pid-file path), NOT left as the literal placeholder, so the supervisor can find this run's session;
       live pod ids checkpointed (`run_supervision_record.sh checkpoint <run-id> --handoff <TEMP.md> --lease-pod <id>`)
-      and EACH live pod registered for reaping via the `gpu-job` pod lease or the instance's scoped idle-teardown
-      watchdog.                                                                                ev: run_supervision_record.sh status <run-id>
+      and EACH live pod registered for reaping via the `gpu-job` pod lease (the sole backstop since the
+      per-pod watchdog was retired, #266).                                                     ev: run_supervision_record.sh status <run-id>
 - ☐ Read the consuming instance's feedback/gotcha guidance, or the `FEEDBACK_INSTANCE_GUIDANCE`
       target when using feedback-loop (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample
@@ -52,7 +52,7 @@
       RESULTS does assert a claim, conclusions are separated from postdictions.                  ev:
 - ☐ [BLOCK] Cross-family close audit run + every finding responded (ACCEPT/DISPUTE/DEFER).       ev: AUDIT.md
 - ☐ [BLOCK] Teardown verified via the DEPLOYING account's control plane (REST 404 / GraphQL
-      empty with the DEPLOY key — never SSH liveness); self-wake/watchdog cleared.               ev:
+      empty with the DEPLOY key — never SSH liveness); self-wake cleared.                         ev:
 - ☐ [BLOCK] Run-supervision record close READY (NOT cleared early): the record exists and the close path is
       durably in charge, so the desired-active clear is the POST-AUDIT finalizer. Then run that finalizer —
       `run_supervision_record.sh close <run-id>` (finished) or `stop <run-id>` (deliberate /quit, never

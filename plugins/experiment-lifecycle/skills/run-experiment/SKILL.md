@@ -16,7 +16,7 @@ description: >-
 # Executing an experiment on disposable compute
 
 > **The three seams this skill reads** (so the protocol stays substrate-neutral and the instance stays swappable):
-> - **`gpu-job`** (companion plugin) — acquire / deploy / drive-helpers / watchdog / teardown mechanics. Invoke it; do
+> - **`gpu-job`** (companion plugin) — acquire / deploy / drive-helpers / teardown mechanics. Invoke it; do
 >   not reimplement deploys.
 > - **`verify-claims`** (companion plugin) — the close audit (`audit_experiment`) and the standing data audit
 >   (`audit_data.py` + `--data`). Invoke the skill; don't hardcode its script paths.
@@ -229,8 +229,8 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   follows your profile's policy** (deploying-account key; delete-don't-stop for ephemeral/region-free units; the
   mechanics are `gpu-job`'s). **Verify on the control plane of the deploying account** that the unit is actually gone
   (never SSH liveness; a 404 from the wrong key masquerades as deleted while it bills).
-- **Stepping away?** Arm the controller-side idle-teardown watchdog (`gpu-job`) — always-on, detached, **scoped to THIS
-  unit's id only** (never blanket-delete idle compute; peers own theirs).
+- **Stepping away?** Your unit is lease-covered — `gpu-job`'s lease reaper tears down **THIS unit's id** at lease
+  expiry (set a short lease for faster idle teardown; the per-pod watchdog was retired, #266). Peers own theirs.
 - **Write `RESULTS.md` FIRST — the experiment-close gate (do NOT skip).** Bar: *a fresh agent could reproduce this run
   and understand the data **from this dir alone**.* **Describe each arm's data (the numbers / the plot) per the DESIGN
   spec**; any lightweight qualitative read stays separable from the numbers — no pre-registered verdict (if RESULTS *does*
@@ -340,5 +340,5 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 ## Reference
 
 - Your brief: `DESIGN.md` + `START.md` + `CHECKLIST.md` (produced by the `design-experiment` skill).
-- Backend: the **`gpu-job`** plugin (deploy / helpers / watchdog / teardown). Gates: the **`verify-claims`** plugin
+- Backend: the **`gpu-job`** plugin (deploy / helpers / teardown). Gates: the **`verify-claims`** plugin
   (close audit + data audit). Instance specifics: your **execution profile**.
