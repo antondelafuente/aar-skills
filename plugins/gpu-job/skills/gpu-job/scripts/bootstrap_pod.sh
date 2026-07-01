@@ -14,5 +14,13 @@ if [ -n "${RCLONE_CONF_B64:-}" ]; then
     echo "[bootstrap] identity bundle restored"
   fi
 fi
+# Default multi-threaded rclone so large single-file R2 pulls (venvs, big adapters) parallelize instead
+# of throttling to ~1 MB/s single-stream (~148 MB/s measured; automated-researcher #284). Written to
+# /etc/environment so EVERY pod shell — incl. `ssh pod 'rclone …'` used by eval-drivers — inherits it;
+# overridable per-call. Needs a root pod (RunPod default); skipped gracefully otherwise.
+if [ "$(id -u)" = 0 ] && ! grep -q '^RCLONE_MULTI_THREAD_STREAMS=' /etc/environment 2>/dev/null; then
+  printf 'RCLONE_MULTI_THREAD_STREAMS=16\nRCLONE_MULTI_THREAD_CUTOFF=100M\n' >> /etc/environment
+  echo "[bootstrap] rclone multi-thread defaults set"
+fi
 touch /workspace/.gpu-job-ready 2>/dev/null || touch ~/.gpu-job-ready
 echo "[bootstrap] ready"
