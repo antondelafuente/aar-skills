@@ -27,12 +27,16 @@ else
 fi
 
 # (b) #239 — codex runner selects the claude default; that default runs in $EXP (cwd = experiment dir, so
-#     the auditor sees the files the prompt calls "the current directory") AND redirects to $OUT_TMP.
+#     the auditor sees the files the prompt calls "the current directory") AND redirects to the EXACT
+#     $OUT_TMP findings path (not merely some redirection to a wrong file).
 if out=$(seam AAR_SUBSTRATE=codex); then
   echo "$out" | grep -q '^AUDITOR_FAMILY=claude$' || err "(b) codex runner did not select claude auditor: $out"
   echo "$out" | grep -q 'claude -p'               || err "(b) claude default is not 'claude -p': $out"
   echo "$out" | grep -qF "cd \"$EXP\""            || err "(b) claude default does not run in the experiment dir (\$EXP): $out"
-  echo "$out" | grep -q ') >'                     || err "(b) claude default lacks the > \$OUT_TMP redirection (#239): $out"
+  ot=$(printf '%s\n' "$out" | sed -n 's/^OUT_TMP=//p')
+  vc=$(printf '%s\n' "$out" | sed -n 's/^VERIFIER_CMD=//p')
+  [ -n "$ot" ] || err "(b) seam did not print OUT_TMP: $out"
+  case "$vc" in *"> \"$ot\"") : ;; *) err "(b) claude default redirect target != exact \$OUT_TMP: vc=[$vc] ot=[$ot]" ;; esac
 else
   err "(b) codex runner failed unexpectedly"
 fi

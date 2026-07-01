@@ -297,21 +297,36 @@ OUT_TMP="$(mktemp "${TMPDIR:-/tmp}/audit.XXXXXX.md")"
 # (#239: a custom 'claude -p' WITHOUT this redirection wrote to the run log and the harness failed closed
 # with "auditor produced no findings file"). A custom AUDIT_VERIFIER_CMD override must likewise run in "$EXP"
 # and write its final answer to "$OUT_TMP".
+# Select the auditor. A built-in default is run DIRECTLY as argv (NEVER eval'd) so a hostile $EXP path
+# can't inject shell (security). Only a caller-supplied AUDIT_VERIFIER_CMD override is eval'd — its
+# documented contract is a shell command line (it may carry a redirection/pipeline), and the caller owns it.
+# VERIFIER_CMD below is a DISPLAY string (logging + the print seam); the built-ins EXECUTE from the argv
+# branches in run_verifier, not from this string.
 if [ -n "$VERIFIER_OVERRIDE" ]; then
-  VERIFIER_CMD=$VERIFIER_OVERRIDE
+  VERIFIER_KIND=override; VERIFIER_CMD=$VERIFIER_OVERRIDE
 elif [ "$AUDITOR_FAMILY" = claude ]; then
-  VERIFIER_CMD="( cd \"$EXP\" && claude -p ) > \"$OUT_TMP\""
+  VERIFIER_KIND=claude;   VERIFIER_CMD="( cd \"$EXP\" && claude -p ) > \"$OUT_TMP\""
 else
-  VERIFIER_CMD="codex exec --sandbox read-only --skip-git-repo-check --cd \"$EXP\" -o \"$OUT_TMP\""
+  VERIFIER_KIND=codex;    VERIFIER_CMD="codex exec --sandbox read-only --skip-git-repo-check --cd \"$EXP\" -o \"$OUT_TMP\""
 fi
+# run_verifier: stdin = the PROMPT. Built-ins run as direct argv (no eval); the override is eval'd (its
+# documented contract is a shell command line that writes its final answer to "$OUT_TMP").
+run_verifier(){
+  case "$VERIFIER_KIND" in
+    claude)   ( cd "$EXP" && claude -p ) > "$OUT_TMP" ;;
+    codex)    codex exec --sandbox read-only --skip-git-repo-check --cd "$EXP" -o "$OUT_TMP" ;;
+    override) eval "$VERIFIER_OVERRIDE" ;;
+  esac
+}
 # Testability seam: print the resolved cross-family selection without invoking a model (mirrors
-# AUDIT_DRY_RUN; lets the offline smoke assert selection). Cleans up the temp file it just made.
+# AUDIT_DRY_RUN; lets the offline smoke assert selection + the exact $OUT_TMP redirect target). Cleans up.
 if [ -n "${AUDIT_PRINT_VERIFIER:-}" ]; then
-  printf 'AUDITOR_FAMILY=%s\nRUNNER_FAMILY=%s\nVERIFIER_CMD=%s\n' "$AUDITOR_FAMILY" "$RUNNER_FAMILY" "$VERIFIER_CMD"
+  printf 'AUDITOR_FAMILY=%s\nRUNNER_FAMILY=%s\nOUT_TMP=%s\nVERIFIER_CMD=%s\n' \
+    "$AUDITOR_FAMILY" "$RUNNER_FAMILY" "$OUT_TMP" "$VERIFIER_CMD"
   rm -f "$OUT_TMP"; exit 0
 fi
 echo "[audit_experiment] mode=$MODE exp=$EXP auditor=$AUDITOR_FAMILY runner=$RUNNER_FAMILY" >&2
-if ! eval "$VERIFIER_CMD" <<< "$PROMPT" >"$OUT.run.log" 2>&1; then
+if ! run_verifier <<< "$PROMPT" >"$OUT.run.log" 2>&1; then
   echo "BLOCKED: auditor run failed — last lines of $OUT.run.log:" >&2; tail -5 "$OUT.run.log" >&2
   rm -f "$OUT_TMP"; exit 1; fi
 [ -s "$OUT_TMP" ] || { echo "BLOCKED: auditor produced no findings file (stale $OUT NOT reused)" >&2; rm -f "$OUT_TMP"; exit 1; }
