@@ -56,8 +56,12 @@ A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is
 ## The gates (fail-closed — an unparseable verdict BLOCKS, never passes)
 
 - **Experiment.** The close-audit already ran during `run-experiment`; this **verifies it was triaged**, it
-  does not re-run or re-derive the science. BLOCK unless **both** `AUDIT.md` and `AUDIT_RESPONSE.md` are
-  present (the audit ran and every finding was responded to). It deliberately does *not* prose-grep for
+  does not re-run or re-derive the science. BLOCK unless `AUDIT.md` is present **and** the triage is present in
+  **either** form (#263): a separate **`AUDIT_RESPONSE.md`**, **or** a response/triage section appended
+  **inline in `AUDIT.md`** (a heading whose text mentions `respons…`/`triage`, e.g. `## Executor responses`).
+  Both forms count — `audit_experiment.sh` itself already treats an inline audit-response section as valid
+  triage — so a run that responded inline is *not* forced to split the file. It deliberately does *not*
+  prose-grep for
   unresolved HIGHs — that's unreliable; a machine-readable close-triage status the gate could *prove* is a
   documented future hardening. An eval-only / anchor-failed run with no close-audit is allowed **only** if
   `RESULTS.md` records a closed decision *at line start* (e.g. `Decision: ANCHOR_FAILED`, no-go); otherwise it
@@ -87,11 +91,12 @@ token / no access → BLOCK before any mutation), and never printed.
 
 ## The audit shows on the PR (browsable, like a code review)
 
-For an **experiment** or **design-stage** PR, the already-run audit is **surfaced on the PR as a thread** — not just a silent approve. The **reviewer** bot posts the audit findings (`AUDIT.md` for a close; `DESIGN_AUDIT.md` + any re-audit chain for a design) as a native PR review COMMENT, the **author** bot posts the triage responses as a PR comment (close: `AUDIT_RESPONSE.md`, standard; design: `DESIGN_AUDIT_RESPONSE.md` only if present — design has no standard response artifact, so its thread is usually the audit chain plus the revised `DESIGN.md` in the diff), then the reviewer's APPROVE clears the gate. So an experiment PR reads like a code-review PR — the cross-family findings → responses → approve are browsable on GitHub. The audit is **not** re-run (it already ran during design-experiment / run-experiment, with the human in the loop); this posts the captured record. Best-effort: a failed post logs a warning and never blocks the gate or merge. Notes get no thread.
+For an **experiment** or **design-stage** PR, the already-run audit is **surfaced on the PR as a thread** — not just a silent approve. The **reviewer** bot posts the audit findings (`AUDIT.md` for a close; `DESIGN_AUDIT.md` + any re-audit chain for a design) as a native PR review COMMENT, the **author** bot posts the triage responses as a PR comment (close: `AUDIT_RESPONSE.md` when separate; when the responses live **inline in `AUDIT.md`**, the driver splits the file at the response heading and posts the findings part under the reviewer and the response part under the author — so the findings → author-triage trail is preserved either way; design: `DESIGN_AUDIT_RESPONSE.md` only if present — design has no standard response artifact, so its thread is usually the audit chain plus the revised `DESIGN.md` in the diff), then the reviewer's APPROVE clears the gate. So an experiment PR reads like a code-review PR — the cross-family findings → responses → approve are browsable on GitHub. The audit is **not** re-run (it already ran during design-experiment / run-experiment, with the human in the loop); this posts the captured record. Best-effort: a failed post logs a warning and never blocks the gate or merge. Notes get no thread.
 
 ## Config (instance, env-overridable — never hardcode an instance; fails closed if unset)
 
-- `RESEARCH_REPO` — the research repo (`owner/repo`). **Required — no default**; the input dir's `origin` must match it.
+- `RESEARCH_REPO` — the research repo (`owner/repo`). Env is the **override**; when unset it is **bridged from the instance profile** (`[github] research_repo` in `${XDG_CONFIG_HOME:-~/.config}/experiment-lifecycle/aar-profile.{toml,json}`, or `$AAR_PROFILE`) so a manual `log-experiment.sh <dir>` on a configured instance works without an explicit export (#258). Still **fails closed** if neither env nor profile supplies it. The input dir's `origin` must match it. (The bridge fills only *unset* non-secret config; on the executor close path the frozen `START.md` snapshot exported to env overrides it, so the live profile is only the manual-path fallback.)
+- `LOG_EXPERIMENT_BASE_BRANCH` — the branch to fork/target. Env override; else `[github] base_branch` from the profile; else `main`.
 - `LOG_EXPERIMENT_AUTHOR_FAMILY` — `claude`|`codex`. Defaults to `$AAR_SUBSTRATE`; **fails closed if neither is set** (a wrong default must not make the review same-family). The reviewer is the **opposite** family.
 - `LOG_EXPERIMENT_TOKEN_CMD_CLAUDE` / `LOG_EXPERIMENT_TOKEN_CMD_CODEX` — each a command taking `<owner/repo>` that mints that family's engineer-bot token. **Both** are used: the author family's (writes) and the opposite family's (approval). **Fail closed if either is unset.**
 - `LOG_EXPERIMENT_GIT_AUTHOR_CLAUDE` / `LOG_EXPERIMENT_GIT_AUTHOR_CODEX` — the `Name <email>` each bot commits as. **Fail closed if the author family's is unset.**
