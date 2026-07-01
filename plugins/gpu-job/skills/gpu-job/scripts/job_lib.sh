@@ -61,16 +61,65 @@ serve_wait(){ # serve_wait <port> [max-iter=480] — wait (5s steps) until a vLL
   return 1
 }
 
+# --- R2 copy --------------------------------------------------------------------------
+# Incidents: `rclone copy` of a tree WITHOUT -L silently SKIPS symlinks, logs a `NOTICE: … Can't
+# follow symlink without -L/--copy-links`, and still exits 0 — and some links (HF-cache snapshot
+# links; cross-run dataset/adapter dedup links) point OUTSIDE the tree, so the data is genuinely LOST
+# when the source is deleted (HF-cache pre-stage 2026-06-06; Neel-volume migration 2026-06-09). Use
+# r2_copy for ANY tree/HF-cache copy instead of raw `rclone copy`.
+
+r2_copy(){ # r2_copy <src> <dst> [extra rclone args…] — hardened tree/HF-cache copy. ALWAYS follows
+           # symlinks (-L, appended LAST so a caller flag can't override it) so link targets land as
+           # real bytes, and treats ANY `Can't follow symlink` NOTICE as an INCOMPLETE copy → returns
+           # non-zero WITH a directed message even when rclone itself exited 0 (the swallow that made a
+           # bare copy read as success). Propagates rclone's own non-zero exit too. Output streams live
+           # (tee) so a long copy still shows progress. REJECTS symlink-defeating flags (--skip-links,
+           # -l/--links, --copy-links=false) — they'd silence the NOTICE the guarantee rests on.
+  local src=$1 dst=$2; shift 2
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -l|--links|--skip-links|--no-copy-links|--copy-links=false|--copy-links=FALSE|--copy-links=0)
+        echo "r2_copy: refusing symlink-defeating flag '$a' — r2_copy MUST follow symlinks (-L) and surface skip NOTICEs. Drop it, or call raw rclone if you truly intend it." >&2
+        return 1 ;;
+    esac
+  done
+  local log rc notice=0
+  log=$(mktemp)
+  # Capture rclone's status via PIPESTATUS so the result is correct with OR without `pipefail`; guard
+  # errexit around the pipe so a non-zero rclone doesn't exit the caller before we surface the message
+  # (restore the caller's errexit exactly — never force it on/off). -L is LAST so it wins over any
+  # earlier caller-supplied copy-links flag (belt-and-suspenders beyond the reject-list above).
+  local restore_e=; case $- in *e*) restore_e='set -e';; esac
+  set +e
+  rclone copy "$src" "$dst" "$@" -L 2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  $restore_e
+  grep -qi "can't follow symlink" "$log" && notice=1
+  rm -f "$log"
+  if [ "$notice" = 1 ]; then
+    echo "r2_copy: INCOMPLETE — rclone logged \"Can't follow symlink\": a symlink was SKIPPED (its target may lie outside the tree → silent data loss). Re-copy so the link's bytes land, or verify the source has no cross-tree links. src=$src dst=$dst" >&2
+    return 1
+  fi
+  return "$rc"
+}
+
 # --- R2 gates -------------------------------------------------------------------------
 # Incidents: `rclone lsf <missing-file>` exits 0 (fullft-pair 2026-06-09); single-file lsf
 # can PHANTOM a just-deleted object — list the DIRECTORY; done-gates must check the real
 # deliverable's bytes, never a 0-byte sentinel; size-threshold ready-gates race the producer.
 
-r2_exists(){ # r2_exists <r2-dir> <name> — true iff <name> is listed in <dir> (no trailing /)
+r2_exists(){ # r2_exists <r2-dir> <name> — true iff <name> is listed in <dir>. Lists the DIRECTORY and
+             # `grep -qx`s the name — NEVER single-file `rclone lsf <file>` (exits 0 on a missing file,
+             # and can phantom a just-deleted leaf → false skip / false pass).
   rclone lsf "$1/" 2>/dev/null | grep -qx "$2"
 }
 
-r2_done(){ # r2_done <r2-path-to-final-artifact> <min-bytes> — true iff it exists with >= min bytes
+r2_done(){ # r2_done <r2-path-to-final-artifact> <min-bytes> — true iff the FINAL artifact (e.g. the
+           # last shard) exists with >= min bytes, via `rclone lsl` (needs real object metadata → empty
+           # if absent). This is the deliverable-BYTES gate — deliberately NOT the racy anti-pattern the
+           # gotcha warns against (a whole-TREE size threshold used as a readiness proxy, which starts a
+           # consumer mid-upload). For an EXACT count/bytes gate, use pull_model's `_STAGED.json`.
   local sz
   sz=$(rclone lsl "$1" 2>/dev/null | awk '{print $1; exit}')
   [ -n "$sz" ] && [ "$sz" -ge "$2" ]
@@ -103,7 +152,9 @@ pull_model(){ # pull_model <remote-model-path> <local-dir> [deadline-min=30] —
   exp_b=$(printf '%s' "$man" | grep -o '"total_bytes":[0-9]*' | grep -o '[0-9]*$' || true)
   [ -n "$exp_n" ] && [ -n "$exp_b" ] || { echo "pull_model: bad/missing manifest at $remote/_STAGED.json" >&2; return 1; }
   say "pull_model: pulling $remote -> $dest (expect $exp_n files, $exp_b bytes)"
-  rclone copy "$remote/" "$dest/" --transfers=8 --checkers=8
+  # Via r2_copy (hardened): the staged tree is materialized flat so -L is a no-op and the NOTICE never
+  # fires, but this routes the pull through the one copy path + fails closed on any residual symlink.
+  r2_copy "$remote/" "$dest/" --transfers=8 --checkers=8
   got_n=$(find "$dest" -type f ! -name '_STAGED.json' | wc -l | tr -d ' ')
   got_b=$(find "$dest" -type f ! -name '_STAGED.json' -printf '%s\n' | awk '{s+=$1} END{print s+0}')
   [ "$got_n" = "$exp_n" ] && [ "$got_b" = "$exp_b" ] || {
@@ -154,8 +205,10 @@ env_get(){ # env_get <VAR> [file=/workspace/.env] — read VAR tolerating `expor
   printf '%s' "$val"
 }
 
-wait_r2(){ # wait_r2 <r2-dir> <name> [interval=60] — block until the object lists in the dir
-           # (the adapter-hop idiom: eval pod polls for a 2GB adapter the train pod uploads)
+wait_r2(){ # wait_r2 <r2-dir> <name> [interval=60] — block until the object lists in the dir (a .done
+           # sentinel or the real final artifact — never a size threshold, which races the producer).
+           # Lists the DIRECTORY + `grep -qx` (never single-file `lsf`, which phantoms a deleted leaf).
+           # The adapter-hop idiom: an eval pod polls for the adapter/sentinel the train pod uploads.
   local dir=$1 name=$2 iv=${3:-60}
   while ! rclone lsf "$dir/" 2>/dev/null | grep -qx "$name"; do sleep "$iv"; done
 }

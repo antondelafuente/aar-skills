@@ -22,6 +22,12 @@
 #                      a non-empty prefix is a hard error so a typo can't blend two models.
 set -euo pipefail
 
+# Source the shared job lib for r2_copy (the hardened -L + "Can't follow symlink ⇒ INCOMPLETE" copy).
+# job_lib.sh is a pure function library — sourcing only defines functions, no side effects.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=job_lib.sh
+source "$SCRIPT_DIR/job_lib.sh"
+
 [ $# -eq 2 ] || { echo "usage: stage_model.sh <hf-repo>[@rev] <remote-path>" >&2; exit 1; }
 SPEC=$1; REMOTE=${2%/}            # strip any trailing slash on the remote path
 REPO=${SPEC%@*}                    # repo before '@'
@@ -64,9 +70,11 @@ TOTAL_BYTES=$(find "$TMP" -type f ! -name '_STAGED.json' -printf '%s\n' | awk '{
 [ "$OBJ_COUNT" -gt 0 ] || { echo "BLOCKED: nothing downloaded for $REPO@$REV" >&2; exit 1; }
 say "staged tree: $OBJ_COUNT files, $TOTAL_BYTES bytes"
 
-# 3. Upload the DATA first (-L follows any residual symlinks so bytes land, never dangling links).
+# 3. Upload the DATA first via r2_copy: it injects -L (follows any residual symlinks so bytes land,
+#    never dangling links) AND fails closed if rclone logs a skipped symlink — so an incomplete upload
+#    can't silently precede the completeness manifest below.
 say "uploading -> $REMOTE/"
-rclone copy -L "$TMP" "$REMOTE/" --transfers=8 --checkers=8 --exclude '_STAGED.json'
+r2_copy "$TMP" "$REMOTE/" --transfers=8 --checkers=8 --exclude '_STAGED.json'
 
 # 4. Write the completeness manifest LAST. Its presence == upload finished; its numbers are what
 #    pull_model verifies against. (job_lib.sh: never a 0-byte sentinel — record the real bytes.)

@@ -299,6 +299,21 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scrip
   fi
 fi
 
+# 11c. hardened rclone-helper smoke (#295): r2_copy ALWAYS injects -L and treats a `Can't follow
+#      symlink` NOTICE as an INCOMPLETE copy (returns non-zero even when rclone exits 0 — the silent
+#      data-loss swallow), propagates rclone's own non-zero exit, forwards extra args; and r2_exists
+#      lists the DIRECTORY + `grep -qx` (never single-file lsf). Behavior the JSON/syntax checks can't
+#      cover. Fully offline (stubs rclone on PATH). Runs when job_lib.sh or the smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scripts/(job_lib|rclone_helper_smoke)\.sh$'; then
+  RC_SMOKE="$ROOT/plugins/gpu-job/skills/gpu-job/scripts/rclone_helper_smoke.sh"
+  if [ -f "$RC_SMOKE" ]; then
+    echo "[checks] hardened rclone-helper smoke" >&2
+    bash "$RC_SMOKE" >&2 && ok "rclone_helper smoke" || err "rclone_helper smoke FAILED"
+  else
+    err "job_lib.sh changed but rclone_helper_smoke.sh missing — cannot verify the hardened rclone helpers"
+  fi
+fi
+
 # 12. cross-family verifier-selection smoke (#262/#239): audit_experiment.sh derives the auditor from
 #     AAR_SUBSTRATE (opposite family), self-corrects a same-family / BASH_ENV-injected AUDIT_VERIFIER_CMD
 #     instead of blocking, redirects the claude default to $OUT_TMP, and fails closed on unset/unknown
