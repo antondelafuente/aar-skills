@@ -37,9 +37,12 @@ the one thing it can trust — the substrate that ran the experiment.
 **Make cross-family guaranteed by construction from `AAR_SUBSTRATE`, and own a correct built-in default for
 both families.** (This is fix option (a) from #262, blessed `ready`; it also dissolves #239.)
 
-1. **Runner family is the source of truth.** `RUNNER_FAMILY=${AAR_SUBSTRATE:-claude}`. The required auditor
-   is *always the opposite* family (`claude→codex`, `codex→claude`); an unknown substrate `die`s (fail-closed,
-   unchanged for that genuinely-broken case).
+1. **Runner family is the source of truth, REQUIRED.** `RUNNER_FAMILY=${AAR_SUBSTRATE:-}` — **no default**
+   (design-review HIGH): `AAR_SUBSTRATE` is caller-set per-invocation and the box runs both families, so a
+   `claude` default would let a Codex runner with unset substrate silently pick a Codex auditor (same-family).
+   Unset/unknown now **fails closed** with a clear message, matching the sibling `log-experiment.sh` ("a wrong
+   default must not make the review same-family"). The required auditor is *always the opposite* family
+   (`claude→codex`, `codex→claude`).
 
 2. **`AUDIT_VERIFIER_CMD` becomes an override that is honored only when it's a *different* family than the
    runner.** If a caller-supplied `AUDIT_VERIFIER_CMD` is the *same* family as the runner — whether a
@@ -78,9 +81,10 @@ both families.** (This is fix option (a) from #262, blessed `ready`; it also dis
 
 ## Blast radius
 
-- **Product only**, `plugins/verify-claims/skills/verify-claims/`: `scripts/audit_experiment.sh` (selection
-  logic + header), `SKILL.md` (docs), a new `scripts/cross_family_verifier_smoke.sh`, and a hook in
-  `.aar-ci/checks.sh`. No change to `verify_claim.sh` or `audit_data.py`.
+- **Product only**, `plugins/verify-claims/`: `scripts/audit_experiment.sh` (selection logic + header),
+  `SKILL.md` (docs), a new `scripts/cross_family_verifier_smoke.sh`, `.claude-plugin/plugin.json` version
+  bump `0.7.10→0.7.11` + a `CHANGELOG.md` entry (design-review MED: version bump on every behavior change),
+  and a hook in `.aar-ci/checks.sh`. No change to `verify_claim.sh` or `audit_data.py`.
 - **Behavior change:** a same-family `AUDIT_VERIFIER_CMD` now *warns + self-corrects* instead of *blocking*.
   Cross-family is still guaranteed (auditor = opposite of `AAR_SUBSTRATE`). No caller passes a same-family
   command deliberately, so no legitimate workflow regresses. `AUDIT_DRY_RUN` behavior is unchanged except it
