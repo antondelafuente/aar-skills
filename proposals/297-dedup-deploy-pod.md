@@ -39,14 +39,17 @@ silently re-open. It does **not** rewire historical drivers or delete the other 
 - **`deploy_pod.py` runs box-side (on the orchestrator), not on the pod.** It calls the RunPod API to
   *create* the pod; it never needs to reach the pod, so a driver must **never** `scp` it to a pod or copy it
   into an experiment dir. A driver **invokes the canonical path in place** — either directly
-  (`python3 <plugin>/scripts/deploy_pod.py`) or through a **box-side symlink into the plugin scripts dir**
-  (the `research-lab/registry/pipelines/lib/deploy_pod.py` pattern, once its target is fixed). The env-knob
-  interface (`GPU_TYPE`, `DISK_GB`, `POD_NAME`, …) is the seam drivers customize — not a code fork.
-- **The pod-side mechanism, stated explicitly** (this is where the copies came from): the scripts that *do*
-  run on the pod — `bootstrap_pod.sh`, `run_remote.sh`, `job_lib.sh` — are **`scp`'d to the pod from the
-  canonical plugin `scripts/` dir at provision time**, so the pod runs the canonical too, never a
-  hand-carried fork. `deploy_pod.py` is the acquisition script and is exempt from this — it is invoked
-  box-side and produces the SSH endpoint the other scripts are then copied over.
+  (`python3 <plugin>/scripts/deploy_pod.py`) or through a **box-side symlink/shim into the plugin scripts
+  dir** that a consuming instance provides. The env-knob interface (`GPU_TYPE`, `DISK_GB`, `POD_NAME`, …) is
+  the seam drivers customize — not a code fork. (SKILL.md states this generically; a concrete instance
+  symlink path stays in that instance's own repo, never in the product doc.)
+- **The box-side vs pod-side split, stated explicitly** (this is where the copies came from). Two scripts run
+  **box-side** on the orchestrator: `deploy_pod.py` (acquisition) and `run_remote.sh` (it `scp`'s a job
+  script over and launches it detached). Two run **on the pod** and are therefore copied to it **from the
+  canonical plugin `scripts/` dir** at provision time: `bootstrap_pod.sh` (run on first ssh) and `job_lib.sh`
+  (sourced by the job). So the pod runs the canonical helpers too — copied from the canonical dir, never a
+  hand-carried fork — while `deploy_pod.py`/`run_remote.sh` are invoked box-side against the canonical and
+  never reach the pod.
 
 **2. Bump the gpu-job plugin version** 0.2.7 → 0.2.8 (required by `.aar-ci/checks.sh` for any non-manifest
 change under a plugin dir).
@@ -56,11 +59,19 @@ antondelafuente/research-lab …`) to (a) repoint / repair the broken
 `registry/pipelines/lib/deploy_pod.py` symlink at the canonical's real current location and (b) retire the
 historical per-experiment `toy_action_faithfulness/deploy_pod.py` forks. This is deliberately a **separate
 repo's** work: the ship-change close-gate rejects a cross-repo `Closes`, and the forks are low-priority
-history. The follow-up number is recorded here once filed.
+history. Filed as **research-lab#50** (`ready`) — a plain mention here, not a `Closes` (cross-repo).
 
 The reconcile step (#297 scope item 2) is **complete in the finding itself**: the diff between the canonical
 and `research-lab/registry/pipelines/lib/deploy_pod.py` is empty because the latter is a symlink, and the
 per-experiment forks are strictly older — no code moves into the canonical.
+
+**Scope of "done" for this PR (honest framing).** This PR **establishes the canonical + writes the no-fork
+convention**; it does not by itself restore propagation through the one live consumer path, because that
+consumer's pointer lives in a different repo. The `research-lab` symlink is **broken right now** (stale
+target), so a driver that runs it today fails loudly rather than silently running a stale fork — but
+propagation through that path is only *restored* once the follow-up repoints it at the canonical. That
+repair is the filed `research-lab` follow-up and is what closes the propagation gap end-to-end; #297's
+`automated-researcher` half (canonicalize + document) is what lands here.
 
 ## Alternatives considered
 
