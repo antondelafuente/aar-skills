@@ -91,7 +91,10 @@ if ( set +e; TMPDIR=/nonexistent/definitely-not-here RCLONE_COPY_MODE=ok r2_copy
 #        Drive pull_model with a present+valid manifest so it reaches the copy, then fail the copy:
 #        under `set +e` it must still return non-zero (the explicit `|| return 1`), never march into
 #        the manifest verify. RCLONE_LSF_OUT carries _STAGED.json so pull_model's wait loop exits.
-pm_dest="$TMP/pm_dest"
+#        CRUCIAL: pre-populate the dest to MATCH the manifest (1 file / 10 bytes) so the later verify
+#        would PASS if pull_model wrongly continued — only the explicit `|| return 1` makes this fail,
+#        so the test actually pins the fix (a would-be-empty dest fails verify for the wrong reason).
+pm_dest="$TMP/pm_dest"; mkdir -p "$pm_dest"; printf '0123456789' > "$pm_dest/shard-00001"   # 10 bytes
 if ( set +e
      export RCLONE_LSF_OUT=$'_STAGED.json\n'
      export RCLONE_CAT_OUT='{"object_count":1,"total_bytes":10,"repo":"x","rev":"main"}'
