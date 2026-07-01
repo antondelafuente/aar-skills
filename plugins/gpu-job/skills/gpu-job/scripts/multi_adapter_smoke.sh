@@ -49,7 +49,10 @@ no(){ echo "FAIL $1"; fails=1; }
 
 # --- reference callbacks -----------------------------------------------------------------
 CALLS="$TMP/serve_calls"; : > "$CALLS"
-ref_serve(){ echo "serve $1" >> "$CALLS"; echo 99999; }          # $1=adapter $2=port $3=log; echo PID
+# serve stubs spawn a REAL bg process so the helper's kill -0 PID-liveness gate passes (teardown kills
+# it). Redirect the bg process's fds (</dev/null >/dev/null 2>&1) so it does NOT hold the `$(serve_fn)`
+# command-substitution pipe open — otherwise the capture blocks until the sleep exits.
+ref_serve(){ echo "serve $1" >> "$CALLS"; sleep 30 </dev/null >/dev/null 2>&1 & echo $!; }  # $1=adapter $2=port $3=log; echo live PID
 ref_eval(){ echo "result-for-$1" > "$2/result.txt"; }            # distinct content per adapter
 
 # serve_adapters_eval calls die() (exit) on failure; run every invocation in a SUBSHELL so a
@@ -69,7 +72,7 @@ if [ ! -e "$OUT2/01-adapterA/old.eval" ] && [ -f "$OUT2/01-adapterA/result.txt" 
 
 # --- 3. teardown BETWEEN adapters (ordering): a teardown precedes the first serve and separates serves ---
 ORDER="$TMP/order"; : > "$ORDER"
-ord_serve(){ echo SERVE >> "$MA_SMOKE_ORDER"; echo 99999; }
+ord_serve(){ echo SERVE >> "$MA_SMOKE_ORDER"; sleep 30 </dev/null >/dev/null 2>&1 & echo $!; }
 ( MA_SMOKE_ORDER="$ORDER" serve_adapters_eval "$TMP/out3" 8000 ord_serve ref_eval -- a1 a2 ) >/dev/null 2>&1
 DEDUP=$(awk 'NR==1||$0!=p{print}{p=$0}' "$ORDER" | tr '\n' ' ')
 case "$DEDUP" in "KILL SERVE"*) ok teardown-before-first-serve ;; *) no "teardown-before-first-serve ($DEDUP)" ;; esac
@@ -80,11 +83,15 @@ same_eval(){ echo IDENTICAL > "$2/result.txt"; }
 if ( serve_adapters_eval "$TMP/out4" 8000 ref_serve same_eval -- a1 a2 ) >/dev/null 2>&1; then no distinctness-error-dies; else ok distinctness-error-dies; fi
 if ( MA_DISTINCT_MODE=warn serve_adapters_eval "$TMP/out5" 8000 ref_serve same_eval -- a1 a2 ) >/dev/null 2>&1; then ok distinctness-warn-continues; else no distinctness-warn-continues; fi
 
-# --- 5. serve_fn PID contract: a non-numeric / empty PID fails closed ---
+# --- 5. serve_fn PID contract, fail-closed: non-numeric / empty / unsafe-0 / dead PID all die ---
 bad_serve(){ echo "not-a-pid"; }
 if ( serve_adapters_eval "$TMP/out6" 8000 bad_serve ref_eval -- a1 ) >/dev/null 2>&1; then no pid-contract-nonnumeric; else ok pid-contract-nonnumeric; fi
 empty_serve(){ echo ""; }
 if ( serve_adapters_eval "$TMP/out7" 8000 empty_serve ref_eval -- a1 ) >/dev/null 2>&1; then no pid-contract-empty; else ok pid-contract-empty; fi
+zero_serve(){ echo 0; }                                    # 0 -> kill_tree KILL would hit the process group
+if ( serve_adapters_eval "$TMP/out8" 8000 zero_serve ref_eval -- a1 ) >/dev/null 2>&1; then no pid-contract-zero; else ok pid-contract-zero; fi
+dead_serve(){ echo 2147483646; }                           # numeric but not a live process -> kill -0 fails
+if ( serve_adapters_eval "$TMP/out9" 8000 dead_serve ref_eval -- a1 ) >/dev/null 2>&1; then no pid-contract-dead; else ok pid-contract-dead; fi
 
 # --- 6. default serve path (vllm_serve_lora) honors the PID contract: echoes a real numeric PID ---
 def_serve(){ vllm_serve_lora /fake/base "$1" "$2" "$3"; }        # closes over a fake base model

@@ -275,7 +275,15 @@ serve_adapters_eval(){ # serve_adapters_eval <out_root> <port> <serve_fn> <eval_
     ma_teardown "" "$port" || die "serve_adapters_eval: could not free GPU/port before adapter $a"
     rm -rf "$out_dir"; mkdir -p "$out_dir"              # fresh isolated dir — no stale .eval to reuse
     pid=$("$serve_fn" "$a" "$port" "$serve_log") || die "serve_adapters_eval: serve_fn failed for $a"
+    # PID contract, fail-closed: must be a REAL live child server PID. Reject empty/non-numeric, and
+    # 0/1/self — kill_tree KILL on 0 signals the whole process group, and 1/self would target init or
+    # this driver. `kill -0` then confirms the process actually exists (a serve that never launched
+    # dies loud here, not silently un-killed later).
     case "$pid" in ''|*[!0-9]*) die "serve_adapters_eval: serve_fn must ECHO a numeric server PID (got '$pid') for $a";; esac
+    if [ "$pid" -le 1 ] || [ "$pid" = "$$" ] || [ "$pid" = "${BASHPID:-$$}" ]; then
+      die "serve_adapters_eval: serve_fn returned an unsafe PID ('$pid') for $a — must be a real child server PID, not 0/1/self"
+    fi
+    kill -0 "$pid" 2>/dev/null || die "serve_adapters_eval: serve_fn PID '$pid' is not a live process for $a (serve failed to launch?)"
     serve_wait "$port" || { ma_teardown "$pid" "$port"; die "serve_adapters_eval: server never became ready for $a"; }
     "$eval_fn" "$a" "$out_dir" "$port" || { ma_teardown "$pid" "$port"; die "serve_adapters_eval: eval_fn failed for $a"; }
     ma_teardown "$pid" "$port" || die "serve_adapters_eval: could not free GPU/port after adapter $a"
