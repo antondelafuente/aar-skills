@@ -43,9 +43,13 @@ note() { echo "[log-experiment] $*" >&2; }
 # live profile is consulted only by the MANUAL logging path (no snapshot in play). Tolerant + fail-open: a
 # missing/unparseable profile, absent python3, or an unknown schema_version leaves the env-only behavior intact
 # (a still-empty RESEARCH_REPO fails closed downstream as before).
-read_profile_kv() {   # emits shell-quoted `PROFILE_RESEARCH_REPO=...` / `PROFILE_BASE_BRANCH=...` (only when present)
+# read_profile_field <key>: print the string value of `[github].<key>` from the resolved profile, or nothing.
+# NOTE: the value is emitted RAW on stdout and read straight into a bash variable by the caller (no `eval` —
+# a profile value is never shell-interpreted, so a value like `$(cmd)` stays an inert literal). It is then
+# format-validated below before use. python3 stdlib only (tomllib/json), matching the SCHEMA parser policy.
+read_profile_field() {
   command -v python3 >/dev/null 2>&1 || return 0
-  python3 - <<'PY' 2>/dev/null || true
+  PROFILE_KEY="$1" python3 - <<'PY' 2>/dev/null || true
 import os, sys, json
 try:
     import tomllib
@@ -75,18 +79,30 @@ except Exception:
 sv = data.get("schema_version")
 if sv is not None and sv != 1:
     sys.exit(0)
-gh = data.get("github", {}) or {}
-for var, key in (("PROFILE_RESEARCH_REPO", "research_repo"), ("PROFILE_BASE_BRANCH", "base_branch")):
-    v = gh.get(key)
-    if isinstance(v, str) and v:
-        print(f"{var}={json.dumps(v)}")   # JSON-quoted -> safe to eval as a shell string literal
+v = (data.get("github", {}) or {}).get(os.environ["PROFILE_KEY"])
+if isinstance(v, str) and v and "\n" not in v:
+    sys.stdout.write(v)   # RAW, single value, no newline — caller reads it literally (no eval)
 PY
 }
-if [ -z "$RESEARCH_REPO" ] || [ -z "${LOG_EXPERIMENT_BASE_BRANCH:-}" ]; then
-  eval "$(read_profile_kv)"
+# Fill ONLY unset config from the profile (env stays the override); validate any profile-sourced value to a
+# conservative charset (owner/repo, branch names) so a malformed/hostile profile can't inject a shell metachar.
+_valid_ref() { [[ "$1" =~ ^[A-Za-z0-9._/-]+$ ]]; }
+if [ -z "$RESEARCH_REPO" ]; then
+  _pv="$(read_profile_field research_repo)"
+  if [ -n "$_pv" ]; then
+    _valid_ref "$_pv" || die "profile [github].research_repo has invalid characters: '$_pv'"
+    RESEARCH_REPO="$_pv"
+  fi
 fi
-RESEARCH_REPO="${RESEARCH_REPO:-${PROFILE_RESEARCH_REPO:-}}"
-BASE_BRANCH="${LOG_EXPERIMENT_BASE_BRANCH:-${PROFILE_BASE_BRANCH:-main}}"
+BASE_BRANCH="${LOG_EXPERIMENT_BASE_BRANCH:-}"
+if [ -z "$BASE_BRANCH" ]; then
+  _pv="$(read_profile_field base_branch)"
+  if [ -n "$_pv" ]; then
+    _valid_ref "$_pv" || die "profile [github].base_branch has invalid characters: '$_pv'"
+    BASE_BRANCH="$_pv"
+  fi
+fi
+BASE_BRANCH="${BASE_BRANCH:-main}"
 
 # ---- args ----
 DRY_RUN=0; DIR=""
