@@ -12,8 +12,9 @@
 #   2. HANDLE: read the opaque `session-handle` from the record. No handle recorded -> nothing to reap
 #      (exit 0). The product NEVER interprets the handle; it is the instance's own binding (tmux name,
 #      systemd unit, pid-file, ...).
-#   3. SELF-ONLY SEAM: the instance seam `EXPERIMENT_SESSION_REAP_CMD` is invoked with the handle as its
-#      sole argument. This is SELF-reap: the seam MUST verify the CURRENT session's own identity matches
+#   3. SELF-ONLY SEAM: the instance seam `EXPERIMENT_SESSION_REAP_CMD` (a word-split command string, the
+#      *_CMD convention) is invoked with the handle as its FINAL argument. This is SELF-reap: the seam MUST
+#      verify the CURRENT session's own identity matches
 #      the handle before killing anything, and FAIL CLOSED on a mismatch — so a stale or misbound handle
 #      reaps NOTHING, never a peer's reused session. The product cannot check instance identity, so this
 #      guarantee lives in the seam; this helper only invokes it from within the closing session.
@@ -55,6 +56,9 @@ if [ -z "${EXPERIMENT_SESSION_REAP_CMD:-}" ]; then
 fi
 
 # Terminal action: hand the opaque handle to the instance seam, which reaps THIS session (verifying
-# self==handle, fail-closed on mismatch). Nothing runs after this by design.
+# self==handle, fail-closed on mismatch). The seam is a COMMAND STRING word-split like gpu-job's
+# GPU_JOB_*_CMD provider seams (so "reaper --self" or "bash /path/reap.sh" both work); the handle is passed
+# as a quoted final argument, never re-parsed (injection-safe). Nothing runs after this by design.
 echo "reap_session: reaping own session for '$id' via EXPERIMENT_SESSION_REAP_CMD"
-exec "$EXPERIMENT_SESSION_REAP_CMD" "$handle"
+# shellcheck disable=SC2086  # intentional word-split of the command string (the *_CMD seam convention)
+exec $EXPERIMENT_SESSION_REAP_CMD "$handle"

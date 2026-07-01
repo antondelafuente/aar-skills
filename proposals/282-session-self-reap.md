@@ -50,8 +50,11 @@ infrastructure:
      reaping** (a parked/blocked/active/unknown run is never reaped).
    - **Resolve the handle:** `session-handle <run-id>`; if unset/empty → nothing to reap, exit 0.
    - **Invoke the self-only instance seam:** if `EXPERIMENT_SESSION_REAP_CMD` is set, exec it with the opaque
-     handle as the sole argument (`$EXPERIMENT_SESSION_REAP_CMD "$handle"`) — the terminal action, nothing runs
-     after it. **No tmux, no session-name convention, nothing instance-specific is hardcoded in the product.**
+     handle as the final argument — a **word-split command string** (`exec $EXPERIMENT_SESSION_REAP_CMD
+     "$handle"`), the same `*_CMD` convention as `gpu-job`'s `GPU_JOB_*_CMD` provider seams, so `"reaper
+     --self"` or `"bash /path/reap.sh"` both work while the handle stays a quoted, never-re-parsed argument.
+     This is the terminal action, nothing runs after it. **No tmux, no session-name convention, nothing
+     instance-specific is hardcoded in the product.**
      This is **self-reap**: the seam command MUST verify the *current* session's own identity matches the
      handle before killing anything, and **fail closed on a mismatch** — so a stale or misbound `session_handle`
      reaps NOTHING, never a peer's reused session. The product cannot check instance identity, so this
@@ -132,6 +135,11 @@ above:
 - **LOW (convention match):** behavior coverage belonged in dedicated helper smokes, not the fake-HOME smoke.
   Accepted — extended `run_supervision_record_smoke.sh` and added `reap_session_smoke.sh`, both wired into
   `.aar-ci/checks.sh`.
+
+Cross-family `--code` review then raised 1 MED (0 HIGH), also **accepted**: the seam was invoked as a bare
+executable, so a configured command string (interpreter or fixed args) would fail. Fixed to the word-split
+`*_CMD` convention (`exec $EXPERIMENT_SESSION_REAP_CMD "$handle"`, matching `gpu-job`'s provider seams), with a
+`reap_session_smoke.sh` case for the `"bash $STUB"` command-string form.
 
 ## Rollout + rollback
 

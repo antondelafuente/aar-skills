@@ -39,6 +39,12 @@ rec create c1 --session-handle "tmux:run-c1" >/dev/null; rec close c1 >/dev/null
 if EXPERIMENT_SESSION_REAP_CMD="$STUB" reap c1 >/dev/null; then ok reap-clean-invokes-exit0; else no reap-clean-invokes-exit0; fi
 [ "$(cat "$REAP_LOG")" = "tmux:run-c1" ] && ok reap-passes-exact-handle || no "reap-passes-exact-handle ($(cat "$REAP_LOG"))"
 
+# --- seam as a COMMAND STRING (interpreter + path, the *_CMD convention) still invokes with the exact handle ---
+rec create c1b --session-handle "tmux:run-c1b" >/dev/null; rec close c1b >/dev/null
+: > "$REAP_LOG"
+if EXPERIMENT_SESSION_REAP_CMD="bash $STUB" reap c1b >/dev/null; then ok reap-cmdstring-invokes; else no reap-cmdstring-invokes; fi
+[ "$(cat "$REAP_LOG")" = "tmux:run-c1b" ] && ok reap-cmdstring-exact-handle || no "reap-cmdstring-exact-handle ($(cat "$REAP_LOG"))"
+
 # --- unset seam -> documented no-op (exit 0), seam not called ---
 rec create c2 --session-handle "tmux:run-c2" >/dev/null; rec close c2 >/dev/null
 : > "$REAP_LOG"
