@@ -159,6 +159,13 @@ contract.)
 
 ## Step 1 — Acquire the compute
 
+**Claim the experiment BEFORE the first billable action (do not skip — it's the `[BLOCK]` claim gate).** If
+your instance uses a shared experiment tree, its convention requires *claiming* the experiment before any GPU/
+API spend: check no peer already owns the dir, then write the instance's claim marker (e.g. a `CLAIMED_BY`
+file naming who/date/scope) and commit it path-scoped. A zero-context executor naturally works the listed gates
+and misses this separate coordination convention, so a run's dir has been caught unclaimed *at close* — claim
+first, then acquire.
+
 Delegate to the **`gpu-job`** backend — don't reimplement deploys. Account/key selection, default GPU + disk, and the
 tiered-region retry are the backend's job; the *recipe* choice (which GPU, how big) comes from your execution profile.
 **After deploy, note WHICH account/key created the compute — all later management (list/teardown/verify) MUST use the
@@ -197,6 +204,11 @@ driver instead.
 
 - Confirm the upload to your artifact store (**every unique artifact** — adapter, eval summaries, **rollout/sample
   logs**, generated data, reproduce scripts, `SUMMARY.md` — per the profile; full data to files, never truncated).
+- **Stamp the decoding config into the rollout artifacts (self-contained artifacts, #233).** Whenever you write
+  eval rollouts, persist the exact generation settings — **temperature, top_p, max_new_tokens, seed, and the
+  sampling mode (greedy/sample)** — into each rollout row *or* a companion summary, so cross-arm decoding
+  comparability is verifiable from the artifacts alone, not only re-derivable from driver source. The data-audit
+  gate checks the config is present and consistent across co-measured arms.
 - **Log the run in your ledger** (per the profile). Every GPU run goes in.
 - Pull the headline numbers back and report them.
 - **Start `RESULTS.md` now** (from your instance's record template) — fill what you have; it must be complete before close.
@@ -224,10 +236,22 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   spec**; any lightweight qualitative read stays separable from the numbers — no pre-registered verdict (if RESULTS *does*
   assert a claim, separate conclusions from postdictions). One `RESULTS.md` at close for a multi-arm wave, not per-arm.
 - **Stage the record locally** (path-scoped if your tree is shared). It is *landed to GitHub* by `log-experiment` **after** the close audit (below), not by a raw push — the experiment gate needs `AUDIT.md` to exist first.
+- **R2-backed record: what goes in git vs the artifact store (#232).** Heavy artifacts (full rollout JSONL,
+  adapters, raw logs) belong in **R2**, not git — the profile + `.gitignore` deliberately exclude them. The
+  **canonical self-sufficient record** is: commit the **lightweight** files (`RESULTS.md`, the audit + its
+  responses, `CHECKLIST.md`, small representative samples the brief asked to pin) **plus an
+  `ARTIFACT_MANIFEST.md`** that pins the R2 path, object count, and key sizes of the heavy artifacts (i.e. the
+  committed record fully *describes and locates* what's in R2 and proves the upload was verified). Keep full
+  JSONL/logs/adapters in R2 unless the brief explicitly requests git-pinned samples — do **not** force hundreds
+  of MB into git to satisfy a reproducibility read. If the close audit raises a remote-only reproducibility
+  finding, the canonical triage response is to point at the verified `ARTIFACT_MANIFEST.md` + upload (accept-
+  with-manifest), recorded in the audit-response section like any other finding.
 - **Independent close audit — the OUTPUT-side gate (before clearing the self-wake).** Your self-audit can't catch your
   own reproducibility gaps/overclaims/confounds. Run a **cross-family** audit via **`verify-claims`**
   (`audit_experiment <exp>` → `AUDIT.md`; always the *other* family from whoever ran the work). **Respond to every
-  finding** — fix (commit) or a one-line accept/defer with reason; HIGH findings fixed or explicitly justified. **Triage
+  finding** — fix (commit) or a one-line accept/defer with reason; HIGH findings fixed or explicitly justified. Record
+  the responses either in a separate **`AUDIT_RESPONSE.md`** or **inline in `AUDIT.md`** (a `## Executor responses`
+  section) — `log-experiment` accepts either form (#263). **Triage
   as a PEER, autonomously — close is execution, you don't need the human here.** Audit once (a second pass if your fixes
   were substantive); do NOT auto-iterate to zero findings (it never converges) — stop when only polish remains.
 - **Land the record on GitHub via `log-experiment`** (the research counterpart to `ship-change`):

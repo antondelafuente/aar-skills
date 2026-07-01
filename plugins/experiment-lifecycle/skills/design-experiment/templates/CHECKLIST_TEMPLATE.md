@@ -26,6 +26,9 @@
 
 ## UNIVERSAL  (every GPU experiment)
 - ☐ [BLOCK] Read DESIGN.md + START.md; design is locked (no redesign).                          ev:
+- ☐ [BLOCK] Experiment CLAIMED before ANY GPU/API spend, per the instance's claim convention (checked no peer
+      already owns the dir; wrote the claim marker — e.g. a `CLAIMED_BY` naming who/date/scope — and committed
+      it path-scoped). The claim guardrail must fire BEFORE the first billable action, not at close.  ev: git log <claim-marker>
 - ☐ [BLOCK] Self-wake / idle-cost backstop armed PER SUBSTRATE before any detached run or billable background work.
       Autonomous detached runs MUST name the independent waker id/handle; billable background compute MUST name the
       idle-cost teardown backstop; controller-supervised detached probes MUST name the supervising watcher/driver.
@@ -82,6 +85,9 @@
 - ☐ [BLOCK] Compared arms co-measured in ONE serving session; the canonical grader on EVERY
       decision cell (no cheap-grader on a reported/decision cell).                                ev:
 - ☐ Full eval rollouts READ (actual text): grader / parse / truncation / think-length all sane.   ev:
+- ☐ Decoding config (temperature/top_p/max_new_tokens/seed/sampling mode) PERSISTED in the rollout
+      artifacts (each row or a companion summary) and CONSISTENT across co-measured arms — verifiable from
+      the artifacts, not only from driver source.                                                  ev:
 
 ## EXPERIMENT-SPECIFIC  (designer writes these — the domain-knowledge part the executor can't invent)
 - ☐ ...

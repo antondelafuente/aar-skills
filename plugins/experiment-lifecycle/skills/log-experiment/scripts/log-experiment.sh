@@ -11,6 +11,10 @@
 #
 # Config (instance, env-overridable; NO instance defaults — fail closed):
 #   RESEARCH_REPO                    the research repo (owner/repo). REQUIRED; the input dir's origin must match it.
+#                                    Env is the OVERRIDE; if unset it is bridged from the instance profile's
+#                                    [github] research_repo (#258 — see the profile bridge below).
+#   LOG_EXPERIMENT_BASE_BRANCH       the branch to fork/target (default 'main'); if unset, bridged from
+#                                    [github] base_branch, else 'main'.
 #   LOG_EXPERIMENT_AUTHOR_FAMILY     claude|codex. Defaults to $AAR_SUBSTRATE; fail-closed if neither is set
 #                                    (a wrong default must not make the review same-family). Reviewer = OPPOSITE family.
 #   LOG_EXPERIMENT_TOKEN_CMD_CLAUDE  command taking <owner/repo> that mints a claude-engineer token.
@@ -20,12 +24,85 @@
 #   LOG_EXPERIMENT_GIT_AUTHOR_CODEX  the 'Name <email>' the codex bot commits as.
 set -euo pipefail
 
-# Config (instance, env-overridable). RESEARCH_REPO has NO default — fail closed if unset.
+# Config (instance, env-overridable). RESEARCH_REPO has NO hardcoded default — the env OVERRIDES; if unset it
+# is bridged from the instance profile below, then fail-closed if still empty.
 RESEARCH_REPO="${RESEARCH_REPO:-}"
 AUTHOR_FAMILY="${LOG_EXPERIMENT_AUTHOR_FAMILY:-${AAR_SUBSTRATE:-}}"   # the running family (NO default — fail closed if unknown); reviewer is the OPPOSITE family
 
 die()  { echo "BLOCK: $*" >&2; exit 1; }
 note() { echo "[log-experiment] $*" >&2; }
+
+# ---- instance-profile bridge (#258): fill UNSET non-secret config from aar-profile.{toml,json} ----
+# The #245 profile (`[github] research_repo`, `base_branch`) is the config home, but nothing bridged those
+# values into the vars this script reads, so a MANUAL/scripted `log-experiment.sh <dir>` on a correctly-
+# configured instance died with "RESEARCH_REPO is required". This fallback fixes that WITHOUT re-reading live
+# config on the executor path: it fills ONLY vars the env left unset (env stays the override), and it touches
+# ONLY non-secret config (research_repo + base_branch). Identity seams stay env-only (the profile merely NAMES
+# those env vars, which must be set regardless). Contract note (SCHEMA role split): the executor close path
+# derives config from its frozen START.md snapshot exported to env — that env OVERRIDES this bridge, so the
+# live profile is consulted only by the MANUAL logging path (no snapshot in play). Tolerant + fail-open: a
+# missing/unparseable profile, absent python3, or an unknown schema_version leaves the env-only behavior intact
+# (a still-empty RESEARCH_REPO fails closed downstream as before).
+# read_profile_field <key>: print the string value of `[github].<key>` from the resolved profile, or nothing.
+# NOTE: the value is emitted RAW on stdout and read straight into a bash variable by the caller (no `eval` —
+# a profile value is never shell-interpreted, so a value like `$(cmd)` stays an inert literal). It is then
+# format-validated below before use. python3 stdlib only (tomllib/json), matching the SCHEMA parser policy.
+read_profile_field() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  PROFILE_KEY="$1" python3 - <<'PY' 2>/dev/null || true
+import os, sys, json
+try:
+    import tomllib
+except Exception:
+    tomllib = None
+cands = []
+if os.environ.get("AAR_PROFILE"):
+    cands.append(os.environ["AAR_PROFILE"])
+base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+d = os.path.join(base, "experiment-lifecycle")
+cands += [os.path.join(d, "aar-profile.toml"), os.path.join(d, "aar-profile.json")]   # .toml wins (SCHEMA)
+path = next((c for c in cands if c and os.path.isfile(c)), None)
+if not path:
+    sys.exit(0)
+try:
+    if path.endswith(".toml"):
+        if tomllib is None:
+            sys.exit(0)
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    else:
+        with open(path) as f:
+            data = json.load(f)
+except Exception:
+    sys.exit(0)
+# Tolerant: bridge a v1 profile OR a pre-#153 profile that omits schema_version; never interpret an unknown MAJOR.
+sv = data.get("schema_version")
+if sv is not None and sv != 1:
+    sys.exit(0)
+v = (data.get("github", {}) or {}).get(os.environ["PROFILE_KEY"])
+if isinstance(v, str) and v and "\n" not in v:
+    sys.stdout.write(v)   # RAW, single value, no newline — caller reads it literally (no eval)
+PY
+}
+# Fill ONLY unset config from the profile (env stays the override); validate any profile-sourced value to a
+# conservative charset (owner/repo, branch names) so a malformed/hostile profile can't inject a shell metachar.
+_valid_ref() { [[ "$1" =~ ^[A-Za-z0-9._/-]+$ ]]; }
+if [ -z "$RESEARCH_REPO" ]; then
+  _pv="$(read_profile_field research_repo)"
+  if [ -n "$_pv" ]; then
+    _valid_ref "$_pv" || die "profile [github].research_repo has invalid characters: '$_pv'"
+    RESEARCH_REPO="$_pv"
+  fi
+fi
+BASE_BRANCH="${LOG_EXPERIMENT_BASE_BRANCH:-}"
+if [ -z "$BASE_BRANCH" ]; then
+  _pv="$(read_profile_field base_branch)"
+  if [ -n "$_pv" ]; then
+    _valid_ref "$_pv" || die "profile [github].base_branch has invalid characters: '$_pv'"
+    BASE_BRANCH="$_pv"
+  fi
+fi
+BASE_BRANCH="${BASE_BRANCH:-main}"
 
 # ---- args ----
 DRY_RUN=0; DIR=""
@@ -55,20 +132,35 @@ if [ -z "$KIND" ]; then
 fi
 note "classified: $KIND  ($REL)"
 
+# A close-audit triage/response section, recognized in EITHER form (#263): a separate AUDIT_RESPONSE.md, OR a
+# response section appended INLINE in AUDIT.md (a markdown heading whose text mentions 'respons…'/'triage' —
+# e.g. `## Executor responses`, `## Author triage`). Shared by the experiment gate and post_audit_thread so
+# both agree on what counts as triage. `audit_experiment.sh` itself already treats an inline "audit-response
+# section" as valid triage in its re-run debate, so the log gate should not force a separate file.
+AUDIT_RESPONSE_HEADING_RE='^#{1,6}[[:space:]].*(respons|triage)'
+# echo the line number of the first inline response heading in $1 (empty if none)
+inline_response_line() { grep -niE "$AUDIT_RESPONSE_HEADING_RE" "$1" 2>/dev/null | head -n1 | cut -d: -f1; }
+
 # ---- gate (fail-closed) ----
 gate_experiment() {
   [ -f "$DIR/RESULTS.md" ] || die "experiment missing RESULTS.md"
   if [ -f "$DIR/AUDIT.md" ]; then
-    # Require the triage artifact to exist (the close-audit must have been triaged), then backstop-scan it.
+    # Require the close-audit to have been TRIAGED, accepting either the separate-file or inline form (#263).
     # This VERIFIES the audit ran and was triaged; it does not re-derive triage (a machine-readable
     # close-triage contract is a future hardening — see proposal #240 "Gate detail").
-    [ -f "$DIR/AUDIT_RESPONSE.md" ] || die "experiment has AUDIT.md but no AUDIT_RESPONSE.md (close-audit not triaged) — surface for human"
-    # The gate VERIFIES the close-audit ran and was triaged (both artifacts present). It deliberately does
-    # NOT prose-grep AUDIT_RESPONSE.md for unresolved HIGHs — that heuristic is unreliable (negation/scope
-    # games) and not a real proof. Per-finding HIGH-resolution verification needs a machine-readable triage
-    # status (a documented future hardening); the actual triage is done with discipline in run-experiment's close.
-    APPROVAL_BODY="Experiment record — close-audit ran and was triaged (AUDIT.md + AUDIT_RESPONSE.md present). Verified per registry convention."
-    note "experiment gate ok: close-audit present and triaged"
+    if [ -f "$DIR/AUDIT_RESPONSE.md" ]; then
+      APPROVAL_BODY="Experiment record — close-audit ran and was triaged (AUDIT.md + AUDIT_RESPONSE.md present). Verified per registry convention."
+      note "experiment gate ok: close-audit present and triaged (separate AUDIT_RESPONSE.md)"
+    elif [ -n "$(inline_response_line "$DIR/AUDIT.md")" ]; then
+      APPROVAL_BODY="Experiment record — close-audit ran and was triaged (AUDIT.md with an inline response/triage section). Verified per registry convention."
+      note "experiment gate ok: close-audit present and triaged (inline response section in AUDIT.md)"
+    else
+      die "experiment has AUDIT.md but no triage — add an AUDIT_RESPONSE.md OR an inline response/triage section (e.g. '## Executor responses') in AUDIT.md — surface for human"
+    fi
+    # The gate VERIFIES the close-audit ran and was triaged. It deliberately does NOT prose-grep the responses
+    # for unresolved HIGHs — that heuristic is unreliable (negation/scope games) and not a real proof.
+    # Per-finding HIGH-resolution verification needs a machine-readable triage status (a documented future
+    # hardening); the actual triage is done with discipline in run-experiment's close.
   else
     if grep -qiE '^[^A-Za-z0-9]*((decision|status|outcome|result)[^A-Za-z0-9]+)?(ANCHOR_FAILED|NO[ _-]?GO|GATE[ _]PASS=FALSE|GATE[ _]FAILED?|NULL RESULT|DIAGNOSTIC ONLY|STOPPED AT [A-Za-z0-9 _-]*GATE)' "$DIR/RESULTS.md"; then
       APPROVAL_BODY="Experiment record — eval-only/no-go run; no close-audit needed; RESULTS records a closed decision."
@@ -176,7 +268,7 @@ CREATED_BRANCH=0   # only delete the branch in cleanup if THIS run created it (n
 cleanup() { git worktree remove --force "$WT" >/dev/null 2>&1 || true; [ "$CREATED_BRANCH" = 1 ] && git branch -D "$BRANCH" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 git show-ref --verify --quiet "refs/heads/$BRANCH" && die "local branch $BRANCH already exists (a prior run may have failed) — remove it and retry"
-git worktree add -q -b "$BRANCH" "$WT" origin/main || die "could not create worktree/branch $BRANCH"
+git worktree add -q -b "$BRANCH" "$WT" "origin/$BASE_BRANCH" || die "could not create worktree/branch $BRANCH off origin/$BASE_BRANCH"
 CREATED_BRANCH=1
 
 mkdir -p "$WT/$(dirname "$REL")"
@@ -195,41 +287,52 @@ HEAD_SHA="$(git -C "$WT" rev-parse HEAD)"   # bind the merge to exactly the revi
 # ---- post the already-run audit onto the PR as a browsable thread (additive, best-effort — NOT a re-run) ----
 # A PR review/comment body caps ~65k chars; truncate large bodies (the full file is committed in the PR diff).
 _clip(){ local b; [ -f "$1" ] || return 1; b="$(cat "$1")"; [ -n "$b" ] || return 1; if [ "${#b}" -gt 60000 ]; then b="${b:0:60000}"$'\n\n…truncated; full file in the PR diff.'; fi; printf '%s' "$b"; }
+# post a single findings body (as the reviewer) or triage body (as the author); label is display text, file the source.
+_post_findings(){ local label=$1 file=$2 body; body="$(_clip "$file")" || return 0
+  GH_TOKEN="$TOK" gh pr review "$PR" -R "$RESEARCH_REPO" --comment --body "**${label}**"$'\n\n'"$body" >/dev/null 2>&1 \
+    || note "warn: could not post audit findings ($label) to PR #$PR (gate/merge unaffected)"; }
+_post_triage(){ local label=$1 file=$2 body; body="$(_clip "$file")" || return 0
+  GH_TOKEN="$ATOK" gh pr comment "$PR" -R "$RESEARCH_REPO" --body "**${label}**"$'\n\n'"$body" >/dev/null 2>&1 \
+    || note "warn: could not post author triage ($label) to PR #$PR (gate/merge unaffected)"; }
 post_audit_thread(){
-  local findings=() responses=() f body label
+  local f ln ftmp rtmp
+  local _tmps=()
   case "$KIND" in
-    experiment)   [ -f "$DIR/AUDIT.md" ] && findings=("$DIR/AUDIT.md"); responses=("$DIR/AUDIT_RESPONSE.md") ;;
-    design-stage) for f in "$DIR"/DESIGN_AUDIT*.md; do
-                    [ -f "$f" ] || continue
-                    if [[ "$(basename "$f")" =~ ^DESIGN_AUDIT[0-9]*\.md$ ]]; then findings+=("$f"); fi
-                  done
-                  responses=("$DIR/DESIGN_AUDIT_RESPONSE.md") ;;
+    experiment)
+      [ -f "$DIR/AUDIT.md" ] || return 0
+      if [ -f "$DIR/AUDIT_RESPONSE.md" ]; then
+        # Separate-file form: whole AUDIT.md is reviewer findings; AUDIT_RESPONSE.md is author triage.
+        _post_findings "Cross-family experiment audit — \`AUDIT.md\` (posted by the ${REVIEWER_FAMILY,,}-engineer reviewer):" "$DIR/AUDIT.md"
+        _post_triage   "Author triage — \`AUDIT_RESPONSE.md\` (posted by the ${AUTHOR_FAMILY}-engineer author):"        "$DIR/AUDIT_RESPONSE.md"
+      elif ln="$(inline_response_line "$DIR/AUDIT.md")" && [ -n "$ln" ]; then
+        # Inline form (#263): SPLIT at the response heading so author triage is posted AS author triage, NOT
+        # inside the reviewer's findings body (preserves the findings -> author-responses trail — F4).
+        ftmp="$(mktemp)"; rtmp="$(mktemp)"; _tmps=("$ftmp" "$rtmp")
+        head -n "$((ln - 1))" "$DIR/AUDIT.md" > "$ftmp"    # findings: everything above the response heading
+        tail -n "+$ln"        "$DIR/AUDIT.md" > "$rtmp"    # triage: the response section onward
+        _post_findings "Cross-family experiment audit — \`AUDIT.md\` findings (posted by the ${REVIEWER_FAMILY,,}-engineer reviewer):" "$ftmp"
+        _post_triage   "Author triage — inline response section of \`AUDIT.md\` (posted by the ${AUTHOR_FAMILY}-engineer author):"     "$rtmp"
+      else
+        # No triage section found (the gate would have blocked) — post the whole file as findings, best-effort.
+        _post_findings "Cross-family experiment audit — \`AUDIT.md\` (posted by the ${REVIEWER_FAMILY,,}-engineer reviewer):" "$DIR/AUDIT.md"
+      fi ;;
+    design-stage)
+      for f in "$DIR"/DESIGN_AUDIT*.md; do
+        [ -f "$f" ] || continue
+        if [[ "$(basename "$f")" =~ ^DESIGN_AUDIT[0-9]*\.md$ ]]; then
+          _post_findings "Cross-family design-stage audit — \`$(basename "$f")\` (posted by the ${REVIEWER_FAMILY,,}-engineer reviewer):" "$f"
+        fi
+      done
+      [ -f "$DIR/DESIGN_AUDIT_RESPONSE.md" ] && _post_triage "Author triage — \`DESIGN_AUDIT_RESPONSE.md\` (posted by the ${AUTHOR_FAMILY}-engineer author):" "$DIR/DESIGN_AUDIT_RESPONSE.md" ;;
     *) return 0 ;;   # notes get no audit thread
   esac
-  # reviewer (opposite family) posts each findings file as a native PR review COMMENT
-  if [ ${#findings[@]} -gt 0 ]; then
-    for f in "${findings[@]}"; do
-      body="$(_clip "$f")" || continue
-      label="Cross-family ${KIND} audit — \`$(basename "$f")\` (posted by the ${REVIEWER_FAMILY,,}-engineer reviewer):"
-      GH_TOKEN="$TOK" gh pr review "$PR" -R "$RESEARCH_REPO" --comment --body "**${label}**"$'\n\n'"$body" >/dev/null 2>&1 \
-        || note "warn: could not post audit findings ($(basename "$f")) to PR #$PR (gate/merge unaffected)"
-    done
-  fi
-  # author posts the triage responses as a PR comment
-  if [ ${#responses[@]} -gt 0 ]; then
-    for f in "${responses[@]}"; do
-      body="$(_clip "$f")" || continue
-      label="Author triage — \`$(basename "$f")\` (posted by the ${AUTHOR_FAMILY}-engineer author):"
-      GH_TOKEN="$ATOK" gh pr comment "$PR" -R "$RESEARCH_REPO" --body "**${label}**"$'\n\n'"$body" >/dev/null 2>&1 \
-        || note "warn: could not post author triage ($(basename "$f")) to PR #$PR (gate/merge unaffected)"
-    done
-  fi
+  [ ${#_tmps[@]} -gt 0 ] && rm -f "${_tmps[@]}"
   return 0
 }
 
 # ---- PR -> bot approve -> merge ----
 BODY="$(printf '%s\n\nLogged by log-experiment.sh (gate: %s).' "$APPROVAL_BODY" "$KIND")"
-URL="$(GH_TOKEN="$ATOK" gh pr create -R "$RESEARCH_REPO" --head "$BRANCH" --base main \
+URL="$(GH_TOKEN="$ATOK" gh pr create -R "$RESEARCH_REPO" --head "$BRANCH" --base "$BASE_BRANCH" \
         -t "Log $KIND: $REL" -b "$BODY")"
 PR="$(echo "$URL" | grep -oE '[0-9]+$')"
 note "opened PR #$PR ($URL)"
@@ -238,11 +341,11 @@ GH_TOKEN="$TOK" gh pr review "$PR" -R "$RESEARCH_REPO" --approve --body "$APPROV
 GH_TOKEN="$ATOK" gh pr merge "$PR" -R "$RESEARCH_REPO" --squash --delete-branch --match-head-commit "$HEAD_SHA" >/dev/null
 note "merged PR #$PR (head $HEAD_SHA)"
 
-# ---- sync local main (ff-only, ONLY if this checkout is on main; never touches other uncommitted work) ----
+# ---- sync local base branch (ff-only, ONLY if this checkout is on it; never touches other uncommitted work) ----
 git fetch origin --quiet
-if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
-  git merge --ff-only origin/main >/dev/null 2>&1 || note "local main not fast-forwardable; left as-is"
+if [ "$(git rev-parse --abbrev-ref HEAD)" = "$BASE_BRANCH" ]; then
+  git merge --ff-only "origin/$BASE_BRANCH" >/dev/null 2>&1 || note "local $BASE_BRANCH not fast-forwardable; left as-is"
 else
-  note "checkout is on $(git rev-parse --abbrev-ref HEAD), not main; skipping local sync"
+  note "checkout is on $(git rev-parse --abbrev-ref HEAD), not $BASE_BRANCH; skipping local sync"
 fi
 echo "OK: logged $KIND '$REL' as PR #$PR (merged)."   # the EXIT trap removes the temp worktree + its local branch
