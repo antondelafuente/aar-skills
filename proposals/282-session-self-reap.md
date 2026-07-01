@@ -36,26 +36,36 @@ infrastructure:
 
 **The three changes:**
 
-1. **`run_supervision_record.sh`: add `is-closed <run-id>`** — exit 0 iff the record is `closed`; a
-   missing/corrupt/`stopped`/still-active record is exit 1 (fail-closed). This is the exact predicate for
-   "clean close" and mirrors the existing `is-desired-active`. It is the machine guard that a parked/blocked
-   run (which is *desired-active*, never `closed`) can never be reaped.
+1. **`run_supervision_record.sh`: add `is-closed <run-id>`** — exit 0 iff the record is a **clean close**
+   (`closed == true` AND NOT `stopped`); a missing/corrupt/`stopped`/still-active record is exit 1
+   (fail-closed). The `stopped` exclusion is load-bearing: `cmd_close` allows `stop → close` (finalizing a
+   deliberately-stopped run), and `classify_record` reports such a record as `closed` (it checks `closed`
+   before `stopped`) — so `is-closed` re-reads `stopped` and fails closed on it, ensuring only the *auto-close*
+   path is reapable, never a deliberate-quit finalize and never a parked/blocked (desired-active) run. Mirrors
+   the existing `is-desired-active`.
 
 2. **New product helper `scripts/reap_session.sh <run-id>`** — the substrate-neutral reap, invoked as the
    terminal close action:
    - **Guard (fail-closed):** require `is-closed <run-id>`; otherwise refuse and exit non-zero **without
      reaping** (a parked/blocked/active/unknown run is never reaped).
    - **Resolve the handle:** `session-handle <run-id>`; if unset/empty → nothing to reap, exit 0.
-   - **Invoke the instance seam:** if `EXPERIMENT_SESSION_REAP_CMD` is set, exec it with the opaque handle as
-     the sole argument (`$EXPERIMENT_SESSION_REAP_CMD "$handle"`) — this is the terminal action, nothing runs
+   - **Invoke the self-only instance seam:** if `EXPERIMENT_SESSION_REAP_CMD` is set, exec it with the opaque
+     handle as the sole argument (`$EXPERIMENT_SESSION_REAP_CMD "$handle"`) — the terminal action, nothing runs
      after it. **No tmux, no session-name convention, nothing instance-specific is hardcoded in the product.**
+     This is **self-reap**: the seam command MUST verify the *current* session's own identity matches the
+     handle before killing anything, and **fail closed on a mismatch** — so a stale or misbound `session_handle`
+     reaps NOTHING, never a peer's reused session. The product cannot check instance identity, so this
+     guarantee lives in the seam contract; the helper only ever invokes it from *within* the closing session.
    - **Unset seam → documented no-op:** if `EXPERIMENT_SESSION_REAP_CMD` is unset, log one line and exit 0.
      This is what makes the product change safe to land before any instance wires the seam, and keeps every
      other instance (and the fake-HOME smoke) working unchanged.
 
    The seam is an env-var indirection, the same style as `gpu-job`'s `API_KEY_ENV` / the reaper's provider
-   command — the instance exports `EXPERIMENT_SESSION_REAP_CMD` (via its execution profile / `~/.config`) to
-   point at its own killer (on this box: `tmux kill-session` keyed on the handle). That instance wiring is a
+   command. It is an **instance MODULE seam resolved LIVE at close** — like the deploy-account teardown key,
+   and explicitly **NOT** a field frozen into the `START.md` brief: the reap command is instance-wide, not
+   experiment-specific, so it must never be snapshotted per-run. The instance exports
+   `EXPERIMENT_SESSION_REAP_CMD` (env / `~/.config/experiment-lifecycle/`) to point at its own killer (on this
+   box: a `tmux kill-session` wrapper that self-identifies and asserts self==handle). That instance wiring is a
    box change, out of scope for this product PR.
 
 3. **`SKILL.md` Step 5: add the close step** — "**Reap your session (the terminal action).**" Placed *after*
@@ -66,9 +76,13 @@ infrastructure:
    quick-reference. The step invokes `reap_session.sh <run-id>`; if the instance has no session-teardown seam,
    it is a no-op.
 
-Version-bump `experiment-lifecycle`'s `plugin.json` (behavior change). The fake-HOME smoke gains coverage for
-the two product-side behaviors that don't depend on any instance: `reap_session.sh` **no-ops** when the seam is
-unset, and **refuses** (non-zero, no invocation) when the record is not `closed`.
+Version-bump `experiment-lifecycle`'s `plugin.json` (behavior change). Behavior coverage lives in **dedicated
+helper smokes** (matching the record/lease/reaper smoke convention, not the fake-HOME install/discovery smoke):
+`run_supervision_record_smoke.sh` is extended for `is-closed` (incl. the `stop → close` = not-reapable case),
+and a new `reap_session_smoke.sh` covers the clean-close guard, the no-handle / unset-seam no-ops, and the
+self-only seam invocation passing the exact handle (via a stub seam — no real session is killed). Both are
+wired into `.aar-ci/checks.sh` with the same "helper or its smoke changed → run it, missing smoke → fail"
+trigger as the existing record smoke.
 
 ## Alternatives considered
 
@@ -89,13 +103,35 @@ unset, and **refuses** (non-zero, no invocation) when the record is not `closed`
 
 ## Blast radius
 
-Product scaffold (`experiment-lifecycle` plugin): one new small helper (`reap_session.sh`), one new subcommand
-(`is-closed`) on an existing helper, prose additions to `run-experiment/SKILL.md`, a `plugin.json` version
-bump, and fake-HOME smoke coverage. **Behavior is a no-op on every instance that does not set
+Product scaffold (`experiment-lifecycle` plugin): one new small helper (`reap_session.sh` + its
+`reap_session_smoke.sh`), one new subcommand (`is-closed`) on an existing helper (+ extended
+`run_supervision_record_smoke.sh`), a new `.aar-ci/checks.sh` smoke trigger, prose additions to
+`run-experiment/SKILL.md`, and a `plugin.json` version bump. **Behavior is a no-op on every instance that does
+not set
 `EXPERIMENT_SESSION_REAP_CMD`** — including the smoke harness — so nothing existing changes until an instance
 opts in. No change to pod teardown, the audit gates, `log-experiment`, or the supervision record's existing
 states. The instance-side reap command (tmux) and the periodic janitor are **out of scope** (box change +
 tracked fast-follow).
+
+## Design review response
+
+Cross-family `--scaffold` review raised 1 HIGH, 2 MED, 1 LOW — all **accepted** and folded into the design
+above:
+
+- **HIGH (right seam / abstraction):** the seam could kill any recorded handle, so a stale/misbound
+  `session_handle` might reap a peer. Accepted — the seam is now specified as **self-only**: the instance
+  command must verify current-session identity against the handle and fail closed on a mismatch (Approach
+  item 2).
+- **MED (contract clarity):** `is-closed` was ambiguous for a record that is both `stopped` and `closed` (the
+  `stop → close` finalize), which `classify_record` reports as `closed`. Accepted — `is-closed` is now
+  `closed && !stopped`, with smoke covering the transition (Approach item 1). This was a real bug in the draft
+  helper.
+- **MED (contract clarity):** the `EXPERIMENT_SESSION_REAP_CMD` seam was loosely tied to the execution
+  profile. Accepted — reframed as an instance **module seam resolved live at close** (like the teardown key),
+  explicitly not a frozen `START.md` field (Approach item 3).
+- **LOW (convention match):** behavior coverage belonged in dedicated helper smokes, not the fake-HOME smoke.
+  Accepted — extended `run_supervision_record_smoke.sh` and added `reap_session_smoke.sh`, both wired into
+  `.aar-ci/checks.sh`.
 
 ## Rollout + rollback
 

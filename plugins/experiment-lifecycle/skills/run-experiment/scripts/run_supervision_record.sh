@@ -41,6 +41,9 @@
 #              record is exit 1 — fail-closed, an unknown run is never resurrected).
 #   is-relaunch-requested -> exit 0 iff a relaunch is requested AND the run is still desired-active;
 #              else exit 1 (a stopped/closed/missing/corrupt record is exit 1 — fail-closed).
+#   is-closed -> exit 0 iff the record is terminal `closed` (run finished cleanly); else exit 1
+#              (absent/invalid/stopped/active all fail closed). The reap guard: only a finished run is
+#              reapable, so a parked/blocked (desired-active) run's session is never torn down.
 #   session-handle -> print the opaque instance handle ("" + exit 1 if unset/missing).
 #
 # CONCURRENCY: every mutation takes a per-record flock for the whole read-modify-write window, and
@@ -57,6 +60,7 @@
 #   run_supervision_record.sh clear-relaunch   <run-id>
 #   run_supervision_record.sh is-desired-active     <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh is-relaunch-requested <run-id>  # exit 0/1, no output
+#   run_supervision_record.sh is-closed             <run-id>  # exit 0/1, no output (0 iff finished/closed)
 #   run_supervision_record.sh session-handle        <run-id>  # print opaque handle (exit 1 if unset)
 #   run_supervision_record.sh status <run-id>               # compact checklist evidence
 #   run_supervision_record.sh show   <run-id>                # print the JSON (debug)
@@ -431,6 +435,23 @@ cmd_is_relaunch_requested(){
   exit 1
 }
 
+# is-closed: exit 0 iff the record is a CLEAN close — closed==true AND NOT also stopped. exit 1 otherwise.
+# absent/invalid/active fail closed via classify_record; a `stopped`-then-`closed` record (the deliberate-quit
+# finalize — cmd_close allows stop->close, and classify_record collapses it to "closed") ALSO fails closed,
+# because the reap guard must reap only the auto-close path, never a deliberately-stopped run and never a
+# parked/blocked (desired-active) one. This is the machine guard behind session self-reap: reap_session.sh
+# requires it.
+cmd_is_closed(){
+  local id=$1; local file; file=$(record_path "$id")
+  local state; state=$(classify_record "$file")
+  [ "$state" = "closed" ] || exit 1
+  # classify_record returns "closed" for a record that is BOTH stopped and closed (closed is checked first);
+  # a clean close is closed WITHOUT stopped, so re-read stopped and fail closed if it is also set.
+  local stopped; stopped=$(get_field "$file" stopped)
+  [ "$stopped" = "true" ] && exit 1
+  exit 0
+}
+
 # session-handle: print the opaque instance-owned session handle for this run; exit 1 (no output) if the
 # record or the handle is absent. The product never interprets the value — it is the instance's binding
 # from this run-id to whatever process/session it owns (tmux name, systemd unit, pid-file path, …).
@@ -489,15 +510,15 @@ main(){
   local sub=${1:-}; shift || true
   local id=${1:-}
   case "$sub" in
-    create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|status|show)
+    create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|status|show)
       validate_id "$id"; shift;;
-    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|session-handle|status|show> <run-id> [...]";;
+    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|status|show> <run-id> [...]";;
     *) die "unknown subcommand '$sub'";;
   esac
   # commands that take NO further args must reject surplus tokens — a malformed wrapper call must fail
   # closed, especially before a terminal mutation, not silently stop/close a run.
   case "$sub" in
-    stop|close|clear-relaunch|status|show|is-desired-active|is-relaunch-requested|session-handle)
+    stop|close|clear-relaunch|status|show|is-desired-active|is-relaunch-requested|is-closed|session-handle)
       [ $# -eq 0 ] || die "$sub: unexpected extra argument(s): $*";;
   esac
   case "$sub" in
@@ -512,6 +533,7 @@ main(){
     # the is-* predicates + session-handle exit 0/1 from inside with_lock; preserve that exit code
     is-desired-active)     with_lock "$id" cmd_is_desired_active     "$id";;
     is-relaunch-requested) with_lock "$id" cmd_is_relaunch_requested "$id";;
+    is-closed)             with_lock "$id" cmd_is_closed             "$id";;
     session-handle)        with_lock "$id" cmd_session_handle        "$id";;
     status)                with_lock "$id" cmd_status           "$id";;
     show)                  with_lock "$id" cmd_show             "$id";;

@@ -251,9 +251,20 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   feedback guidance. Include the design-feedback: list the gaps you hit (mechanical defaults invented +
   load-bearing flags). Too many = the brief was under-pinned → feeds back to `design-experiment`. A clean run files
   little.
-- **Self-audit the close (last step — verify state, not your memory of doing it).** Re-CHECK by inspection: artifacts
-  listed in the store, ledger has BOTH launch + done events, compute gone per the control plane of the deploying
+- **Self-audit the close (the last verification — verify state, not your memory of doing it).** Re-CHECK by inspection:
+  artifacts listed in the store, ledger has BOTH launch + done events, compute gone per the control plane of the deploying
   account, `RESULTS.md` committed + pushed, waker + marker cleared. "I ran the step" ≠ "the state is right."
+- **Reap your session — the TERMINAL action (free the process, symmetric with pod-teardown).** A finished executor
+  session is a ~300–530 MB zombie until reaped; on a small box a batch day of them OOMs the cross-family audits. As the
+  VERY LAST thing — once the close is durably done and self-audited — reap your own session:
+  `run_supervision_record.sh` scripts' `reap_session.sh <run-id>`. It fires **only on a clean close** (the record is
+  `closed` and not `stopped`, via `is-closed`): a **parked / blocked** run is desired-active, never `closed`, so its
+  session is KEPT for resume (only its pod was torn down) — this step never reaps it. It reads the record's opaque
+  `session_handle` and hands it to your instance's **session-teardown seam** (`EXPERIMENT_SESSION_REAP_CMD` — resolved
+  LIVE at close like the deploy-account teardown key, NOT a frozen `START.md` field). The seam is **self-only**: it must
+  verify the current session matches the handle and fail closed on a mismatch, so a stale/misbound handle reaps nothing,
+  never a peer. **No seam configured → a logged no-op** (the deferred session-janitor is the backstop). The **transcript
+  persists on disk** (resumable) — this frees the process, not the record. Nothing runs after this by design.
 
 ---
 
@@ -297,6 +308,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Kill-on-completion is the default.** Tear down once the upload is *verified* (every unique artifact). Keep one unit
   running only for a concrete queued follow-up (expiry-stamped). Log run + teardown.
 - Teardown is **unit-id-scoped** and uses the **deploying account's key** — never blanket-delete idle compute.
+- **Reap your session at a clean close** — symmetric with pod-teardown: the finished executor frees its own process as
+  the terminal action (`reap_session.sh`), only on a clean `close`, via the self-only instance seam. A parked/blocked
+  run keeps its session for resume; no seam configured is a no-op.
 - **Don't redesign** — the brief is locked; design questions go to the designer-of-record.
 
 ## Reference
