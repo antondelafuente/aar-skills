@@ -59,7 +59,8 @@ antondelafuente/research-lab …`) to (a) repoint / repair the broken
 `registry/pipelines/lib/deploy_pod.py` symlink at the canonical's real current location and (b) retire the
 historical per-experiment `toy_action_faithfulness/deploy_pod.py` forks. This is deliberately a **separate
 repo's** work: the ship-change close-gate rejects a cross-repo `Closes`, and the forks are low-priority
-history. Filed as **research-lab#50** (`ready`) — a plain mention here, not a `Closes` (cross-repo).
+history. Filed as **antondelafuente/research-lab#50** (`ready`) — a plain mention here, not a `Closes`
+(cross-repo).
 
 The reconcile step (#297 scope item 2) is **complete in the finding itself**: the diff between the canonical
 and `research-lab/registry/pipelines/lib/deploy_pod.py` is empty because the latter is a symlink, and the
