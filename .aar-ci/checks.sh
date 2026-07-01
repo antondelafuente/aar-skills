@@ -222,6 +222,19 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   fi
 fi
 
+# 10b. session self-reap smoke (#282): the clean-close guard (only closed-AND-not-stopped reaps), the
+#     no-handle / unset-seam no-ops, and the self-only seam invocation passing the opaque handle — behavior
+#     the JSON/syntax checks can't cover. Runs when the helper or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/scripts/reap_session(_smoke)?\.sh$'; then
+  RS_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/reap_session_smoke.sh"
+  if [ -f "$RS_SMOKE" ]; then
+    echo "[checks] session self-reap smoke" >&2
+    bash "$RS_SMOKE" >&2 && ok "reap_session smoke" || err "reap_session smoke FAILED"
+  else
+    err "reap_session.sh changed but reap_session_smoke.sh missing — cannot verify the reap helper"
+  fi
+fi
+
 # 11. pod-lease + reaper smoke (#169): the 3-phase create + expiry-driven is-reapable + the locked
 #     reap (refresh-vs-reap race) + report-unknown-never-delete + unresolved-key report-only + legacy
 #     keepalive (future/inconclusive/past) + dry-run — behavior the JSON/syntax checks can't cover.

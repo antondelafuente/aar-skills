@@ -94,6 +94,24 @@ if run stop r5 >/dev/null 2>&1; then no restop-after-close-refused; else ok rest
 run create r6 >/dev/null; run close r6 >/dev/null
 run close r6 >/dev/null && ok close-idempotent || no close-idempotent        # already closed -> no-op success
 
+# --- is-closed: the session-reap guard — exit 0 ONLY on a CLEAN close (closed AND NOT stopped) ---
+closed(){ run is-closed "$1"; }                                    # exit 0 = clean close (reapable), 1 = not
+run create ic_active --handoff /art/ic/TEMP.md >/dev/null
+if closed ic_active; then no isclosed-active-no; else ok isclosed-active-no; fi         # active -> NOT reapable
+run create ic_clean >/dev/null; run close ic_clean >/dev/null
+if closed ic_clean; then ok isclosed-clean-yes; else no isclosed-clean-yes; fi          # clean close -> reapable
+run create ic_stop >/dev/null; run stop ic_stop >/dev/null
+if closed ic_stop; then no isclosed-stopped-no; else ok isclosed-stopped-no; fi         # stopped-only -> NOT reapable
+# design-review finding 2: a stop -> close record classifies as "closed" (closed-before-stopped) but is a
+# deliberate-quit finalize, NOT a clean close -> is-closed MUST fail closed so its session is never reaped.
+run create ic_sc >/dev/null; run stop ic_sc >/dev/null; run close ic_sc >/dev/null
+if closed ic_sc; then no isclosed-stopclose-no; else ok isclosed-stopclose-no; fi
+# missing + corrupt fail closed; surplus arg rejected
+if closed nonesuch; then no isclosed-missing-no; else ok isclosed-missing-no; fi
+printf 'not json{' > "$TMP/ic_broken.json"
+if closed ic_broken; then no isclosed-corrupt-no; else ok isclosed-corrupt-no; fi
+if run is-closed ic_clean extra >/dev/null 2>&1; then no isclosed-surplus-rejected; else ok isclosed-surplus-rejected; fi
+
 # --- RACE: many concurrent updates against a stop must never re-activate the run (Finding 1) ---
 run create rc --handoff /art/rc/TEMP.md >/dev/null
 for i in $(seq 1 40); do run update rc --lease-pod "p$i" >/dev/null 2>&1 & done
