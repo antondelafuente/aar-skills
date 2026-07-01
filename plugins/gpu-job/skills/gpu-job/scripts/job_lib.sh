@@ -69,20 +69,30 @@ serve_wait(){ # serve_wait <port> [max-iter=480] — wait (5s steps) until a vLL
 # r2_copy for ANY tree/HF-cache copy instead of raw `rclone copy`.
 
 r2_copy(){ # r2_copy <src> <dst> [extra rclone args…] — hardened tree/HF-cache copy. ALWAYS follows
-           # symlinks (-L injected, a caller can't omit it) so link targets land as real bytes, and
-           # treats ANY `Can't follow symlink` NOTICE as an INCOMPLETE copy → returns non-zero WITH a
-           # directed message even when rclone itself exited 0 (the swallow that made a bare copy read
-           # as success). Propagates rclone's own non-zero exit too. Output streams live (tee) so a
-           # long copy still shows progress.
+           # symlinks (-L, appended LAST so a caller flag can't override it) so link targets land as
+           # real bytes, and treats ANY `Can't follow symlink` NOTICE as an INCOMPLETE copy → returns
+           # non-zero WITH a directed message even when rclone itself exited 0 (the swallow that made a
+           # bare copy read as success). Propagates rclone's own non-zero exit too. Output streams live
+           # (tee) so a long copy still shows progress. REJECTS symlink-defeating flags (--skip-links,
+           # -l/--links, --copy-links=false) — they'd silence the NOTICE the guarantee rests on.
   local src=$1 dst=$2; shift 2
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -l|--links|--skip-links|--no-copy-links|--copy-links=false|--copy-links=FALSE|--copy-links=0)
+        echo "r2_copy: refusing symlink-defeating flag '$a' — r2_copy MUST follow symlinks (-L) and surface skip NOTICEs. Drop it, or call raw rclone if you truly intend it." >&2
+        return 1 ;;
+    esac
+  done
   local log rc notice=0
   log=$(mktemp)
   # Capture rclone's status via PIPESTATUS so the result is correct with OR without `pipefail`; guard
   # errexit around the pipe so a non-zero rclone doesn't exit the caller before we surface the message
-  # (restore the caller's errexit exactly — never force it on/off).
+  # (restore the caller's errexit exactly — never force it on/off). -L is LAST so it wins over any
+  # earlier caller-supplied copy-links flag (belt-and-suspenders beyond the reject-list above).
   local restore_e=; case $- in *e*) restore_e='set -e';; esac
   set +e
-  rclone copy -L "$src" "$dst" "$@" 2>&1 | tee "$log"
+  rclone copy "$src" "$dst" "$@" -L 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
   $restore_e
   grep -qi "can't follow symlink" "$log" && notice=1

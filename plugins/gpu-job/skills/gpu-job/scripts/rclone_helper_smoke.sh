@@ -61,6 +61,13 @@ if grep -q -- '--transfers=8' "$ARGS" && grep -q -- '--checkers=8' "$ARGS"; then
 # --- 4. rclone's own non-zero exit is propagated (no NOTICE) -----------------------------------------
 if RCLONE_COPY_MODE=fail r2_copy /src /dst >/dev/null 2>&1; then no propagates-nonzero-exit; else ok propagates-nonzero-exit; fi
 
+# --- 4b. symlink-defeating flags are REJECTED before rclone runs (they'd silence the NOTICE) ---------
+: > "$ARGS"
+if RCLONE_COPY_MODE=ok r2_copy /src /dst --skip-links >/dev/null 2>&1; then no rejects-skip-links; else ok rejects-skip-links; fi
+[ ! -s "$ARGS" ] && ok reject-precedes-rclone || no "reject-precedes-rclone (rclone ran: $(cat "$ARGS"))"
+if RCLONE_COPY_MODE=ok r2_copy /src /dst --copy-links=false >/dev/null 2>&1; then no rejects-copy-links-false; else ok rejects-copy-links-false; fi
+if RCLONE_COPY_MODE=ok r2_copy /src /dst -l >/dev/null 2>&1; then no rejects-links-short; else ok rejects-links-short; fi
+
 # --- 5. r2_exists: true when the name is in the DIR listing, false when absent -----------------------
 if RCLONE_LSF_OUT=$'model-00001.safetensors\nmodel-00002.safetensors\n' r2_exists r2:bucket/dir model-00002.safetensors; then ok exists-true; else no exists-true; fi
 if RCLONE_LSF_OUT=$'model-00001.safetensors\n' r2_exists r2:bucket/dir model-00002.safetensors; then no exists-false-when-absent; else ok exists-false-when-absent; fi
